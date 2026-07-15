@@ -69,9 +69,9 @@ def run_single(run_parent: Path, optimizer_name: str, seed: int, cfg: Experiment
             vx, vy = val_reader.next_batch(cfg.train.batch_size)
             vlogits, vloss = model(torch.tensor(vx), torch.tensor(vy)); assert vloss is not None
             tlogits, tloss = model(x, y); assert tloss is not None
-        tm=_metrics(float(tloss), tlogits, y); vm=_metrics(float(vloss), vlogits, torch.tensor(vy))
-        elapsed=time.perf_counter()-start; last_loss=float(vloss)
-        metric_rows.append({"step": step, "tokens_processed": step*cfg.train.batch_size*model_cfg.block_size, "elapsed_time": elapsed, "learning_rate": cfg.train.learning_rate, "gradient_norm": float(grad), "train_minibatch_loss": float(loss), "train_loss": tm["loss"], "val_loss": vm["loss"], "train_perplexity": tm["perplexity"], "val_perplexity": vm["perplexity"], "train_bits_per_token": tm["bits_per_token"], "val_bits_per_token": vm["bits_per_token"], "train_top1_accuracy": tm["top1_accuracy"], "val_top1_accuracy": vm["top1_accuracy"], "train_top5_accuracy": tm["top5_accuracy"], "val_top5_accuracy": vm["top5_accuracy"], "train_token_error": tm["token_error"], "val_token_error": vm["token_error"], "generalization_gap": vm["loss"]-tm["loss"], "tokens_per_second": (step*cfg.train.batch_size*model_cfg.block_size)/max(elapsed,1e-9), "examples_per_second": (step*cfg.train.batch_size)/max(elapsed,1e-9), "weightwatcher_overhead": 0.0, "projection_overhead": proj_time, "peak_memory": 0.0})
+        tm=_metrics(float(tloss.detach()), tlogits, y); vm=_metrics(float(vloss.detach()), vlogits, torch.tensor(vy))
+        elapsed=time.perf_counter()-start; last_loss=float(vloss.detach())
+        metric_rows.append({"step": step, "tokens_processed": step*cfg.train.batch_size*model_cfg.block_size, "elapsed_time": elapsed, "learning_rate": cfg.train.learning_rate, "gradient_norm": float(grad.detach()), "train_minibatch_loss": float(loss.detach()), "train_loss": tm["loss"], "val_loss": vm["loss"], "train_perplexity": tm["perplexity"], "val_perplexity": vm["perplexity"], "train_bits_per_token": tm["bits_per_token"], "val_bits_per_token": vm["bits_per_token"], "train_top1_accuracy": tm["top1_accuracy"], "val_top1_accuracy": vm["top1_accuracy"], "train_top5_accuracy": tm["top5_accuracy"], "val_top5_accuracy": vm["top5_accuracy"], "train_token_error": tm["token_error"], "val_token_error": vm["token_error"], "generalization_gap": vm["loss"]-tm["loss"], "tokens_per_second": (step*cfg.train.batch_size*model_cfg.block_size)/max(elapsed,1e-9), "examples_per_second": (step*cfg.train.batch_size)/max(elapsed,1e-9), "weightwatcher_overhead": 0.0, "projection_overhead": proj_time, "peak_memory": 0.0})
         for lid,(name,w) in enumerate(matrix_modules(model)):
             rec=asdict(spectral_summary(name,w)); rec.update({"layer_id": lid, "step": step, "optimizer": optimizer_name, "seed": seed}); spectral_rows.append(rec)
         torch.save({"model": model.state_dict(), "step": step}, ckpt / f"latest_step_{step:06d}_{seed}.pt")
@@ -85,12 +85,14 @@ def run_single(run_parent: Path, optimizer_name: str, seed: int, cfg: Experiment
 
 
 def smoke(root: Path, steps: int = 3, seeds: list[int] | None = None) -> Path:
+    run_seeds = seeds or [1337]
     smoke_dir=unique_dir(root, "wwgpt_smoke_invalid")
     text=("WeightWatcher PGD smoke corpus. This is not Tiny Shakespeare and is invalid for science. "*400).split(".")
     cfg=ExperimentConfig(model=ModelConfig(n_layer=1,n_head=1,n_embd=32,block_size=16,vocab_size=128), train=TrainConfig(batch_size=2, max_steps=steps, eval_interval=1), wwpgd=WWPGDConfig(enabled=True, strength=0.01))
     data=prepare_local_text(smoke_dir / "data", [t+"." for t in text], min_train_tokens=steps*cfg.train.batch_size*cfg.model.block_size*2+1)
     pair_parent=smoke_dir / "level_00" / "pair_smoke"
-    torch.manual_seed(seeds[0] if seeds else 1337); init=GPT(ModelConfig(**{**asdict(cfg.model), "vocab_size": data.vocab_size})).state_dict()
-    for opt in ["adamw", "adamw_wwpgd"]:
-        run_single(pair_parent, opt, seeds[0] if seeds else 1337, cfg, data.train, data.val, "pair_smoke", steps, init)
+    for seed in run_seeds:
+        torch.manual_seed(seed); init=GPT(ModelConfig(**{**asdict(cfg.model), "vocab_size": data.vocab_size})).state_dict()
+        for opt in ["adamw", "adamw_wwpgd"]:
+            run_single(pair_parent, opt, seed, cfg, data.train, data.val, f"pair_smoke_seed_{seed}", steps, init)
     return smoke_dir
