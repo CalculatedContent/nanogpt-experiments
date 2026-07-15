@@ -1,0 +1,2 @@
+This is a small local corpus for smoke testing only.
+It is invalid for scaling-law scientific conclusions.

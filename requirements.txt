@@ -1,0 +1,13 @@
+numpy
+pandas
+matplotlib
+PyYAML
+torch
+datasets
+tokenizers
+jupyterlab
+nbformat
+scipy
+weightwatcher
+pytest
+ruff
