@@ -10,7 +10,7 @@ import torch
 
 from wwgpt.analysis import analyze_results, completed_runs, summary
 from wwgpt.config import ModelConfig
-from wwgpt.data import NonRepeatingTokenReader, prepare_local_text, split_for_doc
+from wwgpt.data import NonRepeatingTokenReader, prepare_local_text, prepare_scientific_data, split_for_doc
 from wwgpt.model import GPT
 from wwgpt.scaling import is_non_collinear, plan_budget
 from wwgpt.train import smoke
@@ -102,6 +102,32 @@ def test_smoke_runs_all_requested_seeds(tmp_path: Path):
     manifests = [json.loads((r / "manifest.json").read_text()) for r in runs]
     assert sorted({m["seed"] for m in manifests}) == [11, 22, 33]
     assert all(m["pair_id"] == f"pair_invalid_seed_{m['seed']}" for m in manifests)
+
+
+def test_prepare_scientific_data_logs_progress(tmp_path: Path, capsys):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("""
+model:
+  n_layer: 1
+  n_head: 1
+  n_embd: 8
+  block_size: 8
+  vocab_size: 64
+train:
+  batch_size: 2
+  gradient_accumulation: 1
+""")
+    docs = []
+    i = 0
+    while sum(1 for d in docs if split_for_doc(d) == "train") < 350 or sum(1 for d in docs if split_for_doc(d) == "val") < 10:
+        docs.append(f"scientific logging fixture document {i} " + ("abc xyz " * 30))
+        i += 1
+    prepared = prepare_scientific_data(tmp_path, 0, 1, cfg, docs, min_validation_tokens=1)
+    stderr = capsys.readouterr().err
+    assert prepared.root is not None
+    assert "[wwgpt prepare-data] starting" in stderr
+    assert "training BPE tokenizer" in stderr
+    assert "wrote train_tokens.npy" in stderr
 
 
 def test_notebooks_parse():
