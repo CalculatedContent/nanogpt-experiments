@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "$#" -ne 3 ]; then echo "usage: $0 LEVEL DATA_ROOT TOKEN_MULTIPLIER"; exit 2; fi
-echo "Preparing append-only data under $2"
-wwgpt prepare-data --max-level "$1" --data-root "$2" --dataset fineweb_edu --token-multiplier "$3"
+if [ "$#" -ne 3 ]; then echo "usage: $0 LEVEL DATA_ROOT TOKEN_MULTIPLIER" >&2; exit 2; fi
+LEVEL="$1"; DATA_ROOT="$2"; TOKEN_MULTIPLIER="$3"
+wwgpt prepare-data --level "$LEVEL" --data-root "$DATA_ROOT" --token-multiplier "$TOKEN_MULTIPLIER"
