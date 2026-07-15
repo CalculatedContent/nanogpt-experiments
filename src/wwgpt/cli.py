@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import sys
 
 from wwgpt.analysis import analyze_results
 from wwgpt.config import DEFAULT_SEEDS
@@ -24,7 +26,13 @@ def main() -> None:
     args=p.parse_args()
     if args.cmd=="smoke-test": print(smoke(args.root, args.steps))
     elif args.cmd=="analyze-results": print(analyze_results(args.results_root))
-    elif args.cmd=="prepare-data": print(prepare_scientific_data(args.data_root, args.level, args.token_multiplier, args.config).root)
+    elif args.cmd=="prepare-data":
+        print(prepare_scientific_data(args.data_root, args.level, args.token_multiplier, args.config).root, flush=True)
+        sys.stderr.flush()
+        sys.stdout.flush()
+        # Some streaming dataset backends can leave non-daemon workers alive after all artifacts
+        # have been written. Exit the CLI process deterministically so shell wrappers can finish.
+        os._exit(0)
     elif args.cmd=="run-multiseed": print(run_multiseed_scientific(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),args.config,args.device,args.ww_interval,args.eval_interval,args.checkpoint_interval))
     elif args.cmd=="plan-scaling": print(plan_budget(args.params,args.token_multiplier,args.batch_size,args.block_size,args.grad_accum,args.available_tokens))
 
