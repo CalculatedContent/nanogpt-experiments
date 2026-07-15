@@ -1,0 +1,19 @@
+parameter_count_convention: total
+dataset_name: HuggingFaceFW/fineweb-edu
+dataset_config: sample-10BT
+dataset_revision: main
+model:
+  n_layer: 2
+  n_head: 1
+  n_embd: 64
+  block_size: 256
+  vocab_size: 8192
+train:
+  batch_size: 8
+  gradient_accumulation: 1
+  learning_rate: 0.0003
+  weight_decay: 0.1
+wwpgd:
+  enabled: true
+  target_alpha: 2.0
+  strength: 0.02

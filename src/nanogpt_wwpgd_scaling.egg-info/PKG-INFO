@@ -1,3 +1,24 @@
+Metadata-Version: 2.4
+Name: nanogpt-wwpgd-scaling
+Version: 0.1.0
+Summary: Append-only nanoGPT AdamW vs WW-PGD scaling experiments
+License: MIT
+Requires-Python: <3.13,>=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: matplotlib
+Requires-Dist: PyYAML
+Requires-Dist: torch
+Requires-Dist: datasets
+Requires-Dist: tokenizers
+Requires-Dist: jupyterlab
+Requires-Dist: nbformat
+Requires-Dist: scipy
+Requires-Dist: weightwatcher
+Dynamic: license-file
+
 # nanoGPT WW-PGD Scaling
 
 This repository provides an append-only framework for controlled nanoGPT experiments comparing AdamW with AdamW plus a repository-defined WeightWatcher-informed projected-gradient step (WW-PGD). The scientific question is whether WW-PGD preserves or improves validation loss, perplexity, next-token accuracy, token error, generalization gap, overfitting behavior, and movement of matrix spectral exponents toward alpha near 2.

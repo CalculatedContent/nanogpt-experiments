@@ -1,0 +1,2 @@
+[console_scripts]
+wwgpt = wwgpt.cli:main
