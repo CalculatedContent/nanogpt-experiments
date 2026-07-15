@@ -16,13 +16,3 @@
 - PASS: a second smoke run created `/tmp/wwgpt_smoke_invalid_20260715-050058_8fc346ea`, distinct from the first output directory.
 
 Known validation limitations: this is an implementation smoke validation only. It does not constitute scientific evidence about WW-PGD, FineWeb-EDU scaling, or five-seed statistical conclusions.
-
-## 2026-07-15 20:13 UTC — Level-0 scientific path repair
-
-- Root cause: public data and multiseed commands routed through smoke-only local character-token data and smoke training, so generated runs were explicitly invalid for science.
-- Files changed: src/wwgpt/cli.py, src/wwgpt/data.py, src/wwgpt/train.py, src/wwgpt/ww.py, src/wwgpt/analysis.py, scripts/download_data.sh, scripts/run_five_seeds.sh, scripts/run_full_experiment.sh, scripts/analyze_five_seeds.sh, tests/test_core.py, pyproject.toml, VALIDATION.md.
-- Backup path: backups/20260715-200610/.
-- Test results: ruff check . passed; pytest -q passed with 14 tests and one nbformat warning about missing notebook cell ids.
-- Integration-test results: a tiny fixture-backed scientific orchestration run completed one seed pair under /tmp/wwgpt_fixture_20260715_2013/results without labeling it as a real scientific result.
-- Smoke routing check: the scientific public scripts now call wwgpt prepare-data, wwgpt run-multiseed, and wwgpt analyze-results with explicit scientific arguments; grep for the prohibited smoke routing strings in the scientific scripts and src/wwgpt returned no matches.
-- Known limitations: the full FineWeb-Edu five-seed Level-0 experiment was intentionally not launched; scientific spectral analysis requires the WeightWatcher package to import successfully in the runtime environment.

@@ -25,7 +25,3 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501", "E701", "E702", "E703", "F401", "I001"]
-
-[tool.pytest.ini_options]
-pythonpath = ["src"]
-norecursedirs = ["backups"]

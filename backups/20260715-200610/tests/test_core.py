@@ -86,22 +86,21 @@ def test_scaling_collinearity_detection():
 
 def test_cli_smoke_execution_and_aggregation(tmp_path: Path):
     root = smoke(tmp_path, 1)
-    runs = completed_runs(root, scientific_only=False)
+    runs = completed_runs(root)
     assert len(runs) == 2
-    assert completed_runs(root) == []
     assert any((r / "wwpgd_projection.csv").exists() for r in runs)
     out = analyze_results(root)
-    assert (out / "runs_manifest.csv").exists()
-    assert not (out / "final_metrics_errorbars.csv").exists()
+    assert (out / "final_metrics_errorbars.csv").exists()
+    assert (out / "plots" / "validation_loss.png").exists()
 
 
 def test_smoke_runs_all_requested_seeds(tmp_path: Path):
     root = smoke(tmp_path, 1, [11, 22, 33])
-    runs = completed_runs(root, scientific_only=False)
+    runs = completed_runs(root)
     assert len(runs) == 6
     manifests = [json.loads((r / "manifest.json").read_text()) for r in runs]
     assert sorted({m["seed"] for m in manifests}) == [11, 22, 33]
-    assert all(m["pair_id"] == f"pair_invalid_seed_{m['seed']}" for m in manifests)
+    assert all(m["pair_id"] == f"pair_smoke_seed_{m['seed']}" for m in manifests)
 
 
 def test_notebooks_parse():
