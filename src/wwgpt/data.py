@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Iterable
@@ -80,6 +82,10 @@ def _hash_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
+def _log_prepare_progress(message: str) -> None:
+    print(f"[wwgpt prepare-data] {message}", file=sys.stderr, flush=True)
+
+
 def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, config_path: Path | None = None, docs: Iterable[str] | None = None, min_validation_tokens: int = 1024) -> TokenData:
     cfg = load_config(config_path, level)
     model = GPT(cfg.model)
@@ -89,23 +95,35 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     requested = param_count * token_multiplier
     budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
     realized = budget.realized_tokens
+    needed_train = realized + 1
     prep = unique_dir(data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}", "prepared")
+    _log_prepare_progress(f"starting level={level} token_multiplier={token_multiplier} requested_tokens={requested} realized_tokens={realized} output={prep}")
     train_docs: list[str] = []; val_docs: list[str] = []
     corpus = []
     source = docs if docs is not None else _iter_fineweb(cfg)
     tok: Tokenizer | None = None; train_tokens: list[int] = []; val_tokens: list[int] = []
+    start_time = time.monotonic(); last_log_time = start_time; last_log_docs = 0
     for text in source:
         norm = " ".join(text.split())
         corpus.append(norm)
         if split_for_doc(norm) == "val": val_docs.append(norm)
         else: train_docs.append(norm)
         if tok is None and len(train_docs) >= 128:
+            _log_prepare_progress(f"training BPE tokenizer after {len(train_docs)} train docs and {len(val_docs)} validation docs")
             tok = _train_bpe(train_docs, cfg.model.vocab_size)
+            _log_prepare_progress(f"BPE tokenizer ready vocab_size={cfg.model.vocab_size}; collecting tokens")
         if tok is not None and len(train_tokens) < realized:
             # Tokenize each whole document at most once; never wrap.
             if split_for_doc(norm) == "train": train_tokens.extend(tok.encode(norm).ids)
             elif len(val_tokens) < min_validation_tokens: val_tokens.extend(tok.encode(norm).ids)
+        now = time.monotonic()
+        docs_seen = len(train_docs) + len(val_docs)
+        if now - last_log_time >= 30 or docs_seen - last_log_docs >= 10_000:
+            elapsed = max(now - start_time, 1e-9)
+            _log_prepare_progress(f"progress docs={docs_seen} train_docs={len(train_docs)} val_docs={len(val_docs)} train_tokens={len(train_tokens)}/{needed_train} val_tokens={len(val_tokens)}/{min_validation_tokens} elapsed_s={elapsed:.1f} docs_per_s={docs_seen / elapsed:.1f}")
+            last_log_time = now; last_log_docs = docs_seen
         if len(train_tokens) >= realized and len(val_tokens) >= min_validation_tokens:
+            _log_prepare_progress(f"collected enough tokens after docs={docs_seen}: train_tokens={len(train_tokens)} val_tokens={len(val_tokens)}")
             break
     if tok is None:
         if not train_docs:
@@ -113,7 +131,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
         tok = _train_bpe(train_docs, cfg.model.vocab_size)
         train_tokens = [i for d in train_docs for i in tok.encode(d).ids]
         val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
-    needed_train = realized + 1
+    _log_prepare_progress(f"finished streaming docs={len(train_docs) + len(val_docs)} train_docs={len(train_docs)} val_docs={len(val_docs)} train_tokens={len(train_tokens)} val_tokens={len(val_tokens)}")
     if not val_tokens and val_docs:
         val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
     if len(train_tokens) < needed_train:
@@ -127,6 +145,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     data_manifest = {"dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
     tokenizer_manifest = {"tokenizer_type": "BPE", "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
+    _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
     return TokenData(train_tokens, val_tokens, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest)
 
 
