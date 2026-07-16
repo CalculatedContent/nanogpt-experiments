@@ -142,6 +142,53 @@ def normalize_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+def vocab_size_from_artifacts(artifacts: dict[str, Any]) -> int | None:
+    """Extract tokenizer/model vocabulary size from standard run artifacts."""
+    tok = artifacts.get("tokenizer_manifest.json") or {}
+    if "vocab_size" in tok:
+        return int(tok["vocab_size"])
+    man = artifacts.get("manifest.json") or {}
+    report = man.get("parameter_report") or {}
+    if "vocab_size" in report:
+        return int(report["vocab_size"])
+    return None
+
+
+def add_generalization_measures(metrics: pd.DataFrame, vocab_size: int | None = None) -> pd.DataFrame:
+    """Add prediction-capacity, perplexity, and train/validation gap measures.
+
+    Loss columns are assumed to be cross-entropy in nats.  The normalized token
+    prediction capacity is the fraction of uniform-token uncertainty removed by
+    the model: ``1 - loss / log(vocab_size)``.  It is complementary to loss and
+    perplexity, and is only computed when a vocabulary size greater than one is
+    available.
+    """
+    out = normalize_metrics(metrics)
+    for split in ["train", "val"]:
+        loss_col = f"{split}_loss"
+        if loss_col in out.columns:
+            loss = pd.to_numeric(out[loss_col], errors="coerce")
+            ppl_col = f"{split}_perplexity"
+            if ppl_col not in out.columns:
+                out[ppl_col] = np.exp(loss.clip(upper=20))
+            bpt_col = f"{split}_bits_per_token"
+            if bpt_col not in out.columns:
+                out[bpt_col] = loss / np.log(2)
+            if vocab_size and vocab_size > 1:
+                uniform_bits = float(np.log2(vocab_size))
+                out[f"{split}_uniform_bits_per_token"] = uniform_bits
+                out[f"{split}_bits_saved_vs_uniform"] = uniform_bits - out[bpt_col]
+                out[f"{split}_token_prediction_capacity"] = 1.0 - (out[bpt_col] / uniform_bits)
+    if {"val_loss", "train_loss"}.issubset(out.columns) and "generalization_gap" not in out.columns:
+        out["generalization_gap"] = pd.to_numeric(out["val_loss"], errors="coerce") - pd.to_numeric(out["train_loss"], errors="coerce")
+    if {"val_perplexity", "train_perplexity"}.issubset(out.columns):
+        out["perplexity_gap"] = pd.to_numeric(out["val_perplexity"], errors="coerce") - pd.to_numeric(out["train_perplexity"], errors="coerce")
+        out["perplexity_ratio"] = pd.to_numeric(out["val_perplexity"], errors="coerce") / pd.to_numeric(out["train_perplexity"], errors="coerce")
+    if {"val_token_prediction_capacity", "train_token_prediction_capacity"}.issubset(out.columns):
+        out["capacity_generalization_gap"] = out["train_token_prediction_capacity"] - out["val_token_prediction_capacity"]
+    return out
+
 def terminal_results(runs: list[dict[str, Any]]) -> pd.DataFrame:
     """Construct paired terminal validation-loss rows from discovered runs."""
     finals = []
