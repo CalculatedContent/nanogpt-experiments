@@ -21,6 +21,80 @@ def summary(s: pd.Series) -> dict[str, float | int]:
     return {"n": n, "mean": float(s.mean()) if n else float("nan"), "sample_std": sd, "standard_error": se, "ci95_low": float(s.mean()-ci) if n else float("nan"), "ci95_high": float(s.mean()+ci) if n else float("nan"), "median": float(s.median()) if n else float("nan"), "iqr": float(s.quantile(.75)-s.quantile(.25)) if n else float("nan"), "min": float(s.min()) if n else float("nan"), "max": float(s.max()) if n else float("nan")}
 
 
+def errorbar_indices(n_points: int, max_points: int = 24) -> np.ndarray:
+    """Return evenly spaced indices for readable error bars on dense notebook plots."""
+    if n_points <= 0:
+        return np.array([], dtype=int)
+    return np.unique(np.linspace(0, n_points - 1, min(max_points, n_points), dtype=int))
+
+
+def mean_ci95(values: pd.Series) -> tuple[float, float, int]:
+    """Return mean, 95% confidence-interval half-width, and sample size."""
+    v = pd.to_numeric(pd.Series(values), errors="coerce").dropna()
+    n = int(len(v))
+    if n == 0:
+        return float("nan"), float("nan"), 0
+    if n == 1:
+        return float(v.iloc[0]), 0.0, 1
+    se = float(v.std(ddof=1) / np.sqrt(n))
+    return float(v.mean()), float(stats.t.ppf(0.975, n - 1) * se), n
+
+
+def collect_metrics(runs: list[dict[str, Any]]) -> pd.DataFrame:
+    """Return one normalized metrics table with run metadata attached."""
+    frames = []
+    for run in runs:
+        metrics = normalize_metrics(run.get("artifacts", {}).get("metrics.csv", pd.DataFrame()))
+        if metrics.empty:
+            continue
+        metrics = metrics.copy()
+        metrics["optimizer"] = run.get("optimizer")
+        metrics["seed"] = run.get("seed")
+        metrics["pair_id"] = run.get("pair_id")
+        metrics["run_dir"] = str(run.get("run_dir"))
+        frames.append(metrics)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def plot_metric_curve(metrics: pd.DataFrame, y_col: str, output_path: Path, *, title: str | None = None, ylabel: str | None = None, x_col: str | None = None) -> Path | None:
+    """Plot per-run curves plus optimizer means with 95% CI error bars."""
+    if metrics.empty or y_col not in metrics.columns or "optimizer" not in metrics.columns:
+        return None
+    x_col = x_col or ("tokens_seen" if "tokens_seen" in metrics.columns else "step")
+    if x_col not in metrics.columns:
+        return None
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(9, 5))
+    colors = {"adamw": "tab:blue", "adamw_wwpgd": "tab:orange"}
+    for optimizer, opt_df in metrics.groupby("optimizer"):
+        curves = []
+        color = colors.get(str(optimizer), None)
+        for _, run_df in opt_df.groupby("run_dir"):
+            d = run_df[[x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna().sort_values(x_col)
+            if len(d) < 2:
+                continue
+            plt.plot(d[x_col], d[y_col], color=color, alpha=0.25, linewidth=1)
+            curves.append(d)
+        grid, vals = align_curves(curves, x_col, y_col)
+        if len(grid):
+            mean = vals.mean(axis=0)
+            band = np.zeros_like(mean)
+            if vals.shape[0] > 1:
+                band = stats.t.ppf(0.975, vals.shape[0] - 1) * vals.std(axis=0, ddof=1) / np.sqrt(vals.shape[0])
+            plt.plot(grid, mean, color=color, linewidth=2.5, label=f"{optimizer} mean (n={vals.shape[0]})")
+            idx = errorbar_indices(len(grid))
+            plt.errorbar(grid[idx], mean[idx], yerr=band[idx], fmt="o", color=color, markersize=3, linewidth=1, capsize=3, label=f"{optimizer} mean ± 95% CI")
+    plt.xlabel(x_col.replace("_", " "))
+    plt.ylabel(ylabel or y_col.replace("_", " "))
+    plt.title(title or f"{(ylabel or y_col).replace('_', ' ').title()} by optimizer")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=160)
+    plt.close()
+    return output_path
+
+
 def read_json_file(path: Path) -> dict[str, Any]:
     """Read a JSON object from *path* with a clear error for malformed files."""
     try:
@@ -261,9 +335,7 @@ def analyze_results(results_root: Path) -> Path:
             ci = float(stats.t.ppf(0.975, len(d)-1) * d.sem()) if len(d)>1 else 0.0
             diffs.append({"metric":metric,"mean_paired_difference":float(d.mean()),"std_paired_difference":float(d.std(ddof=1)) if len(d)>1 else 0.0,"standard_error":float(d.sem()) if len(d)>1 else 0.0,"ci95_low":float(d.mean()-ci),"ci95_high":float(d.mean()+ci),"paired_t_statistic":t_stat,"paired_t_pvalue":t_p,"wilcoxon_pvalue":float(stats.wilcoxon(d).pvalue) if len(d)>1 and (d!=0).any() else float("nan"),"effect_size":float(d.mean()/d.std(ddof=1)) if len(d)>1 and d.std(ddof=1) else float("nan"),"complete_pairs":int(len(d))})
         pd.DataFrame(diffs).to_csv(out/"paired_metric_differences.csv", index=False)
-        plt.figure();
-        for opt,g in mf.groupby("optimizer"): plt.plot(g.groupby("step")["val_loss"].mean(), label=opt)
-        plt.legend(); plt.ylabel("validation loss"); plt.xlabel("step"); (out/"plots").mkdir(); plt.savefig(out/"plots"/"validation_loss.png"); plt.close()
+        plot_metric_curve(normalize_metrics(mf), "validation_loss", out / "plots" / "validation_loss.png", title="Validation loss by optimizer", ylabel="validation loss")
     if spectral:
         sf=pd.concat(spectral)
         rows=[]
