@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy import stats
@@ -16,6 +19,189 @@ def summary(s: pd.Series) -> dict[str, float | int]:
     n = int(len(s)); sd = float(s.std(ddof=1)) if n > 1 else 0.0; se = sd / (n**0.5) if n else 0.0
     ci = float(stats.t.ppf(0.975, n - 1) * se) if n > 1 else 0.0
     return {"n": n, "mean": float(s.mean()) if n else float("nan"), "sample_std": sd, "standard_error": se, "ci95_low": float(s.mean()-ci) if n else float("nan"), "ci95_high": float(s.mean()+ci) if n else float("nan"), "median": float(s.median()) if n else float("nan"), "iqr": float(s.quantile(.75)-s.quantile(.25)) if n else float("nan"), "min": float(s.min()) if n else float("nan"), "max": float(s.max()) if n else float("nan")}
+
+
+def read_json_file(path: Path) -> dict[str, Any]:
+    """Read a JSON object from *path* with a clear error for malformed files."""
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        raise ValueError(f"failed to read JSON file {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"expected JSON object in {path}, found {type(data).__name__}")
+    return data
+
+
+def read_jsonl_file(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file emitted by training events and return object records."""
+    rows: list[dict[str, Any]] = []
+    try:
+        for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            if not isinstance(obj, dict):
+                raise ValueError(f"line {line_number} is not a JSON object")
+            rows.append(obj)
+    except Exception as exc:
+        raise ValueError(f"failed to read JSONL file {path}: {exc}") from exc
+    return rows
+
+
+def load_csv_file(path: Path) -> pd.DataFrame:
+    """Load a repository-emitted CSV file, returning an empty frame for absent optional files."""
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except Exception as exc:
+        raise ValueError(f"failed to read CSV file {path}: {exc}") from exc
+
+
+def discover_pair_directories(results_root: Path) -> list[Path]:
+    """Return sorted pair_* directories directly under a multiseed result root."""
+    if not results_root.exists():
+        return []
+    return sorted([p for p in results_root.iterdir() if p.is_dir() and p.name.startswith("pair_")])
+
+
+def _run_sort_key(path: Path) -> tuple[bool, float, str]:
+    complete = (path / "run_complete.json").exists()
+    mtimes = [f.stat().st_mtime for f in path.glob("*") if f.exists()]
+    return (complete, max(mtimes) if mtimes else path.stat().st_mtime, path.name)
+
+
+def select_valid_run_directory(optimizer_dir: Path) -> tuple[Path | None, str]:
+    """Select the most recent valid run_* directory from an optimizer directory."""
+    if not optimizer_dir.exists():
+        return None, "optimizer directory missing"
+    candidates = sorted([p for p in optimizer_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], key=_run_sort_key, reverse=True)
+    if not candidates:
+        return None, "no run_* directories found"
+    valid = [p for p in candidates if (p / "manifest.json").exists() and (p / "metrics.csv").exists()]
+    complete = [p for p in valid if (p / "run_complete.json").exists()]
+    if complete:
+        return complete[0], "selected most recent completed valid run"
+    if valid:
+        return valid[0], "selected most recent valid but incomplete run"
+    return candidates[0], "no valid run found; selected newest directory for audit"
+
+
+def load_run_artifacts(run_dir: Path) -> dict[str, Any]:
+    """Load standard files written by wwgpt training without assuming optional files exist."""
+    artifacts: dict[str, Any] = {"run_dir": run_dir, "files_loaded": []}
+    for name in ["manifest.json", "run_complete.json", "environment.json", "data_manifest.json", "tokenizer_manifest.json"]:
+        path = run_dir / name
+        if path.exists():
+            artifacts[name] = read_json_file(path); artifacts["files_loaded"].append(path)
+    init = run_dir / "initialization_hash.txt"
+    if init.exists():
+        artifacts["initialization_hash.txt"] = init.read_text().strip(); artifacts["files_loaded"].append(init)
+    for name in ["metrics.csv", "spectral.csv", "wwpgd_projection.csv"]:
+        path = run_dir / name
+        if path.exists():
+            artifacts[name] = load_csv_file(path); artifacts["files_loaded"].append(path)
+    events = run_dir / "events.jsonl"
+    if events.exists():
+        artifacts["events.jsonl"] = read_jsonl_file(events); artifacts["files_loaded"].append(events)
+    return artifacts
+
+
+def extract_seed(pair_dir: Path, artifacts: dict[str, Any]) -> int | None:
+    """Extract the seed from run metadata, pair metadata, or finally pair_<seed> directory names."""
+    man = artifacts.get("manifest.json") or {}
+    if "seed" in man:
+        return int(man["seed"])
+    pm = pair_dir / "pair_manifest.json"
+    if pm.exists():
+        data = read_json_file(pm)
+        if "seed" in data:
+            return int(data["seed"])
+    m = re.match(r"pair_(\d+)", pair_dir.name)
+    return int(m.group(1)) if m else None
+
+
+def discover_experiment_runs(results_root: Path) -> list[dict[str, Any]]:
+    """Discover AdamW and AdamW+WW-PGD arms for each pair directory and load artifacts."""
+    rows: list[dict[str, Any]] = []
+    for pair_dir in discover_pair_directories(results_root):
+        for optimizer in ["adamw", "adamw_wwpgd"]:
+            run_dir, note = select_valid_run_directory(pair_dir / optimizer)
+            artifacts = load_run_artifacts(run_dir) if run_dir else {"files_loaded": []}
+            rows.append({"pair_id": pair_dir.name, "pair_dir": pair_dir, "optimizer": optimizer, "run_dir": run_dir, "selection_note": note, "seed": extract_seed(pair_dir, artifacts) if run_dir else None, "artifacts": artifacts})
+    return rows
+
+
+def normalize_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """Return metrics with notebook-friendly aliases while preserving original columns."""
+    out = df.copy()
+    aliases = {"tokens_processed": "tokens_seen", "val_loss": "validation_loss", "elapsed_time": "elapsed_seconds", "projection_overhead": "projection_seconds"}
+    for src, dst in aliases.items():
+        if src in out.columns and dst not in out.columns:
+            out[dst] = out[src]
+    return out
+
+
+def terminal_results(runs: list[dict[str, Any]]) -> pd.DataFrame:
+    """Construct paired terminal validation-loss rows from discovered runs."""
+    finals = []
+    for r in runs:
+        m = normalize_metrics(r.get("artifacts", {}).get("metrics.csv", pd.DataFrame()))
+        if m.empty or "validation_loss" not in m:
+            continue
+        sort_col = "tokens_seen" if "tokens_seen" in m else "step"
+        m = m.sort_values(sort_col)
+        last = m.dropna(subset=["validation_loss"]).tail(1)
+        if last.empty:
+            continue
+        finals.append({"pair_id": r["pair_id"], "seed": r["seed"], "optimizer": r["optimizer"], "final_validation_loss": float(last["validation_loss"].iloc[0]), "minimum_validation_loss": float(pd.to_numeric(m["validation_loss"], errors="coerce").min())})
+    df = pd.DataFrame(finals)
+    if df.empty:
+        return pd.DataFrame()
+    p = df.pivot_table(index=["pair_id", "seed"], columns="optimizer", values=["final_validation_loss", "minimum_validation_loss"], aggfunc="first")
+    p.columns = [f"{opt}_{metric}" for metric, opt in p.columns]
+    p = p.reset_index()
+    if {"adamw_wwpgd_final_validation_loss", "adamw_final_validation_loss"}.issubset(p.columns):
+        p["wwpgd_minus_adamw_final_validation_loss"] = p["adamw_wwpgd_final_validation_loss"] - p["adamw_final_validation_loss"]
+        p["adamw_minus_wwpgd_improvement"] = -p["wwpgd_minus_adamw_final_validation_loss"]
+    return p
+
+
+def align_curves(curves: list[pd.DataFrame], x_col: str, y_col: str, points: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Interpolate curves to their shared x range without extrapolation."""
+    clean = []
+    for df in curves:
+        if x_col not in df or y_col not in df:
+            continue
+        d = df[[x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna().sort_values(x_col).drop_duplicates(x_col)
+        if len(d) >= 2:
+            clean.append(d)
+    if not clean:
+        return np.array([]), np.empty((0, 0))
+    lo = max(float(d[x_col].min()) for d in clean); hi = min(float(d[x_col].max()) for d in clean)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return np.array([]), np.empty((0, 0))
+    grid = np.linspace(lo, hi, points)
+    vals = np.vstack([np.interp(grid, d[x_col].to_numpy(float), d[y_col].to_numpy(float)) for d in clean])
+    return grid, vals
+
+
+def paired_curve_differences(pairs: list[tuple[pd.DataFrame, pd.DataFrame]], x_col: str, y_col: str, points: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Align paired curves and return WW-PGD minus AdamW differences on a common grid."""
+    per_pair = []
+    grids = []
+    for adamw, wwpgd in pairs:
+        grid, vals = align_curves([adamw, wwpgd], x_col, y_col, points)
+        if vals.shape[0] == 2:
+            grids.append(grid); per_pair.append(vals[1] - vals[0])
+    if not per_pair:
+        return np.array([]), np.empty((0, 0))
+    lo = max(g.min() for g in grids); hi = min(g.max() for g in grids)
+    if hi <= lo:
+        return np.array([]), np.empty((0, 0))
+    grid = np.linspace(lo, hi, points)
+    vals = np.vstack([np.interp(grid, g, d) for g, d in zip(grids, per_pair)])
+    return grid, vals
 
 
 def completed_runs(root: Path, scientific_only: bool = True) -> list[Path]:
