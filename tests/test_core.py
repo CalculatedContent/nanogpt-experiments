@@ -95,8 +95,12 @@ def test_cli_smoke_execution_and_aggregation(tmp_path: Path):
     assert not (out / "final_metrics_errorbars.csv").exists()
 
 
-def test_smoke_runs_all_requested_seeds(tmp_path: Path):
+def test_smoke_runs_all_requested_seeds(tmp_path: Path, capsys):
     root = smoke(tmp_path, 1, [11, 22, 33])
+    stderr = capsys.readouterr().err
+    assert "[wwgpt run-multiseed] starting smoke run" in stderr
+    assert "smoke progress optimizer=" in stderr
+    assert "completed smoke run" in stderr
     runs = completed_runs(root, scientific_only=False)
     assert len(runs) == 6
     manifests = [json.loads((r / "manifest.json").read_text()) for r in runs]
