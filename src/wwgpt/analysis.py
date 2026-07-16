@@ -125,7 +125,7 @@ def discover_experiment_runs(results_root: Path) -> list[dict[str, Any]]:
     """Discover AdamW and AdamW+WW-PGD arms for each pair directory and load artifacts."""
     rows: list[dict[str, Any]] = []
     for pair_dir in discover_pair_directories(results_root):
-        for optimizer in ["adamw", "adamw_wwpgd"]:
+        for optimizer in ["adamw", "adamw_wwpgd"] + (["adamw_wwpgd_reference"] if (pair_dir / "adamw_wwpgd_reference").exists() else []):
             run_dir, note = select_valid_run_directory(pair_dir / optimizer)
             artifacts = load_run_artifacts(run_dir) if run_dir else {"files_loaded": []}
             rows.append({"pair_id": pair_dir.name, "pair_dir": pair_dir, "optimizer": optimizer, "run_dir": run_dir, "selection_note": note, "seed": extract_seed(pair_dir, artifacts) if run_dir else None, "artifacts": artifacts})
@@ -208,8 +208,9 @@ def terminal_results(runs: list[dict[str, Any]]) -> pd.DataFrame:
     p = df.pivot_table(index=["pair_id", "seed"], columns="optimizer", values=["final_validation_loss", "minimum_validation_loss"], aggfunc="first")
     p.columns = [f"{opt}_{metric}" for metric, opt in p.columns]
     p = p.reset_index()
-    if {"adamw_wwpgd_final_validation_loss", "adamw_final_validation_loss"}.issubset(p.columns):
-        p["wwpgd_minus_adamw_final_validation_loss"] = p["adamw_wwpgd_final_validation_loss"] - p["adamw_final_validation_loss"]
+    ww_col = "adamw_wwpgd_reference_final_validation_loss" if "adamw_wwpgd_reference_final_validation_loss" in p.columns else "adamw_wwpgd_final_validation_loss"
+    if {ww_col, "adamw_final_validation_loss"}.issubset(p.columns):
+        p["wwpgd_minus_adamw_final_validation_loss"] = p[ww_col] - p["adamw_final_validation_loss"]
         p["adamw_minus_wwpgd_improvement"] = -p["wwpgd_minus_adamw_final_validation_loss"]
     return p
 

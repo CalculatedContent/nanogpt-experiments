@@ -33,7 +33,7 @@ def main() -> None:
         # Some streaming dataset backends can leave non-daemon workers alive after all artifacts
         # have been written. Exit the CLI process deterministically so shell wrappers can finish.
         os._exit(0)
-    elif args.cmd=="run-multiseed": print(run_multiseed_scientific(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),args.config,args.device,args.ww_interval,args.eval_interval,args.checkpoint_interval))
+    elif args.cmd=="run-multiseed": print(run_multiseed_scientific(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),args.config,args.device,args.ww_interval,args.eval_interval,args.checkpoint_interval,args.spectral_interval,args.precision,args.resume))
     elif args.cmd=="plan-scaling": print(plan_budget(args.params,args.token_multiplier,args.batch_size,args.block_size,args.grad_accum,args.available_tokens))
 
 if __name__ == "__main__": main()

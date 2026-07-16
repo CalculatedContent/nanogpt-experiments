@@ -36,6 +36,8 @@ class TrainConfig:
     grad_clip: float = 1.0
     eval_interval: int = 10
     checkpoint_interval: int = 50
+    spectral_interval: int = 10
+    eval_batches: int = 4
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ class WWPGDConfig:
     enabled: bool = False
     target_alpha: float = 2.0
     strength: float = 0.02
-    interval: int = 1
+    projection_schedule: list[float] = field(default_factory=lambda: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92])
     warmup_steps: int = 0
     ramp_steps: int = 10
     layer_scope: str = "blocks"

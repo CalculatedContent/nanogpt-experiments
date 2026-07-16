@@ -11,3 +11,9 @@ This document describes the nanoGPT AdamW vs WW-PGD framework.
 - WeightWatcher interpretation: raw per-layer records are retained; layer variation is not treated as independent experimental replication.
 - Valid runs: complete, non-wrapped, non-overlapping train/validation, matching paired configs, matching initialization, matching tokenizer/corpus hashes, matching token budgets, and sufficient corpus coverage.
 - Troubleshooting: ensure `wwgpt` is installed with `python -m pip install -e .`; use CPU for portability, MPS defaults to fp32, CUDA uses bf16 where supported, TPU/XLA is recorded when available, WeightWatcher failures should be fixed rather than silently replaced for scientific runs, disk pressure requires choosing a larger storage root, interrupted preparation/training can be resumed from manifests and checkpoints, missing seeds are reported by analysis, and invalid scaling runs are excluded.
+
+## Scientific schema version 2
+
+New valid runs include these manifest fields: `spectral_estimator`, `spectral_estimator_version`, `wwpgd_implementation`, `wwpgd_commit`, `projection_schedule`, `validation_probe_hash`, `training_probe_hash`, and `scientific_schema_version`.
+
+Valid spectral rows must have `spectral_estimator == "weightwatcher"`. Rows labeled `fallback_non_scientific`, or legacy rows without `spectral_estimator`, are invalid for WeightWatcher alpha analysis.

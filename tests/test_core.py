@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import nbformat
+import numpy as np
 import pandas as pd
 import pytest
 import torch
@@ -15,7 +16,7 @@ from wwgpt.model import GPT
 from wwgpt.scaling import is_non_collinear, plan_budget
 from wwgpt.train import smoke
 from wwgpt.utils import unique_dir
-from wwgpt.ww import apply_wwpgd, matrix_modules
+from wwgpt.ww import apply_wwpgd, apply_wwpgd_reference, fallback_spectral_summary, is_projected_layer, spectral_summary, weightwatcher_details, WWTailConfig, matrix_modules
 
 
 def test_model_parameter_counting():
@@ -137,3 +138,50 @@ train:
 def test_notebooks_parse():
     for path in Path("notebooks").glob("*.ipynb"):
         nbformat.read(path, as_version=4)
+
+
+def test_projected_layer_selector_excludes_embeddings_and_lm_head():
+    m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10, tie_weights=True))
+    eligible = [n for n, _ in matrix_modules(m) if is_projected_layer(n)]
+    assert eligible
+    assert all(not n.startswith(("wte", "wpe")) and n != "lm_head" for n in eligible)
+
+
+def test_fallback_spectral_marked_non_scientific():
+    m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10))
+    rows = fallback_spectral_summary(m)
+    assert rows and all(r["spectral_estimator"] == "fallback_non_scientific" and r["valid_for_science"] is False for r in rows)
+
+
+def test_reference_projection_strength_zero_noop(monkeypatch):
+    m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10))
+    before = {k:v.clone() for k,v in m.state_dict().items()}
+    rows = pd.DataFrame([{"longname": n, "xmin": 1e-12, "detX_num": 3} for n,_ in matrix_modules(m) if is_projected_layer(n)])
+    out = apply_wwpgd_reference(m, details=rows, strength=0.0, cfg=WWTailConfig(min_tail=1))
+    assert out
+    assert all(torch.equal(before[k], v) for k,v in m.state_dict().items())
+
+
+def test_reference_projection_nonzero_changes_eligible_matrix():
+    m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10))
+    rows = pd.DataFrame([{"longname": n, "xmin": 1e-12, "detX_num": 3} for n,_ in matrix_modules(m) if is_projected_layer(n)])
+    out = apply_wwpgd_reference(m, details=rows, event_index=10, strength=1.0, cfg=WWTailConfig(min_tail=1, ramp_events=1))
+    assert any(r["changed"] and r["relative_frobenius_change"] > 0 for r in out)
+
+
+def test_validation_probe_fixed_and_distinct():
+    from wwgpt.data import fixed_probe
+    tx, ty, th = fixed_probe(list(range(100)), 4, 2, 2)
+    vx, vy, vh = fixed_probe(list(range(1000,1100)), 4, 2, 2)
+    vx2, vy2, vh2 = fixed_probe(list(range(1000,1100)), 4, 2, 2)
+    assert vh == vh2 and (vx == vx2).all()
+    assert th != vh
+
+
+def test_legacy_estimator_formula_invalid_regression():
+    exp = 2.5
+    ranks = np.arange(1, 100)
+    eig = ranks ** (-exp)
+    slope = np.polyfit(np.log(ranks), np.log(eig), 1)[0]
+    old_alpha = 1 - slope
+    assert abs(old_alpha - exp) > 0.25
