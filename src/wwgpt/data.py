@@ -86,7 +86,7 @@ def _log_prepare_progress(message: str) -> None:
     print(f"[wwgpt prepare-data] {message}", file=sys.stderr, flush=True)
 
 
-def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, config_path: Path | None = None, docs: Iterable[str] | None = None, min_validation_tokens: int = 1024) -> TokenData:
+def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, config_path: Path | None = None, docs: Iterable[str] | None = None, min_validation_tokens: int = 100_000) -> TokenData:
     cfg = load_config(config_path, level)
     model = GPT(cfg.model)
     report = model.parameter_report()
@@ -142,7 +142,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
-    data_manifest = {"dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    data_manifest = {"dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
     tokenizer_manifest = {"tokenizer_type": "BPE", "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
@@ -167,3 +167,13 @@ class NonRepeatingTokenReader:
             raise ValueError("token stream exhausted; refusing to wrap or repeat")
         chunk = self.tokens[self.pos:self.pos + need]; self.pos += batch_size * self.block_size
         return np.array(chunk[:-1], dtype=np.int64).reshape(batch_size, self.block_size), np.array(chunk[1:], dtype=np.int64).reshape(batch_size, self.block_size)
+
+
+def fixed_probe(tokens: list[int], block_size: int, batch_size: int, eval_batches: int) -> tuple[np.ndarray, np.ndarray, str]:
+    need = batch_size * block_size * eval_batches + 1
+    if len(tokens) < need:
+        raise ValueError(f"insufficient probe tokens: {len(tokens)} < {need}")
+    arr = np.array(tokens[:need], dtype=np.int64)
+    x = arr[:-1].reshape(eval_batches, batch_size, block_size)
+    y = arr[1:].reshape(eval_batches, batch_size, block_size)
+    return x, y, sha256_bytes(arr.tobytes())

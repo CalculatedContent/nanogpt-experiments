@@ -13,7 +13,12 @@ train:
   gradient_accumulation: 1
   learning_rate: 0.0003
   weight_decay: 0.1
+  eval_interval: 10
+  spectral_interval: 10
+  checkpoint_interval: 50
+  eval_batches: 4
 wwpgd:
   enabled: true
   target_alpha: 2.0
   strength: 0.02
+  projection_schedule: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92]
