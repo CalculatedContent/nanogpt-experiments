@@ -14,13 +14,15 @@ from wwgpt.analysis import (
     paired_curve_differences,
     select_valid_run_directory,
     terminal_results,
+    add_generalization_measures,
+    vocab_size_from_artifacts,
 )
 
 
 def _write_run(parent: Path, opt: str, seed: int, complete: bool = True, offset: float = 0.0) -> Path:
     run = parent / opt / f"run_20260101-00000{seed}_{opt}"
     run.mkdir(parents=True)
-    (run / "manifest.json").write_text(json.dumps({"optimizer": opt, "seed": seed, "pair_id": parent.name, "valid_for_science": True, "parameter_report": {"total_parameters": 10}, "estimated_flops": 1000, "requested_tokens": 64, "realized_tokens": 64, "initialization_hash": "abc", "tokenizer_hash": "tok", "dataset_name": "fixture"}))
+    (run / "manifest.json").write_text(json.dumps({"optimizer": opt, "seed": seed, "pair_id": parent.name, "valid_for_science": True, "parameter_report": {"total_parameters": 10, "vocab_size": 10}, "estimated_flops": 1000, "requested_tokens": 64, "realized_tokens": 64, "initialization_hash": "abc", "tokenizer_hash": "tok", "dataset_name": "fixture"}))
     pd.DataFrame({"step": [1, 2, 3], "tokens_processed": [16, 32, 48], "elapsed_time": [1.0, 2.0, 3.0], "train_loss": [3.0, 2.8, 2.5 + offset], "val_loss": [3.1, 2.9, 2.6 + offset], "tokens_per_second": [16, 16, 16], "projection_overhead": [0.0, 0.1 if opt == "adamw_wwpgd" else 0.0, 0.0]}).to_csv(run / "metrics.csv", index=False)
     pd.DataFrame({"layer_name": ["blocks.0"], "step": [2], "alpha_before": [2.3], "alpha_after": [2.1], "relative_frobenius_change": [0.01], "projection_runtime": [0.1], "warning": [""]}).to_csv(run / "wwpgd_projection.csv", index=False)
     (run / "events.jsonl").write_text('{"event":"complete"}\n' if complete else '{"event":"started"}\n')
@@ -82,3 +84,15 @@ def test_missing_optional_columns_are_tolerated():
     df = normalize_metrics(pd.DataFrame({"step": [1], "val_loss": [2.0]}))
     assert "validation_loss" in df.columns
     assert "tokens_seen" not in df.columns
+
+
+def test_generalization_measures_add_perplexity_capacity_and_gaps(tmp_path: Path):
+    root = _fixture(tmp_path)
+    runs = discover_experiment_runs(root)
+    art = next(r["artifacts"] for r in runs if r["pair_id"] == "pair_11_fixture" and r["optimizer"] == "adamw")
+    measured = add_generalization_measures(art["metrics.csv"].drop(columns=[]), vocab_size=10)
+    assert "val_perplexity" in measured.columns
+    assert "val_token_prediction_capacity" in measured.columns
+    assert "capacity_generalization_gap" in measured.columns
+    assert measured["val_token_prediction_capacity"].notna().all()
+    assert vocab_size_from_artifacts(art) == 10
