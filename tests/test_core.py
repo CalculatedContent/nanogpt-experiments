@@ -213,3 +213,13 @@ def test_legacy_estimator_formula_invalid_regression():
     slope = np.polyfit(np.log(ranks), np.log(eig), 1)[0]
     old_alpha = 1 - slope
     assert abs(old_alpha - exp) > 0.25
+
+
+def test_scientific_evaluation_uses_all_probe_batches():
+    import inspect
+    import wwgpt.train
+
+    source = inspect.getsource(wwgpt.train.run_scientific_single)
+    assert "val_x[0]" not in source
+    assert "train_x[0]" not in source
+    assert source.count("_evaluate_probe_batches(") == 2
