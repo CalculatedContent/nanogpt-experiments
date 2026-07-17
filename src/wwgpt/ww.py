@@ -135,8 +135,13 @@ def apply_wwpgd_reference(model: nn.Module, *, details: pd.DataFrame | None = No
                     target=A*mu; new_tail=_cayley(lam_tail,target,hardness*cfg.cayley_eta)
                     new_tail=new_tail*torch.exp((torch.log(lam_tail+1e-8).sum()-torch.log(new_tail+1e-8).sum())/tail_size)
                     Snew=S.clone(); Snew[mask]=torch.sqrt(new_tail.clamp_min(1e-8)); shaped=(U*Snew.unsqueeze(0))@Vh
-                    Wnew=(1-hardness*cfg.blend_eta)*W2 + hardness*cfg.blend_eta*shaped
-                    W.copy_(Wnew.reshape_as(W).to(device=W.device,dtype=W.dtype)); rel=float((torch.linalg.norm(W-old)/(torch.linalg.norm(old)+1e-12)).item()); changed=rel>0; tl_after=float(torch.log((torch.linalg.svdvals(W.reshape(W.size(0),-1).float())**2)[mask]+1e-8).sum().item())
+                    blend=hardness*cfg.blend_eta
+                    Wnew=(1-blend)*W2 + blend*shaped
+                    S_after=(1-blend)*S + blend*Snew
+                    W.copy_(Wnew.reshape_as(W).to(device=W.device,dtype=W.dtype))
+                    rel=float((torch.linalg.norm(W-old)/(torch.linalg.norm(old)+1e-12)).item())
+                    changed=rel>0
+                    tl_after=float(torch.log(S_after.square()[mask]+1e-8).sum().item())
         rows.append({"projection_event":event_index,"scheduled_token_fraction":scheduled_token_fraction,"actual_step":actual_step,"actual_tokens_seen":actual_tokens_seen,"layer_name":lname,"hardness":hardness,"projection_runtime":time.perf_counter()-start,"changed":changed,"skip_reason":reason,"relative_frobenius_change":rel,"relative_frobenius_weight_change":rel,"xmin":xmin,"detX_num":detx_num,"tail_size":tail_size,"TraceLog_before":tl_before,"TraceLog_after":tl_after,"wwpgd_implementation":"reference","wwpgd_commit":WWPGD_COMMIT})
     return rows
 
