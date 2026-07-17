@@ -35,3 +35,27 @@ Analysis discovers completed runs, ignores incomplete runs, verifies pairs, comp
 Notebooks in `notebooks/` validate repository integrity, compare a single level, analyze WeightWatcher trajectories, inspect scaling laws, examine overfitting/generalization, and generate a summary report. Plotting helpers live in the package and use matplotlib.
 
 Append-only behavior: scripts create new timestamped directories, preserve partial outputs, never recycle result directories, and never treat smoke tests as scaling-law evidence.
+
+## WW-PGD Strength Scan
+
+The strength scan is a secondary ablation for AdamW + WW-PGD. It is not run by default and does not change `wwgpt run-multiseed` or the default WW-PGD strength of `0.02`. The runner creates one shared initialization per seed, runs one immutable AdamW control, and reuses that control for every fixed WW-PGD strength arm. Every arm resets the deterministic token reader and fixed probes so only `wwpgd.strength` differs.
+
+Run a scan:
+
+```bash
+wwgpt run-strength-scan --level 0 --data-root /tmp/wwpgd_v2/data --results-root /tmp/wwpgd_strength_scan --token-multiplier 20 --seeds 1337 --strengths 0.02,0.1,0.25,0.5,1.0 --device mps --eval-interval 25 --spectral-interval 100 --checkpoint-interval 500 --immediate-projection-spectral --resume
+```
+
+Analyze without notebooks:
+
+```bash
+wwgpt analyze-strength-scan --scan-root /tmp/wwpgd_strength_scan
+```
+
+Outputs are under `experiments/strength_scan/level_<NN>/multiplier_<M>/scan_<timestamp>_*`, with `seeds/`, one `adamw_control/`, per-strength run directories, and `analysis/strength_scan_*.csv`. Resume skips compatible completed arms and writes new append-only run directories for reruns. Immediate alpha before/after logging is written to `wwpgd_projection_spectral.csv`; it matches WeightWatcher layer names by `longname`/`name` and reports alpha-error changes, projection norms, and WeightWatcher overhead.
+
+Open notebooks after setting `WWGPT_STRENGTH_SCAN_ROOT` to either a scan directory or parent results directory:
+
+```bash
+WWGPT_STRENGTH_SCAN_ROOT=/tmp/wwpgd_strength_scan jupyter lab notebooks/07_strength_scan_overview.ipynb notebooks/08_strength_scan_weightwatcher.ipynb
+```

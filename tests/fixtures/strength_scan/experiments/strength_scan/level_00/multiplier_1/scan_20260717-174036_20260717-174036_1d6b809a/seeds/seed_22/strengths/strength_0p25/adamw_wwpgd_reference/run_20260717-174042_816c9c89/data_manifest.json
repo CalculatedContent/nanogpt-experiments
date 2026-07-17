@@ -1,0 +1,16 @@
+{
+  "corpus_hash": "800584a48d7690a322f35fd45cf704fcf435b689328a32f448219bdc1c3534eb",
+  "dataset": "local_text",
+  "dataset_config": "fixture",
+  "dataset_name": "local_fixture",
+  "dataset_revision": "none",
+  "optimizer_steps": 2,
+  "realized_tokens": 16,
+  "repeated_stream": false,
+  "requested_tokens": 16,
+  "smoke_test": true,
+  "tokens_per_optimizer_step": 8,
+  "train_tokens": 5400,
+  "val_tokens": 5400,
+  "valid_for_science": false
+}

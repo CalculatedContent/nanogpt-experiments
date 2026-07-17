@@ -1,0 +1,29 @@
+{
+  "arms": {
+    "11:0.02": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_11/strengths/strength_0p02/adamw_wwpgd_reference/run_20260717-174040_15cb8ac1",
+      "status": "complete"
+    },
+    "11:0.1": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_11/strengths/strength_0p1/adamw_wwpgd_reference/run_20260717-174040_35b4ed4b",
+      "status": "complete"
+    },
+    "11:0.25": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_11/strengths/strength_0p25/adamw_wwpgd_reference/run_20260717-174041_2b03fa78",
+      "status": "complete"
+    },
+    "22:0.02": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_22/strengths/strength_0p02/adamw_wwpgd_reference/run_20260717-174041_e7081ddd",
+      "status": "complete"
+    },
+    "22:0.1": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_22/strengths/strength_0p1/adamw_wwpgd_reference/run_20260717-174041_0053c21a",
+      "status": "complete"
+    },
+    "22:0.25": {
+      "run_dir": "tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a/seeds/seed_22/strengths/strength_0p25/adamw_wwpgd_reference/run_20260717-174042_816c9c89",
+      "status": "complete"
+    }
+  },
+  "scan_id": "scan_20260717-174036_20260717-174036_1d6b809a"
+}

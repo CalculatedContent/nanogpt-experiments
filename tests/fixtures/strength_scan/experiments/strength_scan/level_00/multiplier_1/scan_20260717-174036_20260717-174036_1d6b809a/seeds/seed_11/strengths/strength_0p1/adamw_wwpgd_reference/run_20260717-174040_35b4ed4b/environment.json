@@ -1,0 +1,12 @@
+{
+  "backend": "pytorch",
+  "cuda_version": "13.0",
+  "device": "cpu",
+  "mps_available": false,
+  "operating_system": "Linux-6.12.47-x86_64-with-glibc2.39",
+  "precision": "fp32",
+  "processor": "x86_64",
+  "python_version": "3.12.13 (main, May  1 2026, 05:53:44) [GCC 13.3.0]",
+  "torch_version": "2.13.0+cu130",
+  "xla_version": null
+}
