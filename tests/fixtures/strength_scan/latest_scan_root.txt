@@ -1,0 +1,1 @@
+tests/fixtures/strength_scan/experiments/strength_scan/level_00/multiplier_1/scan_20260717-174036_20260717-174036_1d6b809a

@@ -31,6 +31,7 @@ from wwgpt.ww import (
     weightwatcher_details,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
+    WWTailConfig,
 )
 
 
@@ -414,6 +415,7 @@ def run_scientific_single(
                         actual_step=step,
                         actual_tokens_seen=step * tokens_per_step,
                         strength=cfg.wwpgd.strength,
+                        cfg=WWTailConfig(min_tail=cfg.wwpgd.min_tail, blend_eta=cfg.wwpgd.blend_eta, cayley_eta=cfg.wwpgd.cayley_eta, use_detx=cfg.wwpgd.use_detx, warmup_events=cfg.wwpgd.warmup_events, ramp_events=cfg.wwpgd.ramp_events, q=1.0/(cfg.wwpgd.target_alpha-1.0)),
                     )
                 )
                 proj_time = time.perf_counter() - ps

@@ -51,6 +51,12 @@ class WWPGDConfig:
     layer_scope: str = "blocks"
     include_embeddings: bool = False
     include_output: bool = False
+    min_tail: int = 5
+    blend_eta: float = 0.5
+    cayley_eta: float = 0.25
+    use_detx: bool = True
+    warmup_events: int = 0
+    ramp_events: int = 5
 
 
 @dataclass(frozen=True)

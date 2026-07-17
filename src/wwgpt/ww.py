@@ -119,7 +119,11 @@ def apply_wwpgd_reference(
     cfg: WWTailConfig | None = None,
 ) -> list[dict[str, object]]:
     cfg = cfg or WWTailConfig()
-    hardness = projection_hardness(event_index, cfg) * strength
+    schedule_hardness = projection_hardness(event_index, cfg)
+    effective_hardness = schedule_hardness * strength
+    hardness = effective_hardness
+    effective_cayley_eta = effective_hardness * cfg.cayley_eta
+    effective_blend_eta = effective_hardness * cfg.blend_eta
     if details is None:
         details = weightwatcher_details(model)
 
@@ -150,7 +154,16 @@ def apply_wwpgd_reference(
                 W2 = W.reshape(W.size(0), -1).float()
                 U, S, Vh = torch.linalg.svd(W2, full_matrices=False)
                 lam = S.clamp_min(1e-8).square()
-                mask = lam >= xmin
+                n = int(lam.numel())
+                powerlaw_tail_size = int((lam >= xmin).sum().item())
+                detx_tail_size = int(detx_num) if detx_num is not None else 0
+                lam_thr = float(xmin)
+                if cfg.use_detx and detx_num is not None and detx_num > 0:
+                    k_pl = max(cfg.min_tail, min(powerlaw_tail_size, n))
+                    k_detx = max(cfg.min_tail, min(detx_tail_size, n))
+                    k_star = max(1, min(n, int(0.5 * (k_pl + k_detx))))
+                    lam_thr = max(float(xmin), float(lam[k_star - 1].detach().cpu()))
+                mask = lam >= lam_thr
                 tail_size = int(mask.sum().item())
 
                 if tail_size < cfg.min_tail:
@@ -165,7 +178,7 @@ def apply_wwpgd_reference(
                         / tail_size
                     )
                     target = A * mu
-                    new_tail = _cayley(lam_tail, target, hardness * cfg.cayley_eta)
+                    new_tail = _cayley(lam_tail, target, effective_cayley_eta)
                     new_tail = new_tail * torch.exp(
                         (
                             torch.log(lam_tail + 1e-8).sum()
@@ -176,7 +189,7 @@ def apply_wwpgd_reference(
                     Snew = S.clone()
                     Snew[mask] = torch.sqrt(new_tail.clamp_min(1e-8))
                     shaped = (U * Snew.unsqueeze(0)) @ Vh
-                    blend = hardness * cfg.blend_eta
+                    blend = effective_blend_eta
 
                     Wnew = (1.0 - blend) * W2 + blend * shaped
                     S_after = (1.0 - blend) * S + blend * Snew
@@ -209,6 +222,11 @@ def apply_wwpgd_reference(
                 "actual_tokens_seen": actual_tokens_seen,
                 "layer_name": lname,
                 "hardness": hardness,
+                "schedule_hardness": schedule_hardness,
+                "scan_strength": strength,
+                "effective_hardness": effective_hardness,
+                "effective_cayley_eta": effective_cayley_eta,
+                "effective_blend_eta": effective_blend_eta,
                 "projection_runtime": time.perf_counter() - start,
                 "changed": changed,
                 "skip_reason": reason,
@@ -217,6 +235,10 @@ def apply_wwpgd_reference(
                 "xmin": xmin,
                 "detX_num": detx_num,
                 "tail_size": tail_size,
+                "powerlaw_tail_size": locals().get("powerlaw_tail_size", 0),
+                "detx_tail_size": locals().get("detx_tail_size", 0),
+                "selected_tail_size": tail_size,
+                "selected_tail_threshold": locals().get("lam_thr", xmin),
                 "TraceLog_before": tl_before,
                 "TraceLog_after": tl_after,
                 "wwpgd_implementation": "reference",

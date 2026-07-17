@@ -1,0 +1,8 @@
+{
+  "hash": "0ba0f8d6031bf48f59f1e813b72291b8e04e58cb855165b275e538c6301f1b8d",
+  "special_tokens": {},
+  "tokenizer": "char-smoke",
+  "tokenizer_hash": "0ba0f8d6031bf48f59f1e813b72291b8e04e58cb855165b275e538c6301f1b8d",
+  "tokenizer_type": "char-smoke",
+  "vocab_size": 14
+}
