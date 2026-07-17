@@ -107,42 +107,122 @@ def _resolve_module(model: nn.Module, lname: str) -> nn.Module | None:
     return cur if hasattr(cur,"weight") else None
 
 
-def apply_wwpgd_reference(model: nn.Module, *, details: pd.DataFrame | None = None, event_index: int = 0, scheduled_token_fraction: float = 0.0, actual_step: int = 0, actual_tokens_seen: int = 0, strength: float = 1.0, cfg: WWTailConfig | None = None) -> list[dict[str, object]]:
+def apply_wwpgd_reference(
+    model: nn.Module,
+    *,
+    details: pd.DataFrame | None = None,
+    event_index: int = 0,
+    scheduled_token_fraction: float = 0.0,
+    actual_step: int = 0,
+    actual_tokens_seen: int = 0,
+    strength: float = 1.0,
+    cfg: WWTailConfig | None = None,
+) -> list[dict[str, object]]:
     cfg = cfg or WWTailConfig()
     hardness = projection_hardness(event_index, cfg) * strength
     if details is None:
         details = weightwatcher_details(model)
-    rows=[]; key="longname" if "longname" in details.columns else "name"
-    for _,row in details.iterrows():
-        lname=str(row.get(key, row.get("name", "")))
+
+    rows = []
+    key = "longname" if "longname" in details.columns else "name"
+    for _, row in details.iterrows():
+        lname = str(row.get(key, row.get("name", "")))
         if not is_projected_layer(lname):
             continue
-        mod=_resolve_module(model,lname); start=time.perf_counter(); reason=""; changed=False; rel=0.0; tail_size=0; tl_before=float("nan"); tl_after=float("nan")
-        xmin=float(row.get("xmin", float("nan"))) if pd.notna(row.get("xmin", float("nan"))) else float("nan")
-        detx_num=int(row.get("detX_num")) if "detX_num" in row and pd.notna(row.get("detX_num")) else None
+
+        mod = _resolve_module(model, lname)
+        start = time.perf_counter()
+        reason = ""
+        changed = False
+        rel = 0.0
+        tail_size = 0
+        tl_before = float("nan")
+        tl_after = float("nan")
+        xmin = float(row.get("xmin", float("nan"))) if pd.notna(row.get("xmin", float("nan"))) else float("nan")
+        detx_num = int(row.get("detX_num")) if "detX_num" in row and pd.notna(row.get("detX_num")) else None
+
         if mod is None or not math.isfinite(xmin) or xmin <= 0 or hardness <= 0:
             reason = "no_module_or_invalid_xmin_or_zero_strength"
         else:
             with torch.no_grad():
-                W=mod.weight.data; old=W.detach().clone(); W2=W.reshape(W.size(0),-1).float(); U,S,Vh=torch.linalg.svd(W2, full_matrices=False); lam=(S.clamp_min(1e-8)**2); n=lam.numel()
-                mask=lam >= xmin; tail_size=int(mask.sum().item())
+                W = mod.weight.data
+                old = W.detach().clone()
+                W2 = W.reshape(W.size(0), -1).float()
+                U, S, Vh = torch.linalg.svd(W2, full_matrices=False)
+                lam = S.clamp_min(1e-8).square()
+                mask = lam >= xmin
+                tail_size = int(mask.sum().item())
+
                 if tail_size < cfg.min_tail:
-                    reason=f"insufficient_tail_size:{tail_size}"
+                    reason = f"insufficient_tail_size:{tail_size}"
                 else:
-                    lam_tail=lam[mask]; tl_before=float(torch.log(lam_tail+1e-8).sum().item())
-                    r=torch.arange(1,tail_size+1,device=lam.device,dtype=torch.float32); mu=r.pow(-cfg.q)
-                    A=torch.exp((torch.log(lam_tail+1e-8).sum()-torch.log(mu).sum())/tail_size)
-                    target=A*mu; new_tail=_cayley(lam_tail,target,hardness*cfg.cayley_eta)
-                    new_tail=new_tail*torch.exp((torch.log(lam_tail+1e-8).sum()-torch.log(new_tail+1e-8).sum())/tail_size)
-                    Snew=S.clone(); Snew[mask]=torch.sqrt(new_tail.clamp_min(1e-8)); shaped=(U*Snew.unsqueeze(0))@Vh
-                    blend=hardness*cfg.blend_eta
-                    Wnew=(1-blend)*W2 + blend*shaped
-                    S_after=(1-blend)*S + blend*Snew
-                    W.copy_(Wnew.reshape_as(W).to(device=W.device,dtype=W.dtype))
-                    rel=float((torch.linalg.norm(W-old)/(torch.linalg.norm(old)+1e-12)).item())
-                    changed=rel>0
-                    tl_after=float(torch.log(S_after.square()[mask]+1e-8).sum().item())
-        rows.append({"projection_event":event_index,"scheduled_token_fraction":scheduled_token_fraction,"actual_step":actual_step,"actual_tokens_seen":actual_tokens_seen,"layer_name":lname,"hardness":hardness,"projection_runtime":time.perf_counter()-start,"changed":changed,"skip_reason":reason,"relative_frobenius_change":rel,"relative_frobenius_weight_change":rel,"xmin":xmin,"detX_num":detx_num,"tail_size":tail_size,"TraceLog_before":tl_before,"TraceLog_after":tl_after,"wwpgd_implementation":"reference","wwpgd_commit":WWPGD_COMMIT})
+                    lam_tail = lam[mask]
+                    tl_before = float(torch.log(lam_tail + 1e-8).sum().item())
+                    r = torch.arange(1, tail_size + 1, device=lam.device, dtype=torch.float32)
+                    mu = r.pow(-cfg.q)
+                    A = torch.exp(
+                        (torch.log(lam_tail + 1e-8).sum() - torch.log(mu).sum())
+                        / tail_size
+                    )
+                    target = A * mu
+                    new_tail = _cayley(lam_tail, target, hardness * cfg.cayley_eta)
+                    new_tail = new_tail * torch.exp(
+                        (
+                            torch.log(lam_tail + 1e-8).sum()
+                            - torch.log(new_tail + 1e-8).sum()
+                        )
+                        / tail_size
+                    )
+                    Snew = S.clone()
+                    Snew[mask] = torch.sqrt(new_tail.clamp_min(1e-8))
+                    shaped = (U * Snew.unsqueeze(0)) @ Vh
+                    blend = hardness * cfg.blend_eta
+
+                    Wnew = (1.0 - blend) * W2 + blend * shaped
+                    S_after = (1.0 - blend) * S + blend * Snew
+
+                    W.copy_(
+                        Wnew.reshape_as(W).to(
+                            device=W.device,
+                            dtype=W.dtype,
+                        )
+                    )
+
+                    rel = float(
+                        (
+                            torch.linalg.norm(W - old)
+                            / (torch.linalg.norm(old) + 1e-12)
+                        ).item()
+                    )
+                    changed = rel > 0
+                    tl_after = float(
+                        torch.log(
+                            S_after.square()[mask] + 1e-8
+                        ).sum().item()
+                    )
+
+        rows.append(
+            {
+                "projection_event": event_index,
+                "scheduled_token_fraction": scheduled_token_fraction,
+                "actual_step": actual_step,
+                "actual_tokens_seen": actual_tokens_seen,
+                "layer_name": lname,
+                "hardness": hardness,
+                "projection_runtime": time.perf_counter() - start,
+                "changed": changed,
+                "skip_reason": reason,
+                "relative_frobenius_change": rel,
+                "relative_frobenius_weight_change": rel,
+                "xmin": xmin,
+                "detX_num": detx_num,
+                "tail_size": tail_size,
+                "TraceLog_before": tl_before,
+                "TraceLog_after": tl_after,
+                "wwpgd_implementation": "reference",
+                "wwpgd_commit": WWPGD_COMMIT,
+            }
+        )
     return rows
 
 
