@@ -1,0 +1,5 @@
+projection_event,scheduled_token_fraction,actual_step,actual_tokens_seen,layer_name,hardness,projection_runtime,changed,skip_reason,relative_frobenius_change,relative_frobenius_weight_change,xmin,detX_num,tail_size,TraceLog_before,TraceLog_after,wwpgd_implementation,wwpgd_commit
+1,0.5,5,500,blocks.0.attn.c_attn,2.0,0.1,True,,0.01,0.01,1,64,32,5.0,4.9,reference,fixture
+1,0.5,5,500,blocks.0.mlp.0,2.1,0.11,True,,0.02,0.02,1,64,32,5.1,5.0,reference,fixture
+2,1.0,10,1000,blocks.0.attn.c_attn,2.0,0.1,True,,0.015,0.015,1,64,32,4.9,4.8,reference,fixture
+2,1.0,10,1000,blocks.0.mlp.0,2.1,0.11,False,already_ok,0.0,0.0,1,64,32,5.0,5.0,reference,fixture
