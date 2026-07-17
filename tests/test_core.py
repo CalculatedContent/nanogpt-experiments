@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import nbformat
@@ -168,6 +169,33 @@ def test_reference_projection_nonzero_changes_eligible_matrix():
     out = apply_wwpgd_reference(m, details=rows, event_index=10, strength=1.0, cfg=WWTailConfig(min_tail=1, ramp_events=1))
     assert any(r["changed"] and r["relative_frobenius_change"] > 0 for r in out)
 
+
+def test_reference_projection_does_not_call_svdvals(monkeypatch):
+    def fail_svdvals(*args, **kwargs):
+        raise AssertionError("apply_wwpgd_reference must not call torch.linalg.svdvals")
+
+    monkeypatch.setattr(torch.linalg, "svdvals", fail_svdvals)
+    m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10))
+    rows = pd.DataFrame(
+        [
+            {"longname": n, "xmin": 1e-12, "detX_num": 3}
+            for n, _ in matrix_modules(m)
+            if is_projected_layer(n)
+        ]
+    )
+
+    out = apply_wwpgd_reference(
+        m,
+        details=rows,
+        event_index=10,
+        strength=1.0,
+        cfg=WWTailConfig(min_tail=1, ramp_events=1),
+    )
+
+    projected = [r for r in out if r["changed"]]
+    assert out
+    assert projected
+    assert all(math.isfinite(r["TraceLog_after"]) for r in projected)
 
 def test_validation_probe_fixed_and_distinct():
     from wwgpt.data import fixed_probe
