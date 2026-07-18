@@ -29,6 +29,7 @@ from wwgpt.ww import (
     fallback_spectral_summary,
     spectral_summary,
     weightwatcher_details,
+    measured_projection_spectral_rows,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
     WWTailConfig,
@@ -122,6 +123,7 @@ def run_single(
     metric_rows = []
     spectral_rows = []
     proj_rows = []
+    immediate_spectral_rows = []
     write_json(run_dir / "environment.json", environment())
     write_json(
         run_dir / "manifest.json",
@@ -273,19 +275,9 @@ def smoke(root: Path, steps: int = 3, seeds: list[int] | None = None) -> Path:
     return smoke_dir
 
 
-def select_device(override: str | None = None) -> torch.device:
-    if override:
-        return torch.device(override)
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return torch.device("mps")
-    try:
-        import torch_xla.core.xla_model as xm  # noqa: F401
-
-        return torch.device("xla")
-    except Exception:
-        return torch.device("cpu")
+def select_device(override: str | None = None):
+    from wwgpt.device import resolve_device
+    return resolve_device(override or "auto")
 
 
 def _state_hash(state: dict[str, torch.Tensor]) -> str:
@@ -383,6 +375,7 @@ def run_scientific_single(
     metric_rows = []
     spectral_rows = []
     proj_rows = []
+    immediate_spectral_rows = []
     _log_train_progress(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
@@ -405,11 +398,10 @@ def run_scientific_single(
             if len(due) > len({r["projection_event"] for r in proj_rows}):
                 event = len({r["projection_event"] for r in proj_rows})
                 ps = time.perf_counter()
-                details = weightwatcher_details(model)
-                proj_rows.extend(
-                    apply_wwpgd_reference(
+                pre_details = weightwatcher_details(model)
+                event_proj_rows = apply_wwpgd_reference(
                         model,
-                        details=details,
+                        details=pre_details,
                         event_index=event,
                         scheduled_token_fraction=cfg.wwpgd.projection_schedule[event],
                         actual_step=step,
@@ -417,7 +409,9 @@ def run_scientific_single(
                         strength=cfg.wwpgd.strength,
                         cfg=WWTailConfig(min_tail=cfg.wwpgd.min_tail, blend_eta=cfg.wwpgd.blend_eta, cayley_eta=cfg.wwpgd.cayley_eta, use_detx=cfg.wwpgd.use_detx, warmup_events=cfg.wwpgd.warmup_events, ramp_events=cfg.wwpgd.ramp_events, q=1.0/(cfg.wwpgd.target_alpha-1.0)),
                     )
-                )
+                proj_rows.extend(event_proj_rows)
+                post_details = weightwatcher_details(model)
+                immediate_spectral_rows.extend(measured_projection_spectral_rows(pre_details, post_details, event_proj_rows, cfg.wwpgd.target_alpha))
                 proj_time = time.perf_counter() - ps
                 _log_train_progress(
                     f"projection complete pair={pair_id} optimizer={optimizer_name} seed={seed} event={event} step={step}/{steps} projection_s={proj_time:.2f}"
@@ -500,6 +494,7 @@ def run_scientific_single(
     _write_csv(run_dir / "spectral.csv", spectral_rows)
     if optimizer_name == "adamw_wwpgd_reference":
         _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)
+        _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
     write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss})
     _log_train_progress(

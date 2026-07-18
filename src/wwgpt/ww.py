@@ -250,3 +250,81 @@ def apply_wwpgd_reference(
 
 def apply_wwpgd(model: nn.Module, target_alpha: float, strength: float, step: int, warmup_steps: int = 0, ramp_steps: int = 1):
     return apply_wwpgd_reference(model, event_index=step, actual_step=step, strength=strength, cfg=WWTailConfig(warmup_events=warmup_steps, ramp_events=ramp_steps))
+MEASURED_PROJECTION_SPECTRAL_FIELDS = [
+    'projection_event','scheduled_token_fraction','actual_step','actual_tokens_seen','layer_name','match_key','match_status',
+    'target_alpha','alpha_before','alpha_after','weighted_alpha_before','weighted_alpha_after','xmin_before','xmin_after',
+    'detX_num_before','detX_num_after','D_before','D_after','num_evals_before','num_evals_after','status_before','status_after',
+    'warning_before','warning_after','pre_weightwatcher_runtime','post_weightwatcher_runtime','weightwatcher_version','weightwatcher_configuration',
+    'TraceLog_before','TraceLog_after','alpha_delta','abs_alpha_error_before','abs_alpha_error_after','abs_alpha_error_change','TraceLog_change',
+    'immediate_spectral_source','measurement_valid_for_science'
+]
+
+def _finite(v):
+    try: return math.isfinite(float(v))
+    except Exception: return False
+
+def _nan_if_missing(row, key):
+    try:
+        v=row.get(key, float('nan'))
+        return float(v) if pd.notna(v) else float('nan')
+    except Exception:
+        return float('nan')
+
+def _status(row):
+    for k in ('status','fit_status'):
+        if k in row and pd.notna(row.get(k)): return str(row.get(k))
+    return 'ok' if _finite(row.get('alpha', float('nan'))) else 'missing_alpha'
+
+def _warning(row):
+    for k in ('warning','warnings'):
+        if k in row and pd.notna(row.get(k)): return str(row.get(k))
+    return ''
+
+def _index_details(df: pd.DataFrame, key: str):
+    out={}
+    if key in df.columns:
+        for _, r in df.iterrows():
+            v=r.get(key)
+            if pd.notna(v): out[str(v)]=r
+    return out
+
+def measured_projection_spectral_rows(pre: pd.DataFrame, post: pd.DataFrame, projection_rows: list[dict[str,object]], target_alpha: float) -> list[dict[str,object]]:
+    """Pair one real pre-event WW details table with one real post-event table.
+
+    Alpha deltas and error changes are derived only from measured finite alpha fields.
+    Missing fields remain NaN and invalidate the row for scientific WeightWatcher use.
+    """
+    pre_long=_index_details(pre,'longname'); post_long=_index_details(post,'longname')
+    pre_name=_index_details(pre,'name'); post_name=_index_details(post,'name')
+    rows=[]
+    pre_rt=float(pre['analysis_runtime'].iloc[0]) if 'analysis_runtime' in pre.columns and len(pre) else float('nan')
+    post_rt=float(post['analysis_runtime'].iloc[0]) if 'analysis_runtime' in post.columns and len(post) else float('nan')
+    wwver=str(pre['weightwatcher_version'].iloc[0]) if 'weightwatcher_version' in pre.columns and len(pre) else 'unknown'
+    wwcfg=str(pre['weightwatcher_configuration'].iloc[0]) if 'weightwatcher_configuration' in pre.columns and len(pre) else ''
+    for pr in projection_rows:
+        lname=str(pr.get('layer_name',''))
+        before=pre_long.get(lname); after=post_long.get(lname); match_key='longname'
+        if before is None or after is None:
+            before=pre_name.get(lname); after=post_name.get(lname); match_key='name'
+        matched=before is not None and after is not None
+        b=before if before is not None else pd.Series(dtype=object); a=after if after is not None else pd.Series(dtype=object)
+        ab=_nan_if_missing(b,'alpha'); aa=_nan_if_missing(a,'alpha')
+        wab=_nan_if_missing(b,'weighted_alpha'); waa=_nan_if_missing(a,'weighted_alpha')
+        tb=_nan_if_missing(b,'TraceLog'); ta=_nan_if_missing(a,'TraceLog')
+        sb=_status(b); sa=_status(a)
+        valid=bool(matched and _finite(ab) and _finite(aa) and sb.lower() in {'ok','success','valid'} and sa.lower() in {'ok','success','valid'})
+        def sub(x,y): return float(x)-float(y) if _finite(x) and _finite(y) else float('nan')
+        row={
+            'projection_event':pr.get('projection_event'),'scheduled_token_fraction':pr.get('scheduled_token_fraction'),'actual_step':pr.get('actual_step'),'actual_tokens_seen':pr.get('actual_tokens_seen'),'layer_name':lname,
+            'match_key':match_key if matched else 'unmatched','match_status':'matched' if matched else 'unmatched','target_alpha':target_alpha,
+            'alpha_before':ab,'alpha_after':aa,'weighted_alpha_before':wab,'weighted_alpha_after':waa,'xmin_before':_nan_if_missing(b,'xmin'),'xmin_after':_nan_if_missing(a,'xmin'),
+            'detX_num_before':_nan_if_missing(b,'detX_num'),'detX_num_after':_nan_if_missing(a,'detX_num'),'D_before':_nan_if_missing(b,'D'),'D_after':_nan_if_missing(a,'D'),
+            'num_evals_before':_nan_if_missing(b,'num_evals'),'num_evals_after':_nan_if_missing(a,'num_evals'),'status_before':sb,'status_after':sa,'warning_before':_warning(b),'warning_after':_warning(a),
+            'pre_weightwatcher_runtime':pre_rt,'post_weightwatcher_runtime':post_rt,'weightwatcher_version':wwver,'weightwatcher_configuration':wwcfg,
+            'TraceLog_before':tb,'TraceLog_after':ta,
+            'alpha_delta':sub(aa,ab),'abs_alpha_error_before':abs(ab-target_alpha) if _finite(ab) else float('nan'),'abs_alpha_error_after':abs(aa-target_alpha) if _finite(aa) else float('nan'),
+            'abs_alpha_error_change':sub(abs(aa-target_alpha) if _finite(aa) else float('nan'), abs(ab-target_alpha) if _finite(ab) else float('nan')),
+            'TraceLog_change':sub(ta,tb),'immediate_spectral_source':'weightwatcher_measured','measurement_valid_for_science':valid,
+        }
+        rows.append(row)
+    return rows
