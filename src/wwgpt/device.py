@@ -70,3 +70,31 @@ def memory_stats(device=None):
 def save_device_manifest(path: Path, requested: str|None="auto"):
     path=Path(path); path.write_text(json.dumps(device_summary(requested), indent=2, sort_keys=True)+"\n")
     return path
+
+def run_device_preflight(output: Path | None = None, requested: str | None = "auto"):
+    import time
+    from dataclasses import asdict
+    from wwgpt.model import GPT
+    from wwgpt.config import ModelConfig
+    from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, rng_state, restore_rng_state
+    from wwgpt.ww import measured_projection_spectral_rows, weightwatcher_details, apply_wwpgd_reference, WWTailConfig
+    outdir = Path(output or "."); outdir.mkdir(parents=True, exist_ok=True)
+    report = {"requested_device": requested or "auto", "valid_for_science": False, "timings": {}, "warnings": [], "failures": []}
+    t0=time.perf_counter()
+    dev=detect_device(requested); report.update(device_summary(requested)); report["resolved_device"]=str(dev)
+    cfg=ModelConfig(n_layer=1,n_head=1,n_embd=16,block_size=8,vocab_size=32)
+    model=GPT(cfg).to(dev); opt=torch.optim.AdamW(model.parameters(), lr=1e-3)
+    x=torch.randint(0, cfg.vocab_size, (1, cfg.block_size), device=dev); y=torch.randint(0, cfg.vocab_size, (1, cfg.block_size), device=dev)
+    logits, loss=model(x,y); report["forward_success"]=bool(loss is not None)
+    loss.backward(); report["backward_success"]=True
+    opt.step(); opt.zero_grad(); synchronize_device(dev); report["optimizer_success"]=True
+    details=weightwatcher_details(model); report["weightwatcher_success"]=True
+    rows=apply_wwpgd_reference(model, details=details, event_index=0, actual_step=1, actual_tokens_seen=8, strength=0.01, cfg=WWTailConfig(ramp_events=1)); report["wwpgd_success"]=True; report["wwpgd_rows"]=len(rows)
+    assert all(torch.isfinite(p).all() for p in model.parameters())
+    reader_state={"pos": 8}; before_rng=rng_state()
+    ck=save_checkpoint(outdir, {"model_state_dict":model.state_dict(),"optimizer_state_dict":{"optimizers":[opt.state_dict()]},"current_step":1,"next_step":2,"tokens_processed":8,"training_reader_position":reader_state["pos"],"reader_position":reader_state["pos"],"seed":0,**before_rng,"device_type":getattr(dev,'type',str(dev)),"precision_policy":"torch_default","gradient_accumulation_position":0,"metrics_rows":[],"periodic_weightwatcher_rows":[],"wwpgd_projection_rows":rows,"immediate_projection_weightwatcher_rows":[],"scientific_schema_version":0,"compatibility":{}})
+    loaded=load_latest_checkpoint(outdir); model.load_state_dict(loaded["model_state_dict"]); opt.load_state_dict(loaded["optimizer_state_dict"]["optimizers"][0]); restore_rng_state(loaded); report["checkpoint_success"]=True
+    logits2, loss2=model(x,y); loss2.backward(); opt.step(); synchronize_device(dev); report["resume_success"]=True
+    report["timings"]["total_seconds"]=time.perf_counter()-t0
+    (outdir/"device_preflight.json").write_text(json.dumps(report, indent=2, sort_keys=True, default=str)+"\n")
+    return report

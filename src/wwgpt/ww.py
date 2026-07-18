@@ -305,9 +305,11 @@ def composite_spectral_summary(model: nn.Module, *, step: int, tokens_seen: int,
         torch.random.set_rng_state(state)
     try:
         df = weightwatcher_details(holder)
-    except Exception:
-        rows = fallback_spectral_summary(holder, step=step, tokens_seen=tokens_seen, optimizer=arm_name, seed=seed, pair_id=pair_id)
-        df = pd.DataFrame(rows)
+    except Exception as e:
+        rows = invalid_weightwatcher_rows(e, step=step, tokens_seen=tokens_seen, optimizer=arm_name, seed=seed, pair_id=pair_id)
+        for r in rows:
+            r.update({"base_optimizer": base_optimizer, "extension": extension, "arm_name": arm_name, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION})
+        return rows
     key = "longname" if "longname" in df.columns else "name"
     rows=[]
     for _, row in df.iterrows():
@@ -317,3 +319,58 @@ def composite_spectral_summary(model: nn.Module, *, step: int, tokens_seen: int,
         d = row.to_dict(); d.update({"step": step, "tokens_seen": tokens_seen, "base_optimizer": base_optimizer, "extension": extension, "arm_name": arm_name, "seed": seed, "pair_id": pair_id, "composite_name": cname, "formula": formula, "source_shapes": json.dumps(shapes, sort_keys=True), "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION})
         rows.append(d)
     return rows
+
+
+def invalid_weightwatcher_rows(exc: BaseException, *, step: int, tokens_seen: int, optimizer: str, seed: int, pair_id: str, projection_event: int | None = None) -> list[dict[str, object]]:
+    row = {
+        "step": step,
+        "tokens_seen": tokens_seen,
+        "optimizer": optimizer,
+        "seed": seed,
+        "pair_id": pair_id,
+        "spectral_estimator": "weightwatcher",
+        "valid_for_science": False,
+        "measurement_valid_for_science": False,
+        "weightwatcher_exception_type": type(exc).__name__,
+        "weightwatcher_exception_message": str(exc),
+        "alpha": float("nan"),
+        "D": float("nan"),
+        "num_evals": float("nan"),
+        "xmin": float("nan"),
+        "detX_num": float("nan"),
+        "weightwatcher_version": _ww_version(),
+        "weightwatcher_configuration": '{"detX": true, "randomize": false, "plot": false}',
+    }
+    if projection_event is not None:
+        row["projection_event"] = projection_event
+        row["immediate_spectral_source"] = "weightwatcher_failed"
+    return [row]
+
+
+def measured_projection_spectral_rows(*args, **kwargs) -> list[dict[str, object]]:
+    """Return real WeightWatcher pre/post rows; legacy DataFrame mode preserves missing fields as NaN."""
+    if args and isinstance(args[0], pd.DataFrame):
+        pre, post, proj_rows = args[:3]
+        target_alpha = args[3] if len(args) > 3 else kwargs.get("target_alpha", float("nan"))
+        rows=[]
+        key = "longname" if "longname" in post.columns else "name"
+        for pr in proj_rows:
+            lname=str(pr.get("layer_name", ""))
+            matches=post[post.get(key, pd.Series(dtype=object)).astype(str).eq(lname)] if key in post.columns else pd.DataFrame()
+            row = matches.iloc[0].to_dict() if len(matches) else {}
+            alpha = row.get("alpha", float("nan"))
+            valid = bool(pd.notna(alpha))
+            out={**pr, **row, "alpha_before": (pre.iloc[0].to_dict().get("alpha", float("nan")) if len(pre) else float("nan")), "alpha_after": row.get("alpha", float("nan")), "alpha_delta": ((row.get("alpha", float("nan")) - (pre.iloc[0].to_dict().get("alpha", float("nan")) if len(pre) else float("nan"))) if pd.notna(row.get("alpha", float("nan"))) else float("nan")), "target_alpha": target_alpha, "spectral_estimator": "weightwatcher", "immediate_spectral_source": "weightwatcher_measured", "measurement_valid_for_science": valid, "valid_for_science": valid}
+            for fld in ("alpha","D","num_evals","xmin","detX_num"):
+                out.setdefault(fld, float("nan"))
+            rows.append(out)
+        return rows
+    model = args[0] if args else kwargs.pop("model")
+    step=kwargs["step"]; tokens_seen=kwargs["tokens_seen"]; optimizer=kwargs["optimizer"]; seed=kwargs["seed"]; pair_id=kwargs["pair_id"]; projection_event=kwargs["projection_event"]; phase=kwargs.get("phase","post")
+    try:
+        rows = spectral_summary(model, step=step, tokens_seen=tokens_seen, optimizer=optimizer, seed=seed, pair_id=pair_id)
+        for r in rows:
+            r.update({"projection_event": projection_event,"projection_phase": phase,"immediate_spectral_source": "weightwatcher_measured","measurement_valid_for_science": bool(r.get("valid_for_science", True))})
+        return rows
+    except Exception as e:
+        return invalid_weightwatcher_rows(e, step=step, tokens_seen=tokens_seen, optimizer=optimizer, seed=seed, pair_id=pair_id, projection_event=projection_event)

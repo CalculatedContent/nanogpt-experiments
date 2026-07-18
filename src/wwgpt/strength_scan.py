@@ -58,7 +58,7 @@ def find_or_run_base_control(seed_dir: Path, seed:int, cfg, data, init_state, in
     if resume:
         r=_complete_run(parent/base_optimizer)
         if r: return r
-    return run_scientific_single(parent,base_optimizer,seed,cfg,data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume)
+    return run_scientific_single(parent,base_optimizer,seed,cfg,data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume,False)
 
 def validate_scan_pairing(scan_root: Path) -> bool:
     for seed_dir in (scan_root/'seeds').glob('seed_*'):
@@ -88,7 +88,7 @@ def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_s
         r=_complete_run(parent/'adamw_wwpgd_reference')
         if r: return r
     base_opt=json.loads((adamw/'manifest.json').read_text()).get('base_optimizer','adamw')
-    run=run_scientific_single(parent,base_opt,seed,cfg,data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume)
+    run=run_scientific_single(parent,base_opt,seed,cfg,data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume,immediate_projection_spectral)
     stable,reason,istep,mt,mv,mg=_stability(run,instability_loss_threshold)
     _append_scan_fields(run, scan_id=scan_id, scan_name=scan_name, scan_strength=strength, adamw_control_run=str(adamw), adamw_control_manifest_hash=_manifest_hash(adamw), strength_arm_id=label, scientific_schema_version=SCIENTIFIC_SCHEMA_VERSION, stable=stable, instability_reason=reason, instability_step=istep, maximum_train_loss=mt, maximum_validation_loss=mv, maximum_gradient_norm=mg)
     # Immediate pre/post WeightWatcher spectral rows are written by run_scientific_single.
@@ -98,12 +98,10 @@ def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_s
 def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multiplier:int, seeds=None, strengths=None, config:Path|None=None, device=None, eval_interval=None, spectral_interval=None, checkpoint_interval=None, immediate_projection_spectral=True, resume=False, continue_on_error=True, scan_name='strength_scan', instability_loss_threshold=20.0, include_adamw_control=True, optimizer: str = "adamw"):
     strengths=parse_strengths(strengths if isinstance(strengths,str) or strengths is None else ','.join(map(str,strengths))); seeds=seeds or [1337]
     cfg=load_config(config, level)
-    try: data=load_prepared_scientific_data(data_root, level, token_multiplier)
-    except Exception:
-        cfg=replace(cfg, train=replace(cfg.train, batch_size=1, eval_batches=1, max_steps=2), model=replace(cfg.model, block_size=8, n_layer=1, n_head=1, n_embd=16, vocab_size=128))
-        data=prepare_local_text(Path(data_root)/'strength_scan_local', ['strength scan fixture text '*200], 512)
-        data.data_manifest.update({'optimizer_steps':2,'tokens_per_optimizer_step':8,'requested_tokens':16,'realized_tokens':16,'dataset_name':'local_fixture','dataset_config':'fixture','dataset_revision':'none'})
-        data.tokenizer_manifest['tokenizer_hash']=data.tokenizer_manifest.get('tokenizer_hash') or data.tokenizer_manifest.get('hash','fixture')
+    try:
+        data=load_prepared_scientific_data(data_root, level, token_multiplier)
+    except Exception as e:
+        raise RuntimeError('scientific strength scan must never fall back to fixtures; prepare scientific data first') from e
     base=results_root/'experiments'/'strength_scan'/f'level_{level:02d}'/f'multiplier_{token_multiplier}'; base.mkdir(parents=True,exist_ok=True)
     scan_root=resolve_scan_root(base) if resume and list(base.rglob('scan_manifest.json')) else unique_dir(base, 'scan_'+time.strftime('%Y%m%d-%H%M%S'))
     scan_id=scan_root.name
