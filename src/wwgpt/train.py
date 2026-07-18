@@ -5,7 +5,7 @@ import json
 import math
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import torch
@@ -20,7 +20,8 @@ from wwgpt.config import (
     WWPGDConfig,
     load_config,
 )
-from wwgpt.data import NonRepeatingTokenReader, prepare_local_text, fixed_probe
+from wwgpt.optim import ARM_DISPLAY, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, resolve_warmup_steps
+from wwgpt.data import NonRepeatingTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
 from wwgpt.ww import (
@@ -28,12 +29,36 @@ from wwgpt.ww import (
     apply_wwpgd_reference,
     fallback_spectral_summary,
     spectral_summary,
+    composite_spectral_summary,
     weightwatcher_details,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
     WWTailConfig,
 )
 
+
+
+class TrainingExtension:
+    name = "base"
+    def after_optimizer_step(self, *, model, optimizer_step: int, total_optimizer_steps: int, tokens_seen: int) -> list[dict[str, object]]:
+        return []
+
+
+class NoExtension(TrainingExtension):
+    name = "none"
+
+
+class WWPGDExtension(TrainingExtension):
+    name = "wwpgd"
+    def __init__(self, cfg: WWPGDConfig, interval: int):
+        self.cfg = cfg; self.interval = interval
+    def after_optimizer_step(self, *, model, optimizer_step: int, total_optimizer_steps: int, tokens_seen: int) -> list[dict[str, object]]:
+        if optimizer_step % self.interval != 0:
+            return []
+        event = optimizer_step // self.interval - 1
+        details = weightwatcher_details(model)
+        q = self.cfg.q if hasattr(self.cfg, "q") else 1.0 / max(1e-9, self.cfg.target_alpha - 1.0)
+        return apply_wwpgd_reference(model, details=details, event_index=event, scheduled_token_fraction=tokens_seen / max(1, total_optimizer_steps), actual_step=optimizer_step, actual_tokens_seen=tokens_seen, strength=self.cfg.strength, cfg=WWTailConfig(min_tail=self.cfg.min_tail, blend_eta=self.cfg.blend_eta, cayley_eta=self.cfg.cayley_eta, use_detx=self.cfg.use_detx, warmup_events=self.cfg.warmup_events, ramp_events=self.cfg.ramp_events, q=q))
 
 def _log_train_progress(message: str) -> None:
     print(f"[wwgpt run-multiseed] {message}", file=sys.stderr, flush=True)
@@ -96,6 +121,13 @@ def run_single(
     init_state: dict[str, torch.Tensor] | None = None,
 ) -> Path:
     torch.manual_seed(seed)
+    if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
+        base_optimizer, extension_name = "adamw", "wwpgd"
+    elif optimizer_name in {"adamw", "muon", "stableadamw"}:
+        base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
+    else:
+        base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
+    optimizer_name = make_arm_name(base_optimizer, extension_name)
     run_dir = unique_dir(run_parent / optimizer_name, "run")
     ckpt = run_dir / "checkpoints"
     ckpt.mkdir()
@@ -127,6 +159,10 @@ def run_single(
         run_dir / "manifest.json",
         {
             "optimizer": optimizer_name,
+        "base_optimizer": base_optimizer,
+        "extension": extension_name,
+        "arm_name": optimizer_name,
+        "arm_display_name": ARM_DISPLAY[optimizer_name],
             "seed": seed,
             "pair_id": pair_id,
             "smoke_test": True,
@@ -312,32 +348,36 @@ def run_scientific_single(
     resume: bool = False,
 ) -> Path:
     torch.manual_seed(seed)
+    if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
+        base_optimizer, extension_name = "adamw", "wwpgd"
+    elif optimizer_name in {"adamw", "muon", "stableadamw"}:
+        base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
+    else:
+        base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
+    optimizer_name = make_arm_name(base_optimizer, extension_name)
     run_dir = unique_dir(run_parent / optimizer_name, "run")
     ckpt = run_dir / "checkpoints"
     ckpt.mkdir()
     selected_device = select_device(device)
     model = GPT(cfg.model).to(selected_device)
     model.load_state_dict(init_state)
-    opt = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg.train.learning_rate,
-        betas=cfg.train.betas,
-        eps=cfg.train.epsilon,
-        weight_decay=cfg.train.weight_decay,
-    )
-    steps = int(data.data_manifest["optimizer_steps"])
-    tokens_per_step = int(data.data_manifest["tokens_per_optimizer_step"])
+    bundle, resolved_llrd_gamma = build_optimizer_bundle(model, cfg.train, base_optimizer)
+    report = model.parameter_report()
+    parameter_count_used = report.total_parameters if cfg.parameter_count_convention == "total" else report.non_embedding_parameters
+    tokens_per_step = cfg.train.batch_size * cfg.model.block_size * cfg.train.gradient_accumulation
+    if cfg.train.max_steps is not None:
+        steps = cfg.train.max_steps; target_tokens = steps * tokens_per_step; budget_source = "max_steps"
+    elif cfg.train.max_train_tokens is not None:
+        target_tokens = cfg.train.max_train_tokens; steps = max(1, math.ceil(target_tokens / tokens_per_step)); budget_source = "max_train_tokens"
+    else:
+        target_tokens = parameter_count_used * token_multiplier; steps = max(1, math.ceil(target_tokens / tokens_per_step)); budget_source = "token_multiplier"
+    realized_tokens = steps * tokens_per_step
+    resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps)
+    wwpgd_interval = int(ww_interval or cfg.train.wwpgd_interval or eval_interval or cfg.train.eval_interval)
+    extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
     reader = NonRepeatingTokenReader(data.train, cfg.model.block_size)
-    val_x, val_y, validation_probe_hash = fixed_probe(
-        data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches
-    )
-    train_probe_start = cfg.train.batch_size * cfg.model.block_size * 2
-    train_x, train_y, training_probe_hash = fixed_probe(
-        data.train[train_probe_start:],
-        cfg.model.block_size,
-        cfg.train.batch_size,
-        cfg.train.eval_batches,
-    )
+    validation_probe_hash = ""
+    training_probe_hash = ""
     assert not np.shares_memory(np.array(data.val), np.array(data.train))
     write_json(run_dir / "environment.json", environment())
     (run_dir / "initialization_hash.txt").write_text(init_hash)
@@ -349,9 +389,20 @@ def run_scientific_single(
         "seed": seed,
         "pair_id": pair_id,
         "optimizer": optimizer_name,
-        "requested_tokens": data.data_manifest["requested_tokens"],
-        "realized_tokens": data.data_manifest["realized_tokens"],
+        "base_optimizer": base_optimizer,
+        "extension": extension_name,
+        "arm_name": optimizer_name,
+        "arm_display_name": ARM_DISPLAY[optimizer_name],
+        "requested_tokens": target_tokens,
+        "target_train_tokens": target_tokens,
+        "realized_tokens": realized_tokens,
+        "realized_train_tokens": realized_tokens,
         "optimizer_steps": steps,
+        "total_optimizer_steps": steps,
+        "tokens_per_optimizer_step": tokens_per_step,
+        "budget_source": budget_source,
+        "parameter_count_convention": cfg.parameter_count_convention,
+        "parameter_count_used": parameter_count_used,
         "dataset_name": data.data_manifest["dataset_name"],
         "dataset_config": data.data_manifest["dataset_config"],
         "dataset_revision": data.data_manifest["dataset_revision"],
@@ -359,7 +410,30 @@ def run_scientific_single(
         "data_hash": data.corpus_hash,
         "corpus_hash": data.corpus_hash,
         "initialization_hash": init_hash,
-        "parameter_report": GPT(cfg.model).report_dict(),
+        "parameter_report": model.report_dict(),
+        "model_config": asdict(cfg.model),
+        "model_architecture_version": cfg.model.model_architecture_version,
+        "model_config_hash": sha256_bytes(json.dumps(asdict(cfg.model), sort_keys=True).encode()),
+        "optimizer_hyperparameters": asdict(cfg.train),
+        "extension_hyperparameters": asdict(cfg.wwpgd),
+        "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "steps": steps, "batch": cfg.train.batch_size}, sort_keys=True).encode()),
+        "evaluation_sampling": cfg.train.evaluation_sampling,
+        "evaluation_schedule_version": "random_per_eval_v1",
+        "lr_schedule": cfg.train.lr_schedule,
+        "resolved_warmup_steps": resolved_warmup_steps,
+        "layer_lr": cfg.train.layer_lr,
+        "resolved_llrd_gamma": resolved_llrd_gamma,
+        "llrd_min_multiplier": cfg.train.llrd_min_multiplier,
+        "weight_decay": cfg.train.weight_decay,
+        "grad_clip": cfg.train.grad_clip,
+        "batch_size": cfg.train.batch_size,
+        "gradient_accumulation": cfg.train.gradient_accumulation,
+        "wwpgd_interval": wwpgd_interval,
+        "projection_schedule_type": "optimizer_step_interval",
+        "total_projection_events": steps // wwpgd_interval,
+        "WeightWatcher version": "",
+        "spectral estimator": "weightwatcher",
+        "composite specification version": "raw_and_composite_v1",
         "estimated_flops": 6
         * GPT(cfg.model).parameter_report().total_parameters
         * int(data.data_manifest["realized_tokens"]),
@@ -382,7 +456,9 @@ def run_scientific_single(
     write_json(run_dir / "config.json", cfgd)
     metric_rows = []
     spectral_rows = []
+    composite_rows = []
     proj_rows = []
+    lr_rows = []
     _log_train_progress(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
@@ -390,46 +466,40 @@ def run_scientific_single(
     last_loss = 0.0
     ww_over = 0.0
     for step in range(1, steps + 1):
-        xb, yb = reader.next_batch(cfg.train.batch_size)
-        x = torch.tensor(xb, device=selected_device)
-        y = torch.tensor(yb, device=selected_device)
-        _, loss = model(x, y)
-        opt.zero_grad()
-        loss.backward()
-        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
-        opt.step()
-        proj_time = 0.0
-        if optimizer_name == "adamw_wwpgd_reference":
-            frac = (step * tokens_per_step) / max(1, int(data.data_manifest["realized_tokens"]))
-            due = [x for x in cfg.wwpgd.projection_schedule if x <= frac]
-            if len(due) > len({r["projection_event"] for r in proj_rows}):
-                event = len({r["projection_event"] for r in proj_rows})
-                ps = time.perf_counter()
-                details = weightwatcher_details(model)
-                proj_rows.extend(
-                    apply_wwpgd_reference(
-                        model,
-                        details=details,
-                        event_index=event,
-                        scheduled_token_fraction=cfg.wwpgd.projection_schedule[event],
-                        actual_step=step,
-                        actual_tokens_seen=step * tokens_per_step,
-                        strength=cfg.wwpgd.strength,
-                        cfg=WWTailConfig(min_tail=cfg.wwpgd.min_tail, blend_eta=cfg.wwpgd.blend_eta, cayley_eta=cfg.wwpgd.cayley_eta, use_detx=cfg.wwpgd.use_detx, warmup_events=cfg.wwpgd.warmup_events, ramp_events=cfg.wwpgd.ramp_events, q=1.0/(cfg.wwpgd.target_alpha-1.0)),
-                    )
-                )
-                proj_time = time.perf_counter() - ps
-                _log_train_progress(
-                    f"projection complete pair={pair_id} optimizer={optimizer_name} seed={seed} event={event} step={step}/{steps} projection_s={proj_time:.2f}"
-                )
+        lr_rows.extend(apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train))
+        bundle.zero_grad()
+        train_loss_value = 0.0
+        for _ in range(cfg.train.gradient_accumulation):
+            xb, yb = reader.next_batch(cfg.train.batch_size)
+            x = torch.tensor(xb, device=selected_device)
+            y = torch.tensor(yb, device=selected_device)
+            _, loss = model(x, y)
+            assert loss is not None
+            (loss / cfg.train.gradient_accumulation).backward()
+            train_loss_value += float(loss.detach().cpu())
+        grad = torch.tensor(0.0)
+        if cfg.train.grad_clip > 0.0:
+            grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+        bundle.step()
+        loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
+        ps = time.perf_counter()
+        new_proj = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step)
+        proj_rows.extend(new_proj)
+        proj_time = time.perf_counter() - ps if new_proj else 0.0
         if step % (eval_interval or cfg.train.eval_interval) == 0 or step == steps:
+            eval_index = len(metric_rows)
+            was_training = model.training
+            model.eval()
+            if cfg.train.evaluation_sampling == "fixed_probe":
+                train_x, train_y, training_probe_hash = fixed_probe(data.train[cfg.train.batch_size * cfg.model.block_size * 2:], cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+                val_x, val_y, validation_probe_hash = fixed_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+            else:
+                train_x, train_y, training_probe_hash = random_probe(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(seed, "train", eval_index, "random_per_eval_v1"))
+                val_x, val_y, validation_probe_hash = random_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(seed, "val", eval_index, "random_per_eval_v1"))
             with torch.no_grad():
-                tm, _ = _evaluate_probe_batches(
-                    model, train_x, train_y, selected_device
-                )
-                vm, validation_probe_loss = _evaluate_probe_batches(
-                    model, val_x, val_y, selected_device
-                )
+                tm, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)
+                vm, validation_probe_loss = _evaluate_probe_batches(model, val_x, val_y, selected_device)
+            model.train(was_training)
             elapsed = time.perf_counter() - start
             last_loss = validation_probe_loss
             metric_rows.append(
@@ -453,6 +523,10 @@ def run_scientific_single(
                     "train_token_error": tm["token_error"],
                     "val_token_error": vm["token_error"],
                     "generalization_gap": vm["loss"] - tm["loss"],
+                    "evaluation_index": eval_index,
+                    "evaluation_sampling": cfg.train.evaluation_sampling,
+                    "train_eval_batch_hash": training_probe_hash,
+                    "val_eval_batch_hash": validation_probe_hash,
                     "evaluation_token_count": int(
                         cfg.train.eval_batches * cfg.train.batch_size * cfg.model.block_size
                     ),
@@ -487,6 +561,8 @@ def run_scientific_single(
             _log_train_progress(
                 f"progress pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} tokens={step * tokens_per_step}/{int(data.data_manifest['realized_tokens'])} train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} elapsed_s={elapsed:.1f} tokens_per_s={(step * tokens_per_step) / max(elapsed, 1e-9):.1f}"
             )
+        if step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps:
+            composite_rows.extend(composite_spectral_summary(model, step=step, tokens_seen=step * tokens_per_step, base_optimizer=base_optimizer, extension=extension_name, arm_name=optimizer_name, seed=seed, pair_id=pair_id))
         if step % (checkpoint_interval or cfg.train.checkpoint_interval) == 0:
             torch.save(
                 {"model": model.state_dict(), "step": step},
@@ -498,7 +574,9 @@ def run_scientific_single(
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _write_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows)
-    if optimizer_name == "adamw_wwpgd_reference":
+    _write_csv(run_dir / "composite_spectral.csv", composite_rows)
+    _write_csv(run_dir / "lrs.csv", lr_rows)
+    if extension_name == "wwpgd":
         _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
     write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss})
@@ -522,6 +600,8 @@ def run_multiseed_scientific(
     spectral_interval: int | None = None,
     precision: str | None = None,
     resume: bool = False,
+    optimizer: str = "adamw",
+    extensions: list[str] | None = None,
 ) -> Path:
     from wwgpt.data import load_prepared_scientific_data
 
@@ -557,47 +637,32 @@ def run_multiseed_scientific(
                 "level": level,
                 "token_multiplier": token_multiplier,
                 "initialization_hash": init_hash,
-                "arms": ["adamw", "adamw_wwpgd_reference"],
+                "base_optimizer": optimizer,
+                "extensions": extensions or ["none", "wwpgd"],
+                "arms": [make_arm_name(optimizer, e) for e in (extensions or ["none", "wwpgd"])],
             },
         )
-        run_scientific_single(
-            pair,
-            "adamw",
-            seed,
-            cfg,
-            data,
-            pair_id,
-            init_state,
-            init_hash,
-            level,
-            token_multiplier,
-            device,
-            ww_interval,
-            eval_interval,
-            checkpoint_interval,
-            spectral_interval,
-            precision,
-            resume,
-        )
-        run_scientific_single(
-            pair,
-            "adamw_wwpgd_reference",
-            seed,
-            cfg,
-            data,
-            pair_id,
-            init_state,
-            init_hash,
-            level,
-            token_multiplier,
-            device,
-            ww_interval,
-            eval_interval,
-            checkpoint_interval,
-            spectral_interval,
-            precision,
-            resume,
-        )
+        for ext in (extensions or ["none", "wwpgd"]):
+            arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))
+            run_scientific_single(
+                pair,
+                optimizer,
+                seed,
+                arm_cfg,
+                data,
+                pair_id,
+                init_state,
+                init_hash,
+                level,
+                token_multiplier,
+                device,
+                ww_interval,
+                eval_interval,
+                checkpoint_interval,
+                spectral_interval,
+                precision,
+                resume,
+            )
         _log_train_progress(
             f"completed seed {seed_index}/{len(run_seeds)} seed={seed} pair={pair_id}"
         )

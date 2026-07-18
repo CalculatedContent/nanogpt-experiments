@@ -1,24 +1,51 @@
+scientific_schema_version: 3
+model_architecture_version: separate_qkv_bias_free_untied_head_v1
 parameter_count_convention: total
+base_optimizer: adamw
+extensions: [none, wwpgd]
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
 dataset_revision: main
 model:
-  n_layer: 2
+  n_layer: 1
   n_head: 1
   n_embd: 64
   block_size: 256
   vocab_size: 8192
+  dropout: 0.0
+  bias: false
+  tie_weights: false
+  mlp_mult: 4
 train:
-  batch_size: 8
+  batch_size: 16
   gradient_accumulation: 1
   learning_rate: 0.0003
-  weight_decay: 0.1
+  betas: [0.9, 0.95]
+  epsilon: 1.0e-8
+  weight_decay: 0.01
+  grad_clip: 0.0
   eval_interval: 10
   spectral_interval: 10
   checkpoint_interval: 50
-  eval_batches: 4
+  eval_batches: 20
+  lr_schedule: warmup_cosine
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.10
+  layer_lr: llrd
+  llrd_min_multiplier: 0.50
+  evaluation_sampling: random_per_eval
+  wwpgd_interval: null
 wwpgd:
   enabled: true
+  extension: wwpgd
   target_alpha: 2.0
   strength: 0.02
-  projection_schedule: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92]
+  min_tail: 5
+  q: 1.0
+  blend_eta: 0.5
+  cayley_eta: 0.25
+  use_detx: true
+  warmup_events: 0
+  ramp_events: 5
+  project_embeddings: false
+  project_output_head: false
