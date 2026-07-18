@@ -6,7 +6,7 @@ import pandas as pd
 import torch
 from wwgpt.config import load_config, WWPGDConfig
 from wwgpt.train import run_scientific_single, _state_hash
-from wwgpt.data import load_prepared_scientific_data, prepare_local_text
+from wwgpt.data import load_prepared_scientific_data
 from wwgpt.model import GPT
 from wwgpt.utils import unique_dir, write_json, environment
 from wwgpt.ww import WWPGD_COMMIT, SCIENTIFIC_SCHEMA_VERSION, WWTailConfig
@@ -82,33 +82,52 @@ def _stability(run: Path, threshold: float):
 
 def _write_status(root: Path, status: dict): (root/'scan_status.json').write_text(json.dumps(status, indent=2, sort_keys=True)+'\n')
 
+def _compatibility_expected(seed:int, strength, cfg, data, init_hash, level:int, token_multiplier:int, immediate_projection_spectral:bool):
+    return {
+        'seed': seed, 'scan_strength': strength, 'level': level, 'token_multiplier': token_multiplier,
+        'resolved_model_config': asdict(cfg.model), 'resolved_train_config': asdict(cfg.train),
+        'projection_schedule': cfg.wwpgd.projection_schedule, 'target_alpha': cfg.wwpgd.target_alpha,
+        'initialization_hash': init_hash, 'data_hash': data.corpus_hash,
+        'tokenizer_hash': data.tokenizer_manifest.get('tokenizer_hash'),
+        'realized_tokens': data.data_manifest.get('realized_tokens'),
+        'scientific_schema_version': SCIENTIFIC_SCHEMA_VERSION, 'wwpgd_commit': WWPGD_COMMIT,
+        'immediate_projection_spectral': immediate_projection_spectral,
+    }
+
+def _compatible_run(run: Path, expected: dict) -> tuple[bool, list[str]]:
+    man=json.loads((run/'manifest.json').read_text())
+    reasons=[]
+    for k,v in expected.items():
+        actual=man.get(k)
+        if actual != v:
+            reasons.append(f'{k}: existing={actual!r} requested={v!r}')
+    for k in ('training_probe_hash','validation_probe_hash'):
+        if k not in man: reasons.append(f'{k}: missing in existing manifest')
+    return not reasons, reasons
+
 def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_state, init_hash, level:int, token_multiplier:int, scan_id:str, scan_name:str, adamw:Path, device=None, eval_interval=None, checkpoint_interval=None, spectral_interval=None, immediate_projection_spectral=True, resume=False, instability_loss_threshold=20.0):
     label=format_strength_label(strength); parent=seed_dir/'strengths'/label
+    expected=_compatibility_expected(seed,strength,strength_config(cfg,strength),data,init_hash,level,token_multiplier,immediate_projection_spectral)
     if resume:
         r=_complete_run(parent/'adamw_wwpgd_reference')
-        if r: return r
-    run=run_scientific_single(parent,'adamw_wwpgd_reference',seed,strength_config(cfg,strength),data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume)
+        if r:
+            ok,reasons=_compatible_run(r, expected)
+            if ok: return r
+            (parent/'resume_incompatibilities.jsonl').parent.mkdir(parents=True, exist_ok=True)
+            with (parent/'resume_incompatibilities.jsonl').open('a') as f: f.write(json.dumps({'existing_run':str(r),'reasons':reasons,'created_at':time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})+'\n')
+    run=run_scientific_single(parent,'adamw_wwpgd_reference',seed,strength_config(cfg,strength),data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume,immediate_projection_spectral=immediate_projection_spectral)
     stable,reason,istep,mt,mv,mg=_stability(run,instability_loss_threshold)
-    _append_scan_fields(run, scan_id=scan_id, scan_name=scan_name, scan_strength=strength, adamw_control_run=str(adamw), adamw_control_manifest_hash=_manifest_hash(adamw), strength_arm_id=label, scientific_schema_version=SCIENTIFIC_SCHEMA_VERSION, stable=stable, instability_reason=reason, instability_step=istep, maximum_train_loss=mt, maximum_validation_loss=mv, maximum_gradient_norm=mg)
-    # schema-compatible immediate spectral from projection rows (real WW omitted for fast scan fixtures)
-    proj=pd.read_csv(run/'wwpgd_projection.csv') if (run/'wwpgd_projection.csv').exists() else pd.DataFrame()
-    rows=[]
-    for _,r in proj.iterrows():
-        ab=2.5; aa=2.5 - 0.1*float(strength)
-        rows.append({'seed':seed,'pair_id':f'strength_scan_seed_{seed}','scan_id':scan_id,'scan_strength':strength,'projection_event':r.get('projection_event'),'scheduled_token_fraction':r.get('scheduled_token_fraction'),'actual_step':r.get('actual_step'),'actual_tokens_seen':r.get('actual_tokens_seen'),'layer_name':r.get('layer_name'),'target_alpha':cfg.wwpgd.target_alpha,'schedule_hardness':r.get('schedule_hardness'),'effective_hardness':r.get('effective_hardness'),'effective_cayley_eta':r.get('effective_cayley_eta'),'effective_blend_eta':r.get('effective_blend_eta'),'alpha_before':ab,'alpha_after':aa,'alpha_delta':aa-ab,'abs_alpha_error_before':abs(ab-cfg.wwpgd.target_alpha),'abs_alpha_error_after':abs(aa-cfg.wwpgd.target_alpha),'abs_alpha_error_change':abs(aa-cfg.wwpgd.target_alpha)-abs(ab-cfg.wwpgd.target_alpha),'weighted_alpha_before':ab,'weighted_alpha_after':aa,'xmin_before':r.get('xmin'),'xmin_after':r.get('xmin'),'detX_num_before':r.get('detX_num'),'detX_num_after':r.get('detX_num'),'D_before':0.02,'D_after':0.02,'num_evals_before':10,'num_evals_after':10,'status_before':'ok','status_after':'ok','warning_before':'','warning_after':'','relative_frobenius_change':r.get('relative_frobenius_change'),'TraceLog_before':r.get('TraceLog_before'),'TraceLog_after':r.get('TraceLog_after'),'TraceLog_change':r.get('TraceLog_after')-r.get('TraceLog_before') if pd.notna(r.get('TraceLog_after')) and pd.notna(r.get('TraceLog_before')) else math.nan,'selected_tail_size':r.get('selected_tail_size'),'projection_runtime':r.get('projection_runtime'),'pre_weightwatcher_runtime':0.0,'post_weightwatcher_runtime':0.0})
-    if rows:
-        with (run/'wwpgd_projection_spectral.csv').open('w', newline='') as f: w=csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+    _append_scan_fields(run, scan_id=scan_id, scan_name=scan_name, scan_strength=strength, adamw_control_run=str(adamw), adamw_control_manifest_hash=_manifest_hash(adamw), strength_arm_id=label, scientific_schema_version=SCIENTIFIC_SCHEMA_VERSION, stable=stable, instability_reason=reason, instability_step=istep, maximum_train_loss=mt, maximum_validation_loss=mv, maximum_gradient_norm=mg, resolved_model_config=asdict(strength_config(cfg,strength).model), resolved_train_config=asdict(strength_config(cfg,strength).train), target_alpha=cfg.wwpgd.target_alpha, immediate_projection_spectral=immediate_projection_spectral, immediate_spectral_source='weightwatcher_measured' if immediate_projection_spectral else 'not_requested', weightwatcher_version='unknown', wwpgd_reference_commit=WWPGD_COMMIT)
     return run
 
 def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multiplier:int, seeds=None, strengths=None, config:Path|None=None, device=None, eval_interval=None, spectral_interval=None, checkpoint_interval=None, immediate_projection_spectral=True, resume=False, continue_on_error=True, scan_name='strength_scan', instability_loss_threshold=20.0, include_adamw_control=True):
     strengths=parse_strengths(strengths if isinstance(strengths,str) or strengths is None else ','.join(map(str,strengths))); seeds=seeds or [1337]
     cfg=load_config(config, level)
-    try: data=load_prepared_scientific_data(data_root, level, token_multiplier)
-    except Exception:
-        cfg=replace(cfg, train=replace(cfg.train, batch_size=1, eval_batches=1), model=replace(cfg.model, block_size=8, n_layer=1, n_head=1, n_embd=16, vocab_size=128))
-        data=prepare_local_text(Path(data_root)/'strength_scan_local', ['strength scan fixture text '*200], 512)
-        data.data_manifest.update({'optimizer_steps':2,'tokens_per_optimizer_step':8,'requested_tokens':16,'realized_tokens':16,'dataset_name':'local_fixture','dataset_config':'fixture','dataset_revision':'none'})
-        data.tokenizer_manifest['tokenizer_hash']=data.tokenizer_manifest.get('tokenizer_hash') or data.tokenizer_manifest.get('hash','fixture')
+    expected_dir=Path(data_root)/'prepared_scientific'/f'level_{level:02d}'/f'multiplier_{token_multiplier}'
+    try:
+        data=load_prepared_scientific_data(data_root, level, token_multiplier)
+    except Exception as e:
+        raise RuntimeError(f'prepared scientific data unavailable; requested_data_root={data_root}; level={level}; token_multiplier={token_multiplier}; expected_directory={expected_dir}; original_exception_type={type(e).__name__}; original_exception_message={e}') from e
     base=results_root/'experiments'/'strength_scan'/f'level_{level:02d}'/f'multiplier_{token_multiplier}'; base.mkdir(parents=True,exist_ok=True)
     scan_root=resolve_scan_root(base) if resume and list(base.rglob('scan_manifest.json')) else unique_dir(base, 'scan_'+time.strftime('%Y%m%d-%H%M%S'))
     scan_id=scan_root.name
