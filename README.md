@@ -36,6 +36,14 @@ Notebooks in `notebooks/` validate repository integrity, compare a single level,
 
 Append-only behavior: scripts create new timestamped directories, preserve partial outputs, never recycle result directories, and never treat smoke tests as scaling-law evidence.
 
+## Level-0 WW-PGD 0.5 from scratch
+
+For a fully scripted level-0 run with five seeds, environment-variable setup, notebook execution, and a per-layer alpha-error confirmation for WW-PGD strength `0.5`, see [`docs/LEVEL0_WWPGD_0P5_FROM_SCRATCH.md`](docs/LEVEL0_WWPGD_0P5_FROM_SCRATCH.md). The entry point is:
+
+```bash
+DATA_ROOT=/tmp/wwpgd_v2/data RESULTS_ROOT=/tmp/wwpgd_level0_wwpgd_0p5 ./scripts/run_level0_wwpgd_0p5_from_scratch.sh
+```
+
 ## WW-PGD Strength Scan
 
 The strength scan is a secondary ablation for AdamW + WW-PGD. It is not run by default and does not change `wwgpt run-multiseed` or the default WW-PGD strength of `0.02`. The runner creates one shared initialization per seed, runs one immutable AdamW control, and reuses that control for every fixed WW-PGD strength arm. Every arm resets the deterministic token reader and fixed probes so only `wwpgd.strength` differs.
