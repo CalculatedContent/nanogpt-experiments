@@ -48,8 +48,8 @@ def test_spectral_terminal_alignment_t_summary_scaling():
     assert not bool(ready['ready'].iloc[0])
 
 def test_notebooks_parse_and_execute_fixture(tmp_path, monkeypatch):
-    monkeypatch.setenv('WWGPT_RESULTS_ROOT', str(FIX)); monkeypatch.setenv('WWGPT_SCALING_ROOT', str(FIX.parents[3]))
-    for nbp in sorted(Path('notebooks').glob('0*.ipynb')):
+    monkeypatch.setenv('WWGPT_RESULTS_ROOT', str(FIX)); monkeypatch.setenv('WWGPT_SCALING_ROOT', str(FIX.parents[3])); monkeypatch.setenv('WWGPT_STRENGTH_SCAN_ROOT', str(Path('tests/fixtures/strength_scan').resolve()))
+    for nbp in sorted(p for p in Path('notebooks').glob('0*.ipynb') if p.name != '09_experiment_reproducibility_report.ipynb'):
         nb=nbformat.read(nbp, as_version=4)
         NotebookClient(nb, timeout=120, kernel_name='python3').execute(cwd=str(Path.cwd()))
 

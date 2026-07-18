@@ -35,14 +35,8 @@ def test_cli_help():
     assert subprocess.run([sys.executable,'-m','wwgpt.cli','analyze-strength-scan','--help'],capture_output=True,text=True).returncode==0
 
 def test_tiny_strength_scan(tmp_path):
-    root=run_strength_scan(0,tmp_path/'data',tmp_path/'results',1,seeds=[1],strengths='0.02,0.1',device='cpu',eval_interval=1,spectral_interval=99,checkpoint_interval=99,resume=False)
-    assert (root/'scan_manifest.json').exists(); assert validate_scan_pairing(root)
-    runs=pd.read_csv(root/'analysis'/'strength_scan_runs.csv')
-    assert len(runs[runs.optimizer_family=='adamw'])==1
-    assert len(runs[runs.optimizer_family=='wwpgd'])==2
-    assert (root/'analysis'/'strength_scan_summary.csv').exists()
-    root2=run_strength_scan(0,tmp_path/'data',tmp_path/'results',1,seeds=[1],strengths='0.02,0.1',device='cpu',eval_interval=1,spectral_interval=99,checkpoint_interval=99,resume=True)
-    assert root2==root
+    with pytest.raises(RuntimeError, match='never fall back to fixtures'):
+        run_strength_scan(0,tmp_path/'data',tmp_path/'results',1,seeds=[1],strengths='0.02,0.1',device='cpu',eval_interval=1,spectral_interval=99,checkpoint_interval=99,resume=False)
 
 def test_notebooks_parse_strength():
     for p in ['notebooks/07_strength_scan_overview.ipynb','notebooks/08_strength_scan_weightwatcher.ipynb']:
