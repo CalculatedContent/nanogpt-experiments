@@ -15,6 +15,7 @@ from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_streng
 from wwgpt.device import device_summary, save_device_manifest
 from wwgpt.integrity import audit_experiment, audit_strength_scan
 from wwgpt.checkpointing import inspect_checkpoint, validate_resume
+from wwgpt.reproducibility import write_reproducibility_report
 
 
 def _seeds(s: str | None) -> list[int] | None:
@@ -35,6 +36,7 @@ def main() -> None:
     aus=sub.add_parser("audit-strength-scan"); aus.add_argument("--scan-root", type=Path, required=True)
     ic=sub.add_parser("inspect-checkpoint"); ic.add_argument("--checkpoint", type=Path, required=True)
     vr=sub.add_parser("validate-resume"); vr.add_argument("--run-dir", type=Path, required=True)
+    rr=sub.add_parser("reproducibility-report"); rr.add_argument("--experiment-root", type=Path, required=True)
     pl=sub.add_parser("plan-scaling"); pl.add_argument("--params", type=int, required=True); pl.add_argument("--token-multiplier", type=int, required=True); pl.add_argument("--available-tokens", type=int, required=True); pl.add_argument("--batch-size", type=int, default=8); pl.add_argument("--block-size", type=int, default=256); pl.add_argument("--grad-accum", type=int, default=1)
     args=p.parse_args()
     if args.cmd=="smoke-test": print(smoke(args.root, args.steps))
@@ -57,6 +59,7 @@ def main() -> None:
     elif args.cmd=="audit-strength-scan": print(audit_strength_scan(args.scan_root))
     elif args.cmd=="inspect-checkpoint": print(inspect_checkpoint(args.checkpoint))
     elif args.cmd=="validate-resume": print(validate_resume(args.run_dir))
+    elif args.cmd=="reproducibility-report": print(write_reproducibility_report(args.experiment_root))
     elif args.cmd=="plan-scaling": print(plan_budget(args.params,args.token_multiplier,args.batch_size,args.block_size,args.grad_accum,args.available_tokens))
 
 if __name__ == "__main__": main()
