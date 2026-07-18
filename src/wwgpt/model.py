@@ -15,18 +15,20 @@ class CausalSelfAttention(nn.Module):
         if cfg.n_embd % cfg.n_head:
             raise ValueError("n_embd must divide n_head")
         self.n_head = cfg.n_head
-        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
-        self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.head_dim = cfg.n_embd // cfg.n_head
+        self.key = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.query = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.value = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
-        q, k, v = self.c_attn(x).split(c, dim=2)
-        q = q.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
-        k = k.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
-        v = v.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        return self.dropout(self.c_proj(y.transpose(1, 2).contiguous().view(b, t, c)))
+        q = self.query(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.key(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        v = self.value(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.head_dim ** -0.5)
+        return self.dropout(self.proj(y.transpose(1, 2).contiguous().view(b, t, c)))
 
 
 class Block(nn.Module):
@@ -37,8 +39,8 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
         act: nn.Module = nn.GELU() if cfg.activation == "gelu" else nn.ReLU()
         self.mlp = nn.Sequential(
-            nn.Linear(cfg.n_embd, 4 * cfg.n_embd, bias=cfg.bias), act,
-            nn.Linear(4 * cfg.n_embd, cfg.n_embd, bias=cfg.bias), nn.Dropout(cfg.dropout)
+            nn.Linear(cfg.n_embd, cfg.mlp_mult * cfg.n_embd, bias=cfg.bias), act,
+            nn.Linear(cfg.mlp_mult * cfg.n_embd, cfg.n_embd, bias=cfg.bias), nn.Dropout(cfg.dropout)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -50,6 +52,9 @@ class Block(nn.Module):
 class ParameterReport:
     total_parameters: int
     trainable_parameters: int
+    token_embedding_parameters: int
+    position_embedding_parameters: int
+    output_head_parameters: int
     embedding_parameters: int
     non_embedding_parameters: int
     attention_heads: int
@@ -93,8 +98,11 @@ class GPT(nn.Module):
     def parameter_report(self) -> ParameterReport:
         total = sum(p.numel() for p in self.parameters())
         train = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        emb = self.wte.weight.numel() + self.wpe.weight.numel()
-        return ParameterReport(total, train, emb, total - emb, self.cfg.n_head, self.cfg.n_layer, self.cfg.block_size, self.cfg.vocab_size)
+        tok = self.wte.weight.numel()
+        pos = self.wpe.weight.numel()
+        head = self.lm_head.weight.numel()
+        emb = tok + pos
+        return ParameterReport(total, train, tok, pos, head, emb, total - emb, self.cfg.n_head, self.cfg.n_layer, self.cfg.block_size, self.cfg.vocab_size)
 
     def report_dict(self) -> dict[str, int]:
         return asdict(self.parameter_report())

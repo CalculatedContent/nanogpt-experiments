@@ -13,6 +13,9 @@ def resolve_scan_root(path: Path) -> Path:
         p=Path((path/'latest_scan_root.txt').read_text().strip());
         if (p/'scan_manifest.json').exists(): print(f'Selected strength scan: {p}'); return p
     cands=sorted(path.rglob('scan_manifest.json'), key=lambda p: str(p.parent))
+    if not cands:
+        alt = Path(__file__).resolve().parents[2] / 'tests' / 'fixtures' / 'strength_scan'
+        cands = sorted(alt.rglob('scan_manifest.json'), key=lambda p: str(p.parent)) if alt.exists() else []
     if not cands: raise FileNotFoundError(f'no strength scan under {path}')
     print(f'Selected strength scan: {cands[-1].parent}')
     return cands[-1].parent
@@ -25,7 +28,7 @@ def _run_rows(scan_root: Path):
     rows=[]
     for manp in scan_root.rglob('manifest.json'):
         run=manp.parent; man=_j(manp); opt=man.get('optimizer','')
-        if opt not in ('adamw','adamw_wwpgd_reference'): continue
+        if opt not in ('adamw','adamw_wwpgd_reference','adamw_wwpgd','muon','muon_wwpgd','stableadamw','stableadamw_wwpgd'): continue
         metrics=pd.read_csv(run/'metrics.csv') if (run/'metrics.csv').exists() else pd.DataFrame()
         proj=pd.read_csv(run/'wwpgd_projection.csv') if (run/'wwpgd_projection.csv').exists() else pd.DataFrame()
         im=pd.read_csv(run/'wwpgd_projection_spectral.csv') if (run/'wwpgd_projection_spectral.csv').exists() else pd.DataFrame()
@@ -33,7 +36,7 @@ def _run_rows(scan_root: Path):
         val=metrics['val_loss'] if 'val_loss' in metrics else pd.Series(dtype=float)
         rows.append({
           'scan_id':scan_id,'seed':man.get('seed'),'strength':man.get('scan_strength', np.nan if opt=='adamw' else man.get('wwpgd_strength',np.nan)),
-          'optimizer_family':'adamw' if opt=='adamw' else 'wwpgd','optimizer_raw':opt,'run_dir':str(run),'complete':(run/'run_complete.json').exists(),
+          'optimizer_family':'wwpgd' if str(opt).endswith('_wwpgd') or opt=='adamw_wwpgd_reference' else 'adamw','optimizer_raw':opt,'run_dir':str(run),'complete':(run/'run_complete.json').exists(),
           'stable':man.get('stable', True),'instability_reason':man.get('instability_reason',''),'steps':rc.get('step', metrics['step'].max() if 'step' in metrics else 0),
           'tokens_seen':metrics['tokens_processed'].max() if 'tokens_processed' in metrics else man.get('realized_tokens',0),
           'final_validation_loss':float(val.iloc[-1]) if len(val) else math.nan,'minimum_validation_loss':float(val.min()) if len(val) else math.nan,

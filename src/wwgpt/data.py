@@ -142,7 +142,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
-    data_manifest = {"dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    data_manifest = {"scientific_schema_version": 3, "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
     tokenizer_manifest = {"tokenizer_type": "BPE", "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
@@ -153,7 +153,7 @@ def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier:
     roots = sorted((data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}").glob("prepared_*"))
     for prep in reversed(roots):
         dm = json.loads((prep / "data_manifest.json").read_text()); tm = json.loads((prep / "tokenizer_manifest.json").read_text())
-        if dm.get("valid_for_science") is True and dm.get("smoke_test") is False and tm.get("tokenizer_type") == "BPE":
+        if dm.get("valid_for_science") is True and dm.get("smoke_test") is False and tm.get("tokenizer_type") == "BPE" and (int(dm.get("scientific_schema_version", 2)) < 3 or dm.get("model_architecture_version") == load_config(None, level).model.model_architecture_version):
             return TokenData(np.load(prep / "train_tokens.npy").astype(int).tolist(), np.load(prep / "val_tokens.npy").astype(int).tolist(), int(tm.get("vocabulary_size", tm.get("vocab_size", 8192))), str(dm["corpus_hash"]), prep, dm, tm)
     raise FileNotFoundError("no compatible scientific prepared data found; run scripts/download_data.sh first")
 
@@ -177,3 +177,24 @@ def fixed_probe(tokens: list[int], block_size: int, batch_size: int, eval_batche
     x = arr[:-1].reshape(eval_batches, batch_size, block_size)
     y = arr[1:].reshape(eval_batches, batch_size, block_size)
     return x, y, sha256_bytes(arr.tobytes())
+
+
+def stable_seed(*parts: object) -> int:
+    return int(sha256_bytes("|".join(map(str, parts)).encode())[:16], 16) % (2**63 - 1)
+
+
+def random_probe(tokens: list[int], block_size: int, batch_size: int, eval_batches: int, seed: int) -> tuple[np.ndarray, np.ndarray, str]:
+    need = block_size + 1
+    if len(tokens) < need:
+        raise ValueError(f"insufficient probe tokens: {len(tokens)} < {need}")
+    rng = np.random.default_rng(seed)
+    starts = rng.integers(0, len(tokens) - block_size - 1, size=batch_size * eval_batches)
+    x = np.empty((eval_batches, batch_size, block_size), dtype=np.int64)
+    y = np.empty((eval_batches, batch_size, block_size), dtype=np.int64)
+    used = bytearray()
+    for j, st in enumerate(starts):
+        arr = np.array(tokens[int(st):int(st) + block_size + 1], dtype=np.int64)
+        used.extend(arr.tobytes())
+        e, b = divmod(j, batch_size)
+        x[e, b] = arr[:-1]; y[e, b] = arr[1:]
+    return x, y, sha256_bytes(bytes(used))

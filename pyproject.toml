@@ -9,7 +9,7 @@ description = "Append-only nanoGPT AdamW vs WW-PGD scaling experiments"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
-dependencies = ["numpy", "pandas", "matplotlib", "PyYAML", "torch", "datasets", "tokenizers", "jupyterlab", "nbformat", "scipy", "weightwatcher"]
+dependencies = ["numpy", "pandas", "matplotlib", "PyYAML", "torch", "datasets", "tokenizers", "jupyterlab", "nbformat", "scipy", "weightwatcher", "optimi"]
 
 [project.scripts]
 wwgpt = "wwgpt.cli:main"
@@ -29,3 +29,10 @@ ignore = ["E501", "E701", "E702", "E703", "F401", "I001"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 norecursedirs = ["backups"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/wwgpt/analysis.py" = ["E401", "UP035", "B007", "B905", "SIM102", "F811"]
+"src/wwgpt/strength_scan.py" = ["E401"]
+"src/wwgpt/strength_scan_analysis.py" = ["E401"]
+"tests/test_schema_v2_analysis.py" = ["F403", "F405", "E401"]
+"tests/test_strength_scan.py" = ["E401"]

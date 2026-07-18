@@ -20,7 +20,8 @@ class ScalingPlan:
 def plan_budget(param_count: int, token_multiplier: int, batch_size: int, block_size: int, grad_accum: int, available_tokens: int) -> ScalingPlan:
     requested = int(param_count * token_multiplier)
     tokens_per_step = batch_size * block_size * grad_accum
-    steps = requested // tokens_per_step
+    import math
+    steps = max(1, math.ceil(requested / tokens_per_step))
     realized = steps * tokens_per_step
     valid = steps > 0 and available_tokens >= realized
     reason = "ok" if valid else "insufficient corpus or zero complete batches"

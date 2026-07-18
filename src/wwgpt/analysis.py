@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-OPTIMIZER_LABELS={"adamw":"AdamW","wwpgd":"AdamW + WW-PGD"}
+OPTIMIZER_LABELS={"adamw":"AdamW","wwpgd":"AdamW + WW-PGD","muon":"Muon","muon_wwpgd":"Muon+WW-PGD","stableadamw":"StableAdamW","stableadamw_wwpgd":"StableAdamW+WW-PGD"}
 OPTIMIZER_COLORS={"adamw":"#1f77b4","wwpgd":"#ff7f0e"}
-PROJECTED_LAYER_PATTERNS=(".attn.c_attn",".attn.c_proj",".mlp.0",".mlp.2")
+PROJECTED_LAYER_PATTERNS=(".attn.key",".attn.query",".attn.value",".attn.proj",".mlp.0",".mlp.2")
 HASH_FIELDS=("seed","initialization_hash","data_hash","corpus_hash","tokenizer_hash","validation_probe_hash","training_probe_hash","realized_tokens")
 
 @dataclass(frozen=True)
@@ -47,11 +47,10 @@ def resolve_experiment_root(path: str | Path) -> Path:
     return root
 
 def normalize_optimizer(raw:str, include_legacy:bool=False)->dict[str,Any]:
-    if raw=="adamw": fam="adamw"; legacy=False
-    elif raw=="adamw_wwpgd_reference": fam="wwpgd"; legacy=False
-    elif raw=="adamw_wwpgd": fam="wwpgd"; legacy=True
+    if raw in {"adamw","muon","stableadamw"}: fam=raw; legacy=False
+    elif raw in {"adamw_wwpgd_reference","adamw_wwpgd","muon_wwpgd","stableadamw_wwpgd"}: fam="wwpgd" if raw.startswith("adamw") else raw; legacy=False
     else: fam=raw; legacy=True
-    allowed = raw in {"adamw","adamw_wwpgd_reference"} or (include_legacy and raw=="adamw_wwpgd")
+    allowed = raw in {"adamw","adamw_wwpgd_reference","muon","muon_wwpgd","stableadamw","stableadamw_wwpgd"} or (include_legacy and raw=="adamw_wwpgd")
     return {"optimizer_raw":raw,"optimizer_family":fam,"optimizer_label":OPTIMIZER_LABELS.get(fam,raw),"legacy_optimizer":legacy,"allowed_by_default":allowed}
 
 def _run_mtime(run:Path)->float:
@@ -378,4 +377,15 @@ def terminal_results(runs:list[dict[str,Any]], metric:str='validation_loss')->pd
         # old compatibility names
         if metric=='validation_loss':
             p['adamw_final_validation_loss']=p[f'adamw_final_{metric}']; p['adamw_wwpgd_final_validation_loss']=p[f'wwpgd_final_{metric}']; p['wwpgd_minus_adamw_final_validation_loss']=p[f'wwpgd_minus_adamw_{metric}']
+    return p
+
+
+def schema_optimizer_groups(df: pd.DataFrame) -> list[str]:
+    return ["scientific_schema_version", "level", "token_multiplier", "base_optimizer", "extension", "seed"]
+
+def paired_extension_effects(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+    keys=["scientific_schema_version","level","token_multiplier","base_optimizer","seed"]
+    p=df.pivot_table(index=keys, columns="extension", values=metric, aggfunc="first").reset_index()
+    if {"none","wwpgd"}.issubset(p.columns):
+        p[f"wwpgd_minus_none_{metric}"]=p["wwpgd"]-p["none"]
     return p

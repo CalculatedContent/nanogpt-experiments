@@ -1,19 +1,18 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 from dataclasses import dataclass
 from importlib import metadata
-from typing import Callable
-
 import numpy as np
 import pandas as pd
 import torch
 from torch import nn
 
 WWPGD_COMMIT = "bf970cb6b73e977f8374114c442ae5b0589eccaa"
-SCIENTIFIC_SCHEMA_VERSION = 2
-PROJECTED_LAYER_SUFFIXES = ("attn.c_attn", "attn.c_proj", "mlp.0", "mlp.2")
+SCIENTIFIC_SCHEMA_VERSION = 3
+PROJECTED_LAYER_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
 
 
 def matrix_modules(model: nn.Module, include_tied_once: bool = True):
@@ -250,81 +249,71 @@ def apply_wwpgd_reference(
 
 def apply_wwpgd(model: nn.Module, target_alpha: float, strength: float, step: int, warmup_steps: int = 0, ramp_steps: int = 1):
     return apply_wwpgd_reference(model, event_index=step, actual_step=step, strength=strength, cfg=WWTailConfig(warmup_events=warmup_steps, ramp_events=ramp_steps))
-MEASURED_PROJECTION_SPECTRAL_FIELDS = [
-    'projection_event','scheduled_token_fraction','actual_step','actual_tokens_seen','layer_name','match_key','match_status',
-    'target_alpha','alpha_before','alpha_after','weighted_alpha_before','weighted_alpha_after','xmin_before','xmin_after',
-    'detX_num_before','detX_num_after','D_before','D_after','num_evals_before','num_evals_after','status_before','status_after',
-    'warning_before','warning_after','pre_weightwatcher_runtime','post_weightwatcher_runtime','weightwatcher_version','weightwatcher_configuration',
-    'TraceLog_before','TraceLog_after','alpha_delta','abs_alpha_error_before','abs_alpha_error_after','abs_alpha_error_change','TraceLog_change',
-    'immediate_spectral_source','measurement_valid_for_science'
-]
+COMPOSITE_SPECIFICATION_VERSION = "raw_and_composite_v1"
 
-def _finite(v):
-    try: return math.isfinite(float(v))
-    except Exception: return False
 
-def _nan_if_missing(row, key):
-    try:
-        v=row.get(key, float('nan'))
-        return float(v) if pd.notna(v) else float('nan')
-    except Exception:
-        return float('nan')
+def raw_schema_v3_matrices(model: nn.Module):
+    for i, block in enumerate(getattr(model, "blocks", [])):
+        yield f"L{i:04d}_W_K", block.attn.key.weight.detach().float().cpu(), f"blocks.{i}.attn.key"
+        yield f"L{i:04d}_W_Q", block.attn.query.weight.detach().float().cpu(), f"blocks.{i}.attn.query"
+        yield f"L{i:04d}_W_V", block.attn.value.weight.detach().float().cpu(), f"blocks.{i}.attn.value"
+        yield f"L{i:04d}_W_O", block.attn.proj.weight.detach().float().cpu(), f"blocks.{i}.attn.proj"
+        yield f"L{i:04d}_W_MLP_IN", block.mlp[0].weight.detach().float().cpu(), f"blocks.{i}.mlp.0"
+        yield f"L{i:04d}_W_MLP_OUT", block.mlp[2].weight.detach().float().cpu(), f"blocks.{i}.mlp.2"
 
-def _status(row):
-    for k in ('status','fit_status'):
-        if k in row and pd.notna(row.get(k)): return str(row.get(k))
-    return 'ok' if _finite(row.get('alpha', float('nan'))) else 'missing_alpha'
 
-def _warning(row):
-    for k in ('warning','warnings'):
-        if k in row and pd.notna(row.get(k)): return str(row.get(k))
-    return ''
-
-def _index_details(df: pd.DataFrame, key: str):
-    out={}
-    if key in df.columns:
-        for _, r in df.iterrows():
-            v=r.get(key)
-            if pd.notna(v): out[str(v)]=r
+def composite_matrices(model: nn.Module) -> dict[str, tuple[torch.Tensor, str, dict[str, tuple[int, ...]]]]:
+    out = {}
+    for i, block in enumerate(getattr(model, "blocks", [])):
+        wk = block.attn.key.weight.detach().float().cpu(); wq = block.attn.query.weight.detach().float().cpu(); wv = block.attn.value.weight.detach().float().cpu(); wo = block.attn.proj.weight.detach().float().cpu()
+        wi = block.mlp[0].weight.detach().float().cpu(); wout = block.mlp[2].weight.detach().float().cpu()
+        shapes = {"W_K": tuple(wk.shape), "W_Q": tuple(wq.shape), "W_V": tuple(wv.shape), "W_O": tuple(wo.shape), "W_MLP_IN": tuple(wi.shape), "W_MLP_OUT": tuple(wout.shape)}
+        out[f"L{i:04d}_KQ"] = (wk @ wq, "W_K @ W_Q", shapes)
+        out[f"L{i:04d}_QK"] = (wq @ wk, "W_Q @ W_K", shapes)
+        out[f"L{i:04d}_QK_effective"] = (wq.T @ wk, "W_Q.T @ W_K", shapes)
+        out[f"L{i:04d}_KQ_effective"] = (wk.T @ wq, "W_K.T @ W_Q", shapes)
+        n_head = block.attn.n_head; hd = block.attn.head_dim
+        ov = torch.zeros(wo.size(0), wv.size(1))
+        for h in range(n_head):
+            sl = slice(h * hd, (h + 1) * hd)
+            wqh, wkh, wvh, woh = wq[sl, :], wk[sl, :], wv[sl, :], wo[:, sl]
+            ovh = woh @ wvh
+            ov += ovh
+            out[f"L{i:04d}_H{h:03d}_OV"] = (ovh, "W_O,h @ W_V,h", shapes)
+            out[f"L{i:04d}_H{h:03d}_QK_effective"] = (wqh.T @ wkh, "W_Q,h.T @ W_K,h", shapes)
+            out[f"L{i:04d}_H{h:03d}_KQ_effective"] = (wkh.T @ wqh, "W_K,h.T @ W_Q,h", shapes)
+        out[f"L{i:04d}_OV"] = (ov, "sum_h W_O,h @ W_V,h", shapes)
+        out[f"L{i:04d}_VO"] = (wv @ wo, "W_V @ W_O", shapes)
+        out[f"L{i:04d}_MLP_IO"] = (wout @ wi, "W_MLP_OUT @ W_MLP_IN", shapes)
     return out
 
-def measured_projection_spectral_rows(pre: pd.DataFrame, post: pd.DataFrame, projection_rows: list[dict[str,object]], target_alpha: float) -> list[dict[str,object]]:
-    """Pair one real pre-event WW details table with one real post-event table.
 
-    Alpha deltas and error changes are derived only from measured finite alpha fields.
-    Missing fields remain NaN and invalidate the row for scientific WeightWatcher use.
-    """
-    pre_long=_index_details(pre,'longname'); post_long=_index_details(post,'longname')
-    pre_name=_index_details(pre,'name'); post_name=_index_details(post,'name')
+class MatrixHolder(nn.Module):
+    def __init__(self, matrices: dict[str, torch.Tensor]):
+        super().__init__()
+        for name, mat in matrices.items():
+            self.register_parameter(name, nn.Parameter(mat.clone(), requires_grad=False))
+
+
+def composite_spectral_summary(model: nn.Module, *, step: int, tokens_seen: int, base_optimizer: str, extension: str, arm_name: str, seed: int, pair_id: str) -> list[dict[str, object]]:
+    comps = composite_matrices(model)
+    matrices = {k: v[0] for k, v in comps.items()}
+    state = torch.random.get_rng_state()
+    try:
+        holder = MatrixHolder(matrices)
+    finally:
+        torch.random.set_rng_state(state)
+    try:
+        df = weightwatcher_details(holder)
+    except Exception:
+        rows = fallback_spectral_summary(holder, step=step, tokens_seen=tokens_seen, optimizer=arm_name, seed=seed, pair_id=pair_id)
+        df = pd.DataFrame(rows)
+    key = "longname" if "longname" in df.columns else "name"
     rows=[]
-    pre_rt=float(pre['analysis_runtime'].iloc[0]) if 'analysis_runtime' in pre.columns and len(pre) else float('nan')
-    post_rt=float(post['analysis_runtime'].iloc[0]) if 'analysis_runtime' in post.columns and len(post) else float('nan')
-    wwver=str(pre['weightwatcher_version'].iloc[0]) if 'weightwatcher_version' in pre.columns and len(pre) else 'unknown'
-    wwcfg=str(pre['weightwatcher_configuration'].iloc[0]) if 'weightwatcher_configuration' in pre.columns and len(pre) else ''
-    for pr in projection_rows:
-        lname=str(pr.get('layer_name',''))
-        before=pre_long.get(lname); after=post_long.get(lname); match_key='longname'
-        if before is None or after is None:
-            before=pre_name.get(lname); after=post_name.get(lname); match_key='name'
-        matched=before is not None and after is not None
-        b=before if before is not None else pd.Series(dtype=object); a=after if after is not None else pd.Series(dtype=object)
-        ab=_nan_if_missing(b,'alpha'); aa=_nan_if_missing(a,'alpha')
-        wab=_nan_if_missing(b,'weighted_alpha'); waa=_nan_if_missing(a,'weighted_alpha')
-        tb=_nan_if_missing(b,'TraceLog'); ta=_nan_if_missing(a,'TraceLog')
-        sb=_status(b); sa=_status(a)
-        valid=bool(matched and _finite(ab) and _finite(aa) and sb.lower() in {'ok','success','valid'} and sa.lower() in {'ok','success','valid'})
-        def sub(x,y): return float(x)-float(y) if _finite(x) and _finite(y) else float('nan')
-        row={
-            'projection_event':pr.get('projection_event'),'scheduled_token_fraction':pr.get('scheduled_token_fraction'),'actual_step':pr.get('actual_step'),'actual_tokens_seen':pr.get('actual_tokens_seen'),'layer_name':lname,
-            'match_key':match_key if matched else 'unmatched','match_status':'matched' if matched else 'unmatched','target_alpha':target_alpha,
-            'alpha_before':ab,'alpha_after':aa,'weighted_alpha_before':wab,'weighted_alpha_after':waa,'xmin_before':_nan_if_missing(b,'xmin'),'xmin_after':_nan_if_missing(a,'xmin'),
-            'detX_num_before':_nan_if_missing(b,'detX_num'),'detX_num_after':_nan_if_missing(a,'detX_num'),'D_before':_nan_if_missing(b,'D'),'D_after':_nan_if_missing(a,'D'),
-            'num_evals_before':_nan_if_missing(b,'num_evals'),'num_evals_after':_nan_if_missing(a,'num_evals'),'status_before':sb,'status_after':sa,'warning_before':_warning(b),'warning_after':_warning(a),
-            'pre_weightwatcher_runtime':pre_rt,'post_weightwatcher_runtime':post_rt,'weightwatcher_version':wwver,'weightwatcher_configuration':wwcfg,
-            'TraceLog_before':tb,'TraceLog_after':ta,
-            'alpha_delta':sub(aa,ab),'abs_alpha_error_before':abs(ab-target_alpha) if _finite(ab) else float('nan'),'abs_alpha_error_after':abs(aa-target_alpha) if _finite(aa) else float('nan'),
-            'abs_alpha_error_change':sub(abs(aa-target_alpha) if _finite(aa) else float('nan'), abs(ab-target_alpha) if _finite(ab) else float('nan')),
-            'TraceLog_change':sub(ta,tb),'immediate_spectral_source':'weightwatcher_measured','measurement_valid_for_science':valid,
-        }
-        rows.append(row)
+    for _, row in df.iterrows():
+        cname = str(row.get(key, row.get("name", "")))
+        if cname not in comps: continue
+        _, formula, shapes = comps[cname]
+        d = row.to_dict(); d.update({"step": step, "tokens_seen": tokens_seen, "base_optimizer": base_optimizer, "extension": extension, "arm_name": arm_name, "seed": seed, "pair_id": pair_id, "composite_name": cname, "formula": formula, "source_shapes": json.dumps(shapes, sort_keys=True), "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION})
+        rows.append(d)
     return rows

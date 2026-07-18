@@ -18,15 +18,26 @@ Smoke test only, invalid for scientific conclusions:
 ./scripts/run_smoke_test.sh /tmp
 ```
 
+
+## Schema v3 highlights
+
+Scientific schema v3 separates base optimizers from extensions. Use `--optimizer {adamw,muon,stableadamw}` with `--extensions none,wwpgd` for paired runs, or `--extension {none,wwpgd}` for a single arm. The six canonical arms are AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD.
+
+The default ladder is level 0 `(n_layer=1,n_head=1,n_embd=64,block_size=256)`, then levels 1-4 `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)`, always with 64-dimensional attention heads. Blocks use separate bias-free key/query/value/projection matrices, bias-free MLP linears, and an untied bias-free LM head.
+
+Training defaults are batch size 16, gradient accumulation 1, dropout 0, weight decay 0.01, and no gradient clipping when `grad_clip=0.0`. Warmup-cosine scheduling updates every optimizer parameter group before each optimizer step. Level-aware LLRD derives gamma from `llrd_min_multiplier=0.50` unless explicitly supplied. Token budgets are based on actual trainable parameter counts: target tokens default to `20 * parameter_count_used`, with extended horizons such as 40, 80, and 160 accepted.
+
+Evaluation uses random-per-evaluation train and validation batches from deterministic SHA-256-derived streams; paired arms share hashes at the same evaluation index, and validation data is never concatenated with training data. WW-PGD runs after all base optimizer steps every `wwpgd_interval` optimizer steps (default `eval_interval`). Raw and composite WeightWatcher diagnostics use correct PyTorch linear conventions, including `OV=sum_h W_O,h @ W_V,h` and `VO=W_V @ W_O`. Schema-v2 and schema-v3 results are readable but not comparable as pooled paired statistics. See `docs/SCHEMA_V3.md`.
+
 ## Design
 
 The AdamW baseline uses configurable learning rate, betas, epsilon, weight decay, warmup, cosine scheduling hooks, gradient clipping, batch size, gradient accumulation, dropout, evaluation interval, and checkpoint interval. WW-PGD first applies the normal AdamW step, then projects selected matrix-valued transformer layers with a documented local projection. WW-PGD is not standard WeightWatcher.
 
 Default scientific data is `HuggingFaceFW/fineweb-edu`, config `sample-10BT`, revision pinned in YAML. Data preparation streams documents, assigns deterministic train/validation splits by normalized-content SHA-256, keeps duplicate documents in the same split, trains the BPE tokenizer only on training-assigned documents, writes manifests and hashes, and refuses to repeat tokens. Tiny Shakespeare is not used for scientific experiments; local synthetic text is used only for infrastructure smoke tests.
 
-Model ladder levels 0-4 use 64 per-head dimensions where practical: `(2,1,64)`, `(4,2,128)`, `(6,3,192)`, `(8,4,256)`, `(10,5,320)` with block size 256. Actual instantiated parameter counts are the source of truth and reports include total, trainable, embedding, and non-embedding parameters.
+Model ladder levels 0-4 are `(1,1,64)`, `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)` with block size 256. Actual instantiated parameter counts are the source of truth and reports include total, trainable, token embedding, position embedding, output head, embedding, and non-embedding parameters.
 
-Scaling uses an experimental Chinchilla-style extrapolation `D = kN` for multipliers 5, 10, 20, and 40. Applying 20 tokens per parameter to tiny GPTs is an extrapolation, not a proven optimum. Valid scaling analysis requires a non-collinear grid over model size and token multiplier.
+Scaling uses an experimental Chinchilla-style extrapolation `D = kN` with arbitrary positive token multipliers, including 20, 40, 80, and 160. Applying 20 tokens per parameter to tiny GPTs is an extrapolation, not a proven optimum. Valid scaling analysis requires a non-collinear grid over model size and token multiplier.
 
 Five default paired seeds are 1337, 2027, 4099, 7919, and 104729. Paired arms share initialization, token order, model config, tokenizer and corpus hashes, and token budgets. Results are immutable run directories beneath `level_XX/pair_<id>/<optimizer>/run_<timestamp>_<suffix>`.
 
