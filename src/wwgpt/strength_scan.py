@@ -1,12 +1,12 @@
 from __future__ import annotations
-import csv, json, math, platform, time, shutil
+import json, math, platform, time, shutil
 from dataclasses import asdict, replace
 from pathlib import Path
 import pandas as pd
 import torch
 from wwgpt.config import load_config, WWPGDConfig
 from wwgpt.train import run_scientific_single, _state_hash
-from wwgpt.data import load_prepared_scientific_data, prepare_local_text
+from wwgpt.data import load_prepared_scientific_data
 from wwgpt.model import GPT
 from wwgpt.utils import unique_dir, write_json, environment
 from wwgpt.ww import WWPGD_COMMIT, SCIENTIFIC_SCHEMA_VERSION, WWTailConfig
@@ -91,14 +91,8 @@ def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_s
     run=run_scientific_single(parent,base_opt,seed,cfg,data,f'strength_scan_seed_{seed}',init_state,init_hash,level,token_multiplier,device,None,eval_interval,checkpoint_interval,spectral_interval,None,resume)
     stable,reason,istep,mt,mv,mg=_stability(run,instability_loss_threshold)
     _append_scan_fields(run, scan_id=scan_id, scan_name=scan_name, scan_strength=strength, adamw_control_run=str(adamw), adamw_control_manifest_hash=_manifest_hash(adamw), strength_arm_id=label, scientific_schema_version=SCIENTIFIC_SCHEMA_VERSION, stable=stable, instability_reason=reason, instability_step=istep, maximum_train_loss=mt, maximum_validation_loss=mv, maximum_gradient_norm=mg)
-    # schema-compatible immediate spectral from projection rows (real WW omitted for fast scan fixtures)
-    proj=pd.read_csv(run/'wwpgd_projection.csv') if (run/'wwpgd_projection.csv').exists() else pd.DataFrame()
-    rows=[]
-    for _,r in proj.iterrows():
-        ab=2.5; aa=2.5 - 0.1*float(strength)
-        rows.append({'seed':seed,'pair_id':f'strength_scan_seed_{seed}','scan_id':scan_id,'scan_strength':strength,'projection_event':r.get('projection_event'),'scheduled_token_fraction':r.get('scheduled_token_fraction'),'actual_step':r.get('actual_step'),'actual_tokens_seen':r.get('actual_tokens_seen'),'layer_name':r.get('layer_name'),'target_alpha':cfg.wwpgd.target_alpha,'schedule_hardness':r.get('schedule_hardness'),'effective_hardness':r.get('effective_hardness'),'effective_cayley_eta':r.get('effective_cayley_eta'),'effective_blend_eta':r.get('effective_blend_eta'),'alpha_before':ab,'alpha_after':aa,'alpha_delta':aa-ab,'abs_alpha_error_before':abs(ab-cfg.wwpgd.target_alpha),'abs_alpha_error_after':abs(aa-cfg.wwpgd.target_alpha),'abs_alpha_error_change':abs(aa-cfg.wwpgd.target_alpha)-abs(ab-cfg.wwpgd.target_alpha),'weighted_alpha_before':ab,'weighted_alpha_after':aa,'xmin_before':r.get('xmin'),'xmin_after':r.get('xmin'),'detX_num_before':r.get('detX_num'),'detX_num_after':r.get('detX_num'),'D_before':0.02,'D_after':0.02,'num_evals_before':10,'num_evals_after':10,'status_before':'ok','status_after':'ok','warning_before':'','warning_after':'','relative_frobenius_change':r.get('relative_frobenius_change'),'TraceLog_before':r.get('TraceLog_before'),'TraceLog_after':r.get('TraceLog_after'),'TraceLog_change':r.get('TraceLog_after')-r.get('TraceLog_before') if pd.notna(r.get('TraceLog_after')) and pd.notna(r.get('TraceLog_before')) else math.nan,'selected_tail_size':r.get('selected_tail_size'),'projection_runtime':r.get('projection_runtime'),'pre_weightwatcher_runtime':0.0,'post_weightwatcher_runtime':0.0})
-    if rows:
-        with (run/'wwpgd_projection_spectral.csv').open('w', newline='') as f: w=csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+    # Immediate pre/post WeightWatcher spectral rows are written by run_scientific_single.
+    # This strength-scan wrapper never fabricates alpha or fit-quality fields.
     return run
 
 def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multiplier:int, seeds=None, strengths=None, config:Path|None=None, device=None, eval_interval=None, spectral_interval=None, checkpoint_interval=None, immediate_projection_spectral=True, resume=False, continue_on_error=True, scan_name='strength_scan', instability_loss_threshold=20.0, include_adamw_control=True, optimizer: str = "adamw"):

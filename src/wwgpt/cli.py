@@ -14,6 +14,10 @@ from wwgpt.scaling import plan_budget
 from wwgpt.train import run_multiseed_scientific, smoke
 from wwgpt.strength_scan import run_strength_scan, parse_strengths
 from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_strength_scan_cmd
+from wwgpt.device import device_summary, save_device_manifest
+from wwgpt.integrity import audit_experiment, audit_strength_scan
+from wwgpt.checkpointing import inspect_checkpoint, validate_resume
+from wwgpt.reproducibility import write_reproducibility_report
 
 
 
