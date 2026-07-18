@@ -35,6 +35,52 @@ from wwgpt.ww import (
 )
 
 
+
+def _finite(value) -> bool:
+    try:
+        return value is not None and math.isfinite(float(value))
+    except Exception:
+        return False
+
+
+def _num(value):
+    return float(value) if _finite(value) else float("nan")
+
+
+def _projection_spectral_rows(pre, post, projection_rows, seed, pair_id, target_alpha, *, scan_strength, pre_runtime, post_runtime):
+    key_pre = "longname" if "longname" in pre.columns else "name"
+    key_post = "longname" if "longname" in post.columns else "name"
+    pre_by = {str(r.get(key_pre, r.get("name", ""))): r for _, r in pre.iterrows()}
+    post_by = {str(r.get(key_post, r.get("name", ""))): r for _, r in post.iterrows()}
+    rows=[]
+    for pr in projection_rows:
+        lname=str(pr.get("layer_name", ""))
+        before=pre_by.get(lname)
+        after=post_by.get(lname)
+        def get(rec, name):
+            return float("nan") if rec is None or name not in rec or pd.isna(rec.get(name)) else rec.get(name)
+        import pandas as pd
+        ab=_num(get(before,"alpha")); aa=_num(get(after,"alpha"))
+        w_ab=_num(get(before,"weighted_alpha")); w_aa=_num(get(after,"weighted_alpha"))
+        tlb=_num(pr.get("TraceLog_before")); tla=_num(pr.get("TraceLog_after"))
+        errb=abs(ab-float(target_alpha)) if _finite(ab) else float("nan")
+        erra=abs(aa-float(target_alpha)) if _finite(aa) else float("nan")
+        rows.append({
+            "seed":seed,"pair_id":pair_id,"scan_strength":scan_strength,
+            "projection_event":pr.get("projection_event"),"scheduled_token_fraction":pr.get("scheduled_token_fraction"),"actual_step":pr.get("actual_step"),"actual_tokens_seen":pr.get("actual_tokens_seen"),"layer_name":lname,"target_alpha":target_alpha,
+            "schedule_hardness":pr.get("schedule_hardness"),"effective_hardness":pr.get("effective_hardness"),"effective_cayley_eta":pr.get("effective_cayley_eta"),"effective_blend_eta":pr.get("effective_blend_eta"),
+            "alpha_before":ab,"alpha_after":aa,"weighted_alpha_before":w_ab,"weighted_alpha_after":w_aa,
+            "xmin_before":_num(get(before,"xmin")),"xmin_after":_num(get(after,"xmin")),"detX_num_before":_num(get(before,"detX_num")),"detX_num_after":_num(get(after,"detX_num")),
+            "D_before":_num(get(before,"D")),"D_after":_num(get(after,"D")),"num_evals_before":_num(get(before,"num_evals")),"num_evals_after":_num(get(after,"num_evals")),
+            "status_before":str(get(before,"status")) if before is not None and "status" in before and not pd.isna(before.get("status")) else "missing",
+            "status_after":str(get(after,"status")) if after is not None and "status" in after and not pd.isna(after.get("status")) else "missing",
+            "warning_before":str(get(before,"warning")) if before is not None and "warning" in before and not pd.isna(before.get("warning")) else "",
+            "warning_after":str(get(after,"warning")) if after is not None and "warning" in after and not pd.isna(after.get("warning")) else "",
+            "alpha_delta":aa-ab if _finite(ab) and _finite(aa) else float("nan"),"abs_alpha_error_before":errb,"abs_alpha_error_after":erra,"abs_alpha_error_change":erra-errb if _finite(errb) and _finite(erra) else float("nan"),
+            "relative_frobenius_change":pr.get("relative_frobenius_change"),"TraceLog_before":tlb,"TraceLog_after":tla,"TraceLog_change":tla-tlb if _finite(tlb) and _finite(tla) else float("nan"),"selected_tail_size":pr.get("selected_tail_size"),"projection_runtime":pr.get("projection_runtime"),
+            "pre_weightwatcher_runtime":pre_runtime,"post_weightwatcher_runtime":post_runtime,"immediate_spectral_source":"weightwatcher_measured","weightwatcher_version":str(get(before,"weightwatcher_version")) if before is not None and "weightwatcher_version" in before else str(get(after,"weightwatcher_version")) if after is not None and "weightwatcher_version" in after else "unknown","weightwatcher_configuration":str(get(before,"weightwatcher_configuration")) if before is not None and "weightwatcher_configuration" in before else "","measurement_valid_for_science":True})
+    return rows
+
 def _log_train_progress(message: str) -> None:
     print(f"[wwgpt run-multiseed] {message}", file=sys.stderr, flush=True)
 
@@ -122,6 +168,7 @@ def run_single(
     metric_rows = []
     spectral_rows = []
     proj_rows = []
+    immediate_spectral_rows = []
     write_json(run_dir / "environment.json", environment())
     write_json(
         run_dir / "manifest.json",
@@ -310,6 +357,7 @@ def run_scientific_single(
     spectral_interval: int | None = None,
     precision: str | None = None,
     resume: bool = False,
+    immediate_projection_spectral: bool = False,
 ) -> Path:
     torch.manual_seed(seed)
     run_dir = unique_dir(run_parent / optimizer_name, "run")
@@ -383,6 +431,7 @@ def run_scientific_single(
     metric_rows = []
     spectral_rows = []
     proj_rows = []
+    immediate_spectral_rows = []
     _log_train_progress(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
@@ -406,18 +455,22 @@ def run_scientific_single(
                 event = len({r["projection_event"] for r in proj_rows})
                 ps = time.perf_counter()
                 details = weightwatcher_details(model)
-                proj_rows.extend(
-                    apply_wwpgd_reference(
-                        model,
-                        details=details,
-                        event_index=event,
-                        scheduled_token_fraction=cfg.wwpgd.projection_schedule[event],
-                        actual_step=step,
-                        actual_tokens_seen=step * tokens_per_step,
-                        strength=cfg.wwpgd.strength,
-                        cfg=WWTailConfig(min_tail=cfg.wwpgd.min_tail, blend_eta=cfg.wwpgd.blend_eta, cayley_eta=cfg.wwpgd.cayley_eta, use_detx=cfg.wwpgd.use_detx, warmup_events=cfg.wwpgd.warmup_events, ramp_events=cfg.wwpgd.ramp_events, q=1.0/(cfg.wwpgd.target_alpha-1.0)),
-                    )
+                pre_runtime = float(details["analysis_runtime"].max()) if "analysis_runtime" in details and len(details) else float("nan")
+                event_rows = apply_wwpgd_reference(
+                    model,
+                    details=details,
+                    event_index=event,
+                    scheduled_token_fraction=cfg.wwpgd.projection_schedule[event],
+                    actual_step=step,
+                    actual_tokens_seen=step * tokens_per_step,
+                    strength=cfg.wwpgd.strength,
+                    cfg=WWTailConfig(min_tail=cfg.wwpgd.min_tail, blend_eta=cfg.wwpgd.blend_eta, cayley_eta=cfg.wwpgd.cayley_eta, use_detx=cfg.wwpgd.use_detx, warmup_events=cfg.wwpgd.warmup_events, ramp_events=cfg.wwpgd.ramp_events, q=1.0/(cfg.wwpgd.target_alpha-1.0)),
                 )
+                proj_rows.extend(event_rows)
+                if immediate_projection_spectral:
+                    post_details = weightwatcher_details(model)
+                    post_runtime = float(post_details["analysis_runtime"].max()) if "analysis_runtime" in post_details and len(post_details) else float("nan")
+                    immediate_spectral_rows.extend(_projection_spectral_rows(details, post_details, event_rows, seed, pair_id, cfg.wwpgd.target_alpha, scan_strength=cfg.wwpgd.strength, pre_runtime=pre_runtime, post_runtime=post_runtime))
                 proj_time = time.perf_counter() - ps
                 _log_train_progress(
                     f"projection complete pair={pair_id} optimizer={optimizer_name} seed={seed} event={event} step={step}/{steps} projection_s={proj_time:.2f}"
@@ -500,6 +553,8 @@ def run_scientific_single(
     _write_csv(run_dir / "spectral.csv", spectral_rows)
     if optimizer_name == "adamw_wwpgd_reference":
         _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)
+        if immediate_projection_spectral and immediate_spectral_rows:
+            _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
     write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss})
     _log_train_progress(
@@ -522,6 +577,7 @@ def run_multiseed_scientific(
     spectral_interval: int | None = None,
     precision: str | None = None,
     resume: bool = False,
+    immediate_projection_spectral: bool = False,
 ) -> Path:
     from wwgpt.data import load_prepared_scientific_data
 
