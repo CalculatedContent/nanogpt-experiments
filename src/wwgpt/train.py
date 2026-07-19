@@ -20,7 +20,7 @@ from wwgpt.config import (
     WWPGDConfig,
     load_config,
 )
-from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, resolve_lr_decay_steps, resolve_warmup_steps
+from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, optimizer_fingerprint, resolve_lr_decay_steps, resolve_warmup_steps
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
@@ -571,6 +571,7 @@ def run_scientific_single(
         "model_architecture_version": cfg.model.model_architecture_version,
         "model_config_hash": sha256_bytes(json.dumps(asdict(cfg.model), sort_keys=True).encode()),
         "optimizer_hyperparameters": asdict(cfg.train),
+        "optimizer_fingerprint": optimizer_fingerprint(bundle),
         "extension_hyperparameters": asdict(cfg.wwpgd),
         "resolved_baseline_hyperparameters": resolved_baseline_hyperparameters(
             cfg,

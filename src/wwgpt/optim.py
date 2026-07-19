@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from importlib import metadata
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,10 @@ MANUAL_LAYER_LR_MULTIPLIERS = {
 
 BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw", "stable_adamw"}
 EXTENSIONS = {"none", "wwpgd"}
+ADAMW_IMPLEMENTATION = "torch.optim.AdamW"
+MUON_IMPLEMENTATION = "KellerJordan/modded-nanogpt Muon"
+MUON_IMPLEMENTATION_VERSION = "source:KellerJordan/modded-nanogpt/train_gpt2.py:Muon:zeropower_via_newtonschulz5_coefficients_3.4445_-4.7750_2.0315"
+STABLEADAMW_IMPLEMENTATION = "optimi.StableAdamW"
 ARM_DISPLAY = {
     "adamw": "AdamW",
     "adamw_wwpgd": "AdamW+WW-PGD",
@@ -50,6 +55,7 @@ class OptimizerBundle:
     name: str
     optimizers: list[torch.optim.Optimizer]
     scheduled_optimizers: list[tuple[str, torch.optim.Optimizer]]
+    implementation_versions: dict[str, str]
 
     def zero_grad(self, set_to_none: bool = True) -> None:
         for opt in self.optimizers:
@@ -184,23 +190,34 @@ def build_optimizer_bundle(model: nn.Module, cfg: TrainConfig, base_optimizer: s
     if base_optimizer == "adamw":
         groups, gamma = build_param_groups(model, cfg.learning_rate, cfg.weight_decay, cfg)
         opt = torch.optim.AdamW(groups, betas=cfg.betas, eps=cfg.epsilon)
-        return OptimizerBundle("adamw", [opt], [("adamw", opt)]), gamma
+        return OptimizerBundle("adamw", [opt], [("adamw", opt)], {"adamw": f"{ADAMW_IMPLEMENTATION}:{torch.__version__}"}), gamma
     if base_optimizer == "stableadamw":
         try:
             from optimi import StableAdamW
         except Exception as e:
-            raise RuntimeError("StableAdamW requires installing the 'optimi' package") from e
+            raise RuntimeError("cannot construct requested optimizer stableadamw: install the 'torch-optimi' package providing optimi.StableAdamW") from e
+        try:
+            optimi_version = metadata.version("torch-optimi")
+        except metadata.PackageNotFoundError:
+            try:
+                optimi_version = metadata.version("optimi")
+            except metadata.PackageNotFoundError:
+                optimi_version = "installed-version-unknown"
         groups, gamma = build_param_groups(model, cfg.stable_learning_rate, cfg.weight_decay, cfg)
         opt = StableAdamW(groups, lr=cfg.stable_learning_rate, betas=cfg.stable_betas, eps=cfg.stable_epsilon, weight_decay=0.0, triton=cfg.stable_triton)
-        return OptimizerBundle("stableadamw", [opt], [("stableadamw", opt)]), gamma
+        return OptimizerBundle("stableadamw", [opt], [("stableadamw", opt)], {"stableadamw": f"{STABLEADAMW_IMPLEMENTATION}:{optimi_version}"}), gamma
     if base_optimizer == "muon":
         mnames = muon_parameter_names(model); anames = {n for n, p in model.named_parameters() if p.requires_grad} - mnames
         mg, gamma = build_param_groups(model, cfg.muon_learning_rate, cfg.weight_decay, cfg, include_names=mnames)
         ag, gamma2 = build_param_groups(model, cfg.learning_rate, cfg.weight_decay, cfg, include_names=anames)
         mu = Muon(mg, lr=cfg.muon_learning_rate, momentum=cfg.muon_momentum, newton_schulz_steps=cfg.newton_schulz_steps, weight_decay=0.0)
         aux = torch.optim.AdamW(ag, betas=cfg.betas, eps=cfg.epsilon)
-        return OptimizerBundle("muon", [mu, aux], [("muon", mu), ("muon_aux_adamw", aux)]), gamma or gamma2
-    raise ValueError(f"unknown optimizer {base_optimizer}")
+        versions = {
+            "muon": MUON_IMPLEMENTATION_VERSION,
+            "muon_aux_adamw": f"{ADAMW_IMPLEMENTATION}:{torch.__version__}",
+        }
+        return OptimizerBundle("muon", [mu, aux], [("muon", mu), ("muon_aux_adamw", aux)], versions), gamma or gamma2
+    raise ValueError(f"cannot construct requested optimizer {base_optimizer}: unknown optimizer")
 
 
 SCHEDULER_IMPLEMENTATION = "nanogpt_linear_warmup_cosine_v1"
@@ -272,6 +289,26 @@ def optimizer_group_signature(bundle: OptimizerBundle) -> tuple[dict[str, Any], 
                 "epsilon": None if epsilon is None else float(epsilon),
             })
     return tuple(signature)
+
+
+def optimizer_fingerprint(bundle: OptimizerBundle) -> dict[str, Any]:
+    """Normalized optimizer identity for baseline/WW-PGD pair checks.
+
+    WW-PGD is intentionally absent because it is a post-step extension, not a
+    replacement optimizer.  Pairing compares this base-optimizer fingerprint and
+    extension metadata separately.
+    """
+    groups = []
+    for row in optimizer_group_signature(bundle):
+        group = dict(row)
+        opt_name = group["optimizer_name"]
+        group["implementation_version"] = bundle.implementation_versions.get(opt_name, "")
+        groups.append(group)
+    return {
+        "optimizer_type": bundle.name,
+        "implementation_versions": dict(sorted(bundle.implementation_versions.items())),
+        "parameter_groups": tuple(groups),
+    }
 
 
 def apply_lr_schedule(bundle: OptimizerBundle, step0: int, total: int, warmup: int, cfg: TrainConfig) -> list[dict[str, Any]]:
