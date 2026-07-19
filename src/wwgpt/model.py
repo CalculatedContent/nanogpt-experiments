@@ -16,10 +16,10 @@ class CausalSelfAttention(nn.Module):
             raise ValueError("n_embd must divide n_head")
         self.n_head = cfg.n_head
         self.head_dim = cfg.n_embd // cfg.n_head
-        self.key = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
-        self.query = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
-        self.value = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
-        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
+        self.key = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
+        self.query = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
+        self.value = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
+        self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -34,13 +34,13 @@ class CausalSelfAttention(nn.Module):
 class Block(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
+        self.ln_1 = nn.LayerNorm(cfg.n_embd, bias=cfg.layernorm_bias)
         self.attn = CausalSelfAttention(cfg)
-        self.ln_2 = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
+        self.ln_2 = nn.LayerNorm(cfg.n_embd, bias=cfg.layernorm_bias)
         act: nn.Module = nn.GELU() if cfg.activation == "gelu" else nn.ReLU()
         self.mlp = nn.Sequential(
-            nn.Linear(cfg.n_embd, cfg.mlp_mult * cfg.n_embd, bias=cfg.bias), act,
-            nn.Linear(cfg.mlp_mult * cfg.n_embd, cfg.n_embd, bias=cfg.bias), nn.Dropout(cfg.dropout)
+            nn.Linear(cfg.n_embd, cfg.mlp_mult * cfg.n_embd, bias=cfg.linear_bias), act,
+            nn.Linear(cfg.mlp_mult * cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias), nn.Dropout(cfg.dropout)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -71,11 +71,14 @@ class GPT(nn.Module):
         self.wpe = nn.Embedding(cfg.block_size, cfg.n_embd)
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
+        self.ln_f = nn.LayerNorm(cfg.n_embd, bias=cfg.layernorm_bias)
         self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         if cfg.tie_weights:
             self.lm_head.weight = self.wte.weight
-        self.apply(self._init_weights)
+        if cfg.init_mode == "nanogpt_normal_0p02":
+            self.apply(self._init_weights)
+        elif cfg.init_mode != "pytorch_default":
+            raise ValueError(f"unknown init_mode: {cfg.init_mode}")
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear | nn.Embedding):

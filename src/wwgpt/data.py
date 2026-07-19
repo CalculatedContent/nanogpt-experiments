@@ -169,6 +169,40 @@ class NonRepeatingTokenReader:
         return np.array(chunk[:-1], dtype=np.int64).reshape(batch_size, self.block_size), np.array(chunk[1:], dtype=np.int64).reshape(batch_size, self.block_size)
 
 
+class RandomWindowTokenReader:
+    def __init__(self, tokens: list[int], block_size: int, seed: int):
+        self.tokens = tokens
+        self.block_size = block_size
+        self.rng = np.random.default_rng(seed)
+
+    def next_batch(self, batch_size: int) -> tuple[np.ndarray, np.ndarray]:
+        if len(self.tokens) < self.block_size + 1:
+            raise ValueError("insufficient tokens for random windows")
+        starts = self.rng.integers(0, len(self.tokens) - self.block_size - 1, size=batch_size)
+        x = np.empty((batch_size, self.block_size), dtype=np.int64)
+        y = np.empty((batch_size, self.block_size), dtype=np.int64)
+        for i, st in enumerate(starts):
+            arr = np.array(self.tokens[int(st):int(st) + self.block_size + 1], dtype=np.int64)
+            x[i] = arr[:-1]
+            y[i] = arr[1:]
+        return x, y
+
+    def state_dict(self) -> dict[str, object]:
+        return {"bit_generator": self.rng.bit_generator.state}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.rng.bit_generator.state = state["bit_generator"]
+
+    @property
+    def pos(self) -> int:
+        return 0
+
+    @pos.setter
+    def pos(self, value: int) -> None:
+        if value not in (0, None):
+            raise ValueError("RandomWindowTokenReader has no sequential position")
+
+
 def fixed_probe(tokens: list[int], block_size: int, batch_size: int, eval_batches: int) -> tuple[np.ndarray, np.ndarray, str]:
     need = batch_size * block_size * eval_batches + 1
     if len(tokens) < need:

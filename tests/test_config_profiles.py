@@ -39,6 +39,9 @@ def test_reproduction_tiny_historical_hyperparameters():
     assert (cfg.model.n_layer, cfg.model.n_head, cfg.model.n_embd, cfg.model.block_size) == (1, 1, 64, 64)
     assert cfg.model.mlp_mult == 4
     assert cfg.model.tie_weights is False
+    assert cfg.model.init_mode == "pytorch_default"
+    assert cfg.model.layernorm_bias is True
+    assert cfg.model.linear_bias is False
     assert cfg.train.max_steps == 100000
     assert cfg.train.eval_interval == 50
     assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "manual", 0.03, 0.25)
@@ -54,6 +57,9 @@ def test_reproduction_fineweb_historical_hyperparameters():
     assert (cfg.model.n_layer, cfg.model.n_head, cfg.model.n_embd, cfg.model.block_size) == (1, 1, 64, 64)
     assert cfg.model.mlp_mult == 4
     assert cfg.model.tie_weights is False
+    assert cfg.model.init_mode == "pytorch_default"
+    assert cfg.model.layernorm_bias is True
+    assert cfg.model.linear_bias is False
     assert cfg.train.max_steps == 130000
     assert cfg.train.eval_interval == 1000
     assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "manual", 0.03, 0.25)

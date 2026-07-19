@@ -5,6 +5,10 @@ model:
   block_size: 64
   mlp_mult: 4
   tie_weights: false
+  linear_bias: false
+  layernorm_bias: true
+  init_mode: pytorch_default
+  profile_name: historical_reproduction_level0
 train:
   batch_size: 16
   gradient_accumulation: 1
@@ -14,6 +18,7 @@ train:
   max_steps: 100000
   eval_interval: 50
   eval_batches: 20
+  training_sampling: random_window
   lr_schedule: warmup_cosine
   layer_lr: manual
   warmup_ratio: 0.03

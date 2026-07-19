@@ -12,6 +12,10 @@ model:
   dropout: 0.0
   bias: false
   tie_weights: false
+  linear_bias: false
+  layernorm_bias: true
+  init_mode: nanogpt_normal_0p02
+  profile_name: scaling_level0
   mlp_mult: 4
 train:
   batch_size: 16
@@ -25,6 +29,7 @@ train:
   spectral_interval: 10
   checkpoint_interval: 50
   eval_batches: 20
+  training_sampling: random_window
   lr_schedule: warmup_cosine
   warmup_ratio: 0.05
   min_lr_ratio: 0.10
