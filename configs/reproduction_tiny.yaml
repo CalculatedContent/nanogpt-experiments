@@ -1,0 +1,20 @@
+model:
+  n_layer: 1
+  n_head: 1
+  n_embd: 64
+  block_size: 64
+  mlp_mult: 4
+  tie_weights: false
+train:
+  batch_size: 16
+  gradient_accumulation: 1
+  learning_rate: 0.001
+  weight_decay: 0.005
+  grad_clip: 0.0
+  max_steps: 100000
+  eval_interval: 50
+  eval_batches: 20
+  lr_schedule: warmup_cosine
+  layer_lr: manual
+  warmup_ratio: 0.03
+  min_lr_ratio: 0.25
