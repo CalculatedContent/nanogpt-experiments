@@ -203,13 +203,47 @@ def _write_csv(path: Path, rows: list[dict[str, object]], *, overwrite: bool = F
         w.writerows(rows)
 
 
+def _append_only_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    """Append missing rows without rewriting existing raw metric logs."""
+    if not rows:
+        return
+    existing = 0
+    existing_fields: list[str] | None = None
+    if path.exists():
+        with path.open(newline="") as f:
+            reader = csv.DictReader(f)
+            existing_fields = list(reader.fieldnames or [])
+            existing = sum(1 for _ in reader)
+    pending = rows[existing:]
+    if not pending:
+        return
+    if existing_fields:
+        fieldnames = existing_fields
+    else:
+        fieldnames = list(rows[0])
+        extras = [k for r in pending for k in r if k not in fieldnames]
+        fieldnames = fieldnames + list(dict.fromkeys(extras))
+    with path.open("a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        if existing == 0 and not existing_fields:
+            w.writeheader()
+        w.writerows(pending)
+
+
+def _perplexity_from_cross_entropy(loss: float) -> float:
+    try:
+        return float(math.exp(loss))
+    except OverflowError:
+        return float("inf")
+
+
 def _metrics(loss: float, logits: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
     pred = torch.topk(logits, k=min(5, logits.size(-1)), dim=-1).indices
     top1 = float((pred[..., 0] == y).float().mean())
     top5 = float((pred == y.unsqueeze(-1)).any(dim=-1).float().mean())
     return {
         "loss": loss,
-        "perplexity": float(math.exp(min(loss, 20))),
+        "perplexity": _perplexity_from_cross_entropy(loss),
         "bits_per_token": loss / math.log(2),
         "top1_accuracy": top1,
         "top5_accuracy": top5,
@@ -240,7 +274,7 @@ def _evaluate_probe_batches(
     top5 = top5_correct / max(token_count, 1)
     return {
         "loss": mean_loss,
-        "perplexity": float(math.exp(min(mean_loss, 20))),
+        "perplexity": _perplexity_from_cross_entropy(mean_loss),
         "bits_per_token": mean_loss / math.log(2),
         "top1_accuracy": top1,
         "top5_accuracy": top5,
@@ -725,11 +759,16 @@ def run_scientific_single(
             assert loss is not None
             (loss / cfg.train.gradient_accumulation).backward()
             train_loss_value += float(loss.detach().cpu())
+        grad_before_clip = _gradient_norm(model.parameters())
         if cfg.train.grad_clip > 0.0:
             grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
+            grad_after_clip = _gradient_norm(model.parameters())
         else:
-            grad = _gradient_norm(model.parameters())
-        lr_rows.extend(apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train))
+            grad = grad_before_clip
+            grad_after_clip = grad_before_clip
+        lr_update_rows = apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train)
+        lr_rows.extend(lr_update_rows)
+        logged_lr = float(lr_update_rows[0]["current_lr"]) if lr_update_rows else cfg.train.learning_rate
         bundle.step()
         optimizer_step_count = step
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
@@ -759,11 +798,23 @@ def run_scientific_single(
             else:
                 train_x, train_y, training_probe_hash = random_probe(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(resolved_seeds["train_eval_probe_seed_base"], eval_index, "random_per_eval_v1"))
                 val_x, val_y, validation_probe_hash = random_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(resolved_seeds["val_eval_probe_seed_base"], eval_index, "random_per_eval_v1"))
+            diagnostic_test_metrics = None
+            diagnostic_test_loss = float("nan")
+            diagnostic_test_probe_hash = ""
             with torch.no_grad():
                 tm, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)
                 vm, validation_probe_loss = _evaluate_probe_batches(model, val_x, val_y, selected_device)
+                if cfg.train.test_evaluation_mode == "diagnostic_periodic" and data.test is not None:
+                    test_x, test_y, diagnostic_test_probe_hash = random_probe(
+                        data.test,
+                        cfg.model.block_size,
+                        cfg.train.batch_size,
+                        cfg.train.eval_batches,
+                        stable_seed(resolved_seeds["val_eval_probe_seed_base"], eval_index, "diagnostic_test_random_per_eval_v1"),
+                    )
+                    diagnostic_test_metrics, diagnostic_test_loss = _evaluate_probe_batches(model, test_x, test_y, selected_device)
             model.train(was_training)
-            elapsed = time.perf_counter() - start
+            elapsed = elapsed_prior + time.perf_counter() - start
             last_loss = validation_probe_loss
             latest_validation_loss = validation_probe_loss
             if validation_probe_loss < best_validation_loss:
@@ -775,13 +826,24 @@ def run_scientific_single(
                     "step": step,
                     "tokens_processed": step * tokens_per_step,
                     "elapsed_time": elapsed,
-                    "learning_rate": cfg.train.learning_rate,
-                    "gradient_norm": float(grad.detach().cpu()),
+                    "optimizer_steps": optimizer_step_count,
+                    "wall_clock_time": elapsed,
+                    "learning_rate": logged_lr,
+                    "gradient_norm": float(grad_before_clip.detach().cpu()),
+                    "gradient_norm_before_clip": float(grad_before_clip.detach().cpu()),
+                    "gradient_norm_after_clip": float(grad_after_clip.detach().cpu()),
                     "train_minibatch_loss": float(loss.detach().cpu()),
                     "train_loss": tm["loss"],
+                    "train_cross_entropy": tm["loss"],
+                    "validation_loss": vm["loss"],
+                    "validation_cross_entropy": vm["loss"],
                     "val_loss": vm["loss"],
+                    "test_loss": diagnostic_test_loss,
+                    "test_cross_entropy": diagnostic_test_loss,
                     "train_perplexity": tm["perplexity"],
+                    "validation_perplexity": vm["perplexity"],
                     "val_perplexity": vm["perplexity"],
+                    "test_perplexity": diagnostic_test_metrics["perplexity"] if diagnostic_test_metrics else float("nan"),
                     "train_bits_per_token": tm["bits_per_token"],
                     "val_bits_per_token": vm["bits_per_token"],
                     "train_top1_accuracy": tm["top1_accuracy"],
@@ -790,11 +852,14 @@ def run_scientific_single(
                     "val_top5_accuracy": vm["top5_accuracy"],
                     "train_token_error": tm["token_error"],
                     "val_token_error": vm["token_error"],
+                    "train_validation_gap": vm["loss"] - tm["loss"],
+                    "train_test_gap": diagnostic_test_loss - tm["loss"] if diagnostic_test_metrics else float("nan"),
                     "generalization_gap": vm["loss"] - tm["loss"],
                     "evaluation_index": eval_index,
                     "evaluation_sampling": cfg.train.evaluation_sampling,
                     "train_eval_batch_hash": training_probe_hash,
                     "val_eval_batch_hash": validation_probe_hash,
+                    "test_eval_batch_hash": diagnostic_test_probe_hash,
                     "evaluation_token_count": int(
                         cfg.train.eval_batches * cfg.train.batch_size * cfg.model.block_size
                     ),
@@ -875,10 +940,37 @@ def run_scientific_single(
             _log_train_progress(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
+    if data.test is not None and metric_rows:
+        final_model_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        best_paths = sorted(ckpt.glob(f"best_val_step_*_{seed}.pt"))
+        selected_path = best_paths[-1] if best_paths else None
+        if selected_path is not None:
+            selected_state = torch.load(selected_path, map_location=selected_device, weights_only=False)
+            model.load_state_dict(selected_state)
+        was_training = model.training
+        model.eval()
+        test_x, test_y, test_probe_hash = fixed_probe(data.test, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+        with torch.no_grad():
+            test_metrics, test_loss = _evaluate_probe_batches(model, test_x, test_y, selected_device)
+        model.train(was_training)
+        metric_rows[-1].update({
+            "selected_checkpoint_step": best_validation_step or steps,
+            "selected_checkpoint_metric": "validation_loss",
+            "test_evaluation_mode": cfg.train.test_evaluation_mode,
+            "test_eval_batch_hash": test_probe_hash,
+            "test_loss": test_loss,
+            "test_cross_entropy": test_loss,
+            "test_perplexity": test_metrics["perplexity"],
+            "test_top1_accuracy": test_metrics["top1_accuracy"],
+            "test_top5_accuracy": test_metrics["top5_accuracy"],
+            "test_token_error": test_metrics["token_error"],
+            "train_test_gap": test_loss - metric_rows[-1]["train_loss"],
+        })
+        model.load_state_dict(final_model_state)
     final_elapsed = elapsed_prior + time.perf_counter() - start
     save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
-    _write_csv(run_dir / "metrics.csv", metric_rows, overwrite=resume)
+    _append_only_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
     if cfg.composite_spectral_analysis_enabled:
         _write_csv(run_dir / "composite_spectral.csv", composite_rows, overwrite=resume)
