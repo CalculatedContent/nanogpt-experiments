@@ -42,9 +42,46 @@ from wwgpt.ww import (
 
 
 
+def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
+    if not arm_dir.exists():
+        raise FileNotFoundError(f"no runs exist for resume arm directory: {arm_dir}")
+    candidates=[]; incompatible=[]
+    for run in sorted([p for p in arm_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
+        if not (run / "checkpoints" / "latest.json").exists():
+            continue
+        try:
+            manifest=json.loads((run / "manifest.json").read_text())
+            data_manifest=json.loads((run / "data_manifest.json").read_text())
+            tok_manifest=json.loads((run / "tokenizer_manifest.json").read_text())
+            init=(run / "initialization_hash.txt").read_text().strip()
+        except Exception as exc:
+            incompatible.append({"run": str(run), "error": str(exc)})
+            continue
+        observed={
+            "pair_id": manifest.get("pair_id"),
+            "arm_name": manifest.get("arm_name", manifest.get("optimizer")),
+            "seed": manifest.get("seed"),
+            "configuration_hash": manifest.get("configuration_hash"),
+            "data_hash": manifest.get("data_hash", data_manifest.get("corpus_hash")),
+            "tokenizer_hash": manifest.get("tokenizer_hash", tok_manifest.get("tokenizer_hash")),
+            "initialization_hash": manifest.get("initialization_hash", init),
+            "immediate_projection_spectral": manifest.get("immediate_projection_spectral"),
+        }
+        mm={k:{"expected": v, "found": observed.get(k)} for k,v in expected.items() if observed.get(k) != v}
+        if mm:
+            incompatible.append({"run": str(run), "mismatches": mm})
+        else:
+            candidates.append(run)
+    if len(candidates)==1:
+        return candidates[0]
+    if not candidates:
+        raise RuntimeError("no compatible resume run found; mismatches=" + json.dumps(incompatible, sort_keys=True, default=str))
+    raise RuntimeError("multiple compatible resume runs found; refusing ambiguous resume: " + json.dumps([str(p) for p in candidates]))
+
+
 class TrainingExtension:
     name = "base"
-    def after_optimizer_step(self, *, model, optimizer_step: int, total_optimizer_steps: int, tokens_seen: int) -> list[dict[str, object]]:
+    def after_optimizer_step(self, *, model, optimizer_step: int, total_optimizer_steps: int, tokens_seen: int):
         return []
 
 
@@ -62,7 +99,9 @@ class WWPGDExtension(TrainingExtension):
         event = optimizer_step // self.interval - 1
         details = weightwatcher_details(model)
         q = self.cfg.q if hasattr(self.cfg, "q") else 1.0 / max(1e-9, self.cfg.target_alpha - 1.0)
-        return apply_wwpgd_reference(model, details=details, event_index=event, scheduled_token_fraction=tokens_seen / max(1, total_optimizer_steps), actual_step=optimizer_step, actual_tokens_seen=tokens_seen, strength=self.cfg.strength, cfg=WWTailConfig(min_tail=self.cfg.min_tail, blend_eta=self.cfg.blend_eta, cayley_eta=self.cfg.cayley_eta, use_detx=self.cfg.use_detx, warmup_events=self.cfg.warmup_events, ramp_events=self.cfg.ramp_events, q=q))
+        frac = max(0.0, min(1.0, optimizer_step / max(1, total_optimizer_steps)))
+        rows = apply_wwpgd_reference(model, details=details, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, strength=self.cfg.strength, cfg=WWTailConfig(min_tail=self.cfg.min_tail, blend_eta=self.cfg.blend_eta, cayley_eta=self.cfg.cayley_eta, use_detx=self.cfg.use_detx, warmup_events=self.cfg.warmup_events, ramp_events=self.cfg.ramp_events, q=q))
+        return details, rows
 
 def _log_train_progress(message: str) -> None:
     print(f"[wwgpt run-multiseed] {message}", file=sys.stderr, flush=True)
@@ -368,9 +407,8 @@ def run_scientific_single(
     else:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
     optimizer_name = make_arm_name(base_optimizer, extension_name)
-    run_dir = unique_dir(run_parent / optimizer_name, "run")
-    ckpt = run_dir / "checkpoints"
-    ckpt.mkdir(exist_ok=True)
+    run_dir = None
+    ckpt = None
     selected_device = select_device(device)
     model = GPT(cfg.model).to(selected_device)
     model.load_state_dict(init_state)
@@ -392,8 +430,6 @@ def run_scientific_single(
     validation_probe_hash = ""
     training_probe_hash = ""
     assert not np.shares_memory(np.array(data.val), np.array(data.train))
-    write_json(run_dir / "environment.json", environment())
-    (run_dir / "initialization_hash.txt").write_text(init_hash)
     man = {
         "smoke_test": False,
         "valid_for_science": True,
@@ -473,6 +509,25 @@ def run_scientific_single(
         "training_configuration_hash": stable_hash(cfgd_for_hash.get("train", {})),
         "wwpgd_configuration_hash": stable_hash(cfgd_for_hash.get("wwpgd", {})),
     })
+    expected_identity = {
+        "pair_id": pair_id,
+        "arm_name": optimizer_name,
+        "seed": seed,
+        "configuration_hash": man["configuration_hash"],
+        "data_hash": data.corpus_hash,
+        "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"],
+        "initialization_hash": init_hash,
+        "immediate_projection_spectral": immediate_projection_spectral,
+    }
+    if resume:
+        run_dir = _select_resume_run(run_parent / optimizer_name, expected_identity)
+        ckpt = run_dir / "checkpoints"
+    else:
+        run_dir = unique_dir(run_parent / optimizer_name, "run")
+        ckpt = run_dir / "checkpoints"
+        ckpt.mkdir(parents=True, exist_ok=True)
+    write_json(run_dir / "environment.json", environment())
+    (run_dir / "initialization_hash.txt").write_text(init_hash)
     write_json(run_dir / "manifest.json", man)
     write_json(run_dir / "data_manifest.json", data.data_manifest)
     write_json(run_dir / "tokenizer_manifest.json", data.tokenizer_manifest)
@@ -497,7 +552,7 @@ def run_scientific_single(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
     start_step = 1
-    if resume and (ckpt / "latest.json").exists():
+    if resume:
         loaded = load_latest_checkpoint(run_dir)
         assert_checkpoint_compatible(loaded, compatibility)
         model.load_state_dict(loaded["model_state_dict"])
@@ -519,7 +574,7 @@ def run_scientific_single(
     start = time.perf_counter()
     last_loss = latest_validation_loss if math.isfinite(latest_validation_loss) else 0.0
     ww_over = 0.0
-    for step in range(1, steps + 1):
+    for step in range(start_step, steps + 1):
         lr_rows.extend(apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train))
         bundle.zero_grad()
         train_loss_value = 0.0
@@ -537,7 +592,11 @@ def run_scientific_single(
         bundle.step()
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
-        new_proj = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step)
+        ext_result = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step)
+        if isinstance(ext_result, tuple):
+            pre_details, new_proj = ext_result
+        else:
+            pre_details, new_proj = None, ext_result
         proj_rows.extend(new_proj)
         if new_proj:
             event_idx = int(new_proj[0].get("projection_event", next_projection_event_index))
@@ -545,7 +604,7 @@ def run_scientific_single(
                 completed_projection_event_indexes.append(event_idx)
             next_projection_event_index = max(next_projection_event_index, event_idx + 1)
             if immediate_projection_spectral:
-                post = measured_projection_spectral_rows(model, step=step, tokens_seen=step * tokens_per_step, optimizer=optimizer_name, seed=seed, pair_id=pair_id, projection_event=event_idx, phase="post")
+                post = measured_projection_spectral_rows(pre_details, model, step=step, tokens_seen=step * tokens_per_step, optimizer=optimizer_name, seed=seed, pair_id=pair_id, projection_event=event_idx, projection_rows=new_proj, target_alpha=cfg.wwpgd.target_alpha, phase="post")
                 immediate_spectral_rows.extend(post)
         proj_time = time.perf_counter() - ps if new_proj else 0.0
         if step % (eval_interval or cfg.train.eval_interval) == 0 or step == steps:
