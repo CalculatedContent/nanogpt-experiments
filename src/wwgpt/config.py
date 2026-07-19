@@ -67,7 +67,7 @@ class TrainConfig:
     max_train_tokens: int | None = None
     evaluation_sampling: str = "random_per_eval"
     training_sampling: str = "random_window"
-    wwpgd_interval: int | None = None
+    wwpgd_interval: int | None = 1
 
     def __post_init__(self) -> None:
         if self.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:
