@@ -10,7 +10,7 @@ Token budgets use actual instantiated trainable parameter counts. With default `
 
 Evaluation defaults to `random_per_eval`: new deterministic random train and validation windows are sampled at each evaluation event from independent SHA-256-derived streams. Paired arms share seeds and therefore evaluation hashes. Evaluation does not advance the training reader and restores train/eval mode.
 
-WW-PGD is a post-step extension run every `wwpgd_interval` optimizer steps (defaulting to `eval_interval`). It projects only raw eligible block matrices using WeightWatcher-selected large-eigenvalue tails from `xmin` and `detX_num`; embeddings, LayerNorms, biases, and the LM head are excluded by default.
+WW-PGD is a post-step extension run exactly once after every successful base optimizer step. The standard `wwpgd_interval` is `1` and is never derived from evaluation or logging cadence. It projects only raw eligible block matrices using WeightWatcher-selected large-eigenvalue tails from `xmin` and `detX_num`; embeddings, LayerNorms, biases, and the LM head are excluded by default.
 
 Spectral diagnostics run independently of evaluation. Raw matrices include W_K, W_Q, W_V, W_O, W_MLP_IN, and W_MLP_OUT. Composite diagnostics include `KQ=W_K@W_Q`, `QK=W_Q@W_K`, `QK_effective=W_Q.T@W_K`, `KQ_effective=W_K.T@W_Q`, `OV=sum_h W_O,h@W_V,h`, `VO=W_V@W_O`, and `MLP_IO=W_MLP_OUT@W_MLP_IN`. Composite matrices are diagnostics only.
 
