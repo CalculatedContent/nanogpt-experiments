@@ -16,7 +16,7 @@ def test_strength_parse_labels_validation():
 
 def test_strength_config_immutable_and_q():
     cfg=ExperimentConfig(); new=strength_config(cfg,0.5)
-    assert cfg.wwpgd.strength == 0.02 and new.wwpgd.strength == 0.5 and new is not cfg
+    assert cfg.wwpgd.strength == 1.0 and new.wwpgd.strength == 0.5 and new is not cfg
     assert target_alpha_to_q(2.0)==1.0
     with pytest.raises(ValueError): target_alpha_to_q(1.0)
 

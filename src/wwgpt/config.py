@@ -14,7 +14,7 @@ MODEL_ARCHITECTURE_VERSION = "separate_qkv_bias_free_untied_head_v1"
 
 @dataclass(frozen=True)
 class ModelConfig:
-    n_layer: int = 2
+    n_layer: int = 1
     n_head: int = 1
     n_embd: int = 64
     block_size: int = 256
@@ -66,7 +66,9 @@ class WWPGDConfig:
     enabled: bool = False
     extension: str = "none"
     target_alpha: float = 2.0
-    strength: float = 0.02
+    # Deprecated compatibility field for loading old artifacts; new scientific runs use q/eta scheduling.
+    strength: float = 1.0
+    q: float = 1.0
     projection_schedule: list[float] = field(default_factory=lambda: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92])
     warmup_steps: int = 0
     ramp_steps: int = 10
@@ -96,6 +98,8 @@ class ExperimentConfig:
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     dataset_config: str = "sample-10BT"
     dataset_revision: str = "main"
+    tokenizer: str | None = None
+    composite_spectral_analysis_enabled: bool = False
 
 
 def level_model_config(level: int) -> ModelConfig:
@@ -119,9 +123,13 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     cfg = ExperimentConfig(model=level_model_config(level))
     if path is None:
         return cfg
-    data = yaml.safe_load(path.read_text())
-    model = ModelConfig(**{**asdict(cfg.model), **data.get("model", {})})
-    train = TrainConfig(**{**asdict(cfg.train), **data.get("train", {})})
-    wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **data.get("wwpgd", {})})
-    rest: dict[str, Any] = {k: v for k, v in data.items() if k not in {"model", "train", "wwpgd"}}
+    data = yaml.safe_load(path.read_text()) or {}
+    model_keys = set(ModelConfig.__dataclass_fields__)
+    train_keys = set(TrainConfig.__dataclass_fields__)
+    wwpgd_keys = set(WWPGDConfig.__dataclass_fields__)
+    experiment_keys = set(ExperimentConfig.__dataclass_fields__) - {"model", "train", "wwpgd"}
+    model = ModelConfig(**{**asdict(cfg.model), **{k: v for k, v in data.get("model", {}).items() if k in model_keys}})
+    train = TrainConfig(**{**asdict(cfg.train), **{k: v for k, v in data.get("train", {}).items() if k in train_keys}})
+    wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **{k: v for k, v in data.get("wwpgd", {}).items() if k in wwpgd_keys}})
+    rest: dict[str, Any] = {k: v for k, v in data.items() if k in experiment_keys}
     return ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)

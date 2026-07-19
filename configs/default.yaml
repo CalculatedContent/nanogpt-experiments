@@ -6,11 +6,8 @@ extensions: [none, wwpgd]
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
 dataset_revision: main
+composite_spectral_analysis_enabled: false
 model:
-  n_layer: 1
-  n_head: 1
-  n_embd: 64
-  block_size: 256
   vocab_size: 8192
   dropout: 0.0
   bias: false
@@ -39,11 +36,11 @@ wwpgd:
   enabled: true
   extension: wwpgd
   target_alpha: 2.0
-  strength: 0.02
-  min_tail: 5
+  strength: 1.0  # deprecated compatibility field; do not use for new scientific runs
   q: 1.0
   blend_eta: 0.5
   cayley_eta: 0.25
+  min_tail: 5
   use_detx: true
   warmup_events: 0
   ramp_events: 5
