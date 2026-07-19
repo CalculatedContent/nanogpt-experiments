@@ -33,10 +33,10 @@ def test_wwpgd_extension_one_pre_call_and_fraction(monkeypatch):
     def fake_details(model):
         calls["pre"] += 1
         return details
-    def fake_apply(model, *, details, event_index, scheduled_token_fraction, actual_step, actual_tokens_seen, strength, cfg):
+    def fake_apply(model, *, event_index, scheduled_token_fraction, actual_step, actual_tokens_seen, cfg):
         return [{"projection_event":event_index,"layer_name":"blocks.0.attn.key","scheduled_token_fraction":scheduled_token_fraction}]
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", fake_details)
-    monkeypatch.setattr("wwgpt.train.apply_wwpgd_reference", fake_apply)
+    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", fake_apply)
     ext = WWPGDExtension(DummyCfg(), interval=2)
     assert ext.after_optimizer_step(model=object(), optimizer_step=1, total_optimizer_steps=4, tokens_seen=999) == []
     pre, rows1 = ext.after_optimizer_step(model=object(), optimizer_step=2, total_optimizer_steps=4, tokens_seen=999)

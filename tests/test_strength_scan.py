@@ -3,7 +3,7 @@ import json, subprocess, sys
 import nbformat, pytest, torch, pandas as pd
 from wwgpt.strength_scan import parse_strengths, format_strength_label, target_alpha_to_q, strength_config, run_strength_scan, validate_scan_pairing
 from wwgpt.config import ExperimentConfig
-from wwgpt.ww import apply_wwpgd_reference, WWTailConfig, matrix_modules, is_projected_layer
+from wwgpt.ww import external_projected_layer_names
 from wwgpt.model import GPT
 from wwgpt.config import ModelConfig
 from wwgpt.strength_scan_analysis import analyze_strength_scan, resolve_scan_root
@@ -20,15 +20,12 @@ def test_strength_config_immutable_and_q():
     assert target_alpha_to_q(2.0)==1.0
     with pytest.raises(ValueError): target_alpha_to_q(1.0)
 
-def test_detx_midpoint_and_use_detx_false():
-    m=GPT(ModelConfig(n_layer=1,n_head=1,n_embd=8,block_size=4,vocab_size=10))
-    rows=pd.DataFrame([{'longname':n,'xmin':1e-12,'detX_num':2} for n,_ in matrix_modules(m) if is_projected_layer(n)])
-    out=apply_wwpgd_reference(m,details=rows,event_index=5,strength=1.0,cfg=WWTailConfig(min_tail=1,ramp_events=1,use_detx=True))
-    assert out and all('selected_tail_threshold' in r and 'powerlaw_tail_size' in r for r in out)
-    m2=GPT(ModelConfig(n_layer=1,n_head=1,n_embd=8,block_size=4,vocab_size=10))
-    out2=apply_wwpgd_reference(m2,details=rows,event_index=5,strength=1.0,cfg=WWTailConfig(min_tail=1,ramp_events=1,use_detx=False))
-    assert all(r['selected_tail_threshold'] == r['xmin'] for r in out2)
-    assert all('schedule_hardness' in r and 'effective_hardness' in r for r in out)
+def test_strength_scan_uses_external_layer_selector():
+    m=GPT(ModelConfig(n_layer=1,n_head=1,n_embd=64,block_size=4,vocab_size=10))
+    assert external_projected_layer_names(m) == [
+        'blocks.0.attn.key', 'blocks.0.attn.query', 'blocks.0.attn.value',
+        'blocks.0.attn.proj', 'blocks.0.mlp.0', 'blocks.0.mlp.2'
+    ]
 
 def test_cli_help():
     assert subprocess.run([sys.executable,'-m','wwgpt.cli','run-strength-scan','--help'],capture_output=True,text=True).returncode==0

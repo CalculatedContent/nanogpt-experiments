@@ -70,185 +70,160 @@ def spectral_summary(model: nn.Module, *, step: int, tokens_seen: int, optimizer
 def fallback_spectral_summary(model: nn.Module, *, step: int = 0, tokens_seen: int = 0, optimizer: str = "smoke", seed: int = 0, pair_id: str = "smoke") -> list[dict[str, object]]:
     rows=[]
     for lid,(name,w) in enumerate(matrix_modules(model)):
-        s=torch.linalg.svdvals(w.detach().float().cpu()); eig=(s*s).numpy()
-        rows.append({"layer_id":lid,"name":name,"longname":name,"num_evals":len(eig),"spectral_norm":float(s.max()) if len(s) else 0.0,"stable_rank":float(eig.sum()/(eig.max()+1e-12)) if len(eig) else 0.0,"step":step,"tokens_seen":tokens_seen,"optimizer":optimizer,"seed":seed,"pair_id":pair_id,"analysis_runtime":0.0,"weightwatcher_version":"","spectral_estimator":"fallback_non_scientific","spectral_estimator_version":"","valid_for_science":False,"warning":"smoke-test fallback; not WeightWatcher alpha"})
+        gram=w.detach().float().cpu() @ w.detach().float().cpu().T; eig=torch.linalg.eigvalsh(gram).clamp_min(0).numpy()
+        rows.append({"layer_id":lid,"name":name,"longname":name,"num_evals":len(eig),"spectral_norm":float(eig.max() ** 0.5) if len(eig) else 0.0,"stable_rank":float(eig.sum()/(eig.max()+1e-12)) if len(eig) else 0.0,"step":step,"tokens_seen":tokens_seen,"optimizer":optimizer,"seed":seed,"pair_id":pair_id,"analysis_runtime":0.0,"weightwatcher_version":"","spectral_estimator":"fallback_non_scientific","spectral_estimator_version":"","valid_for_science":False,"warning":"smoke-test fallback; not WeightWatcher alpha"})
     return rows
 
 
-@dataclass
-class WWTailConfig:
-    min_tail: int = 5
+@dataclass(frozen=True)
+class ExternalWWTailConfigSpec:
+    enable_tail_pgd: bool = True
     q: float = 1.0
     blend_eta: float = 0.5
     cayley_eta: float = 0.25
+    min_tail: int = 5
     use_detx: bool = True
-    warmup_events: int = 0
-    ramp_events: int = 5
+    warmup_epochs: int = 0
+    ramp_epochs: int = 5
+    verbose: bool = False
 
 
-def projection_hardness(event_index: int, cfg: WWTailConfig) -> float:
-    if event_index < cfg.warmup_events: return 0.0
-    if event_index >= cfg.warmup_events + cfg.ramp_events: return 1.0
-    return max(0.0, min(1.0, (event_index - cfg.warmup_events + 1) / max(cfg.ramp_events, 1)))
+WWTailConfig = ExternalWWTailConfigSpec
 
 
-def _cayley(lam_current: torch.Tensor, lam_target: torch.Tensor, eta: float) -> torch.Tensor:
-    if eta <= 0.0: return lam_current
-    g=torch.log(lam_current+1e-8)-torch.log(lam_target+1e-8)
-    return lam_current*torch.clamp((1-eta*g)/(1+eta*g),0.1,10.0)
+def resolved_external_wwpgd_config() -> ExternalWWTailConfigSpec:
+    return ExternalWWTailConfigSpec()
 
 
-def _resolve_module(model: nn.Module, lname: str) -> nn.Module | None:
-    cur: nn.Module = model
-    for part in lname.split("."):
-        if not hasattr(cur, part): return None
-        cur=getattr(cur, part)
-    return cur if hasattr(cur,"weight") else None
+def external_wwpgd_manifest_fields(enabled: bool = True) -> dict[str, object]:
+    if not enabled:
+        return {
+            "wwpgd_package": "",
+            "wwpgd_source_repository": "",
+            "wwpgd_commit": "",
+            "wwpgd_implementation": "none",
+        }
+    cfg = resolved_external_wwpgd_config()
+    return {
+        "wwpgd_package": "ww_pgd",
+        "wwpgd_source_repository": "CalculatedContent/WW_PGD",
+        "wwpgd_commit": WWPGD_COMMIT,
+        "wwpgd_implementation": "ww_pgd",
+        "q": cfg.q,
+        "blend_eta": cfg.blend_eta,
+        "cayley_eta": cfg.cayley_eta,
+        "min_tail": cfg.min_tail,
+        "warmup": cfg.warmup_epochs,
+        "ramp": cfg.ramp_epochs,
+        "use_detx": cfg.use_detx,
+    }
 
 
-def apply_wwpgd_reference(
+def _external_wwpgd_module():
+    import ww_pgd
+    return ww_pgd
+
+
+def external_projected_layer_names(model: nn.Module) -> list[str]:
+    return [name for name, _ in projected_matrix_modules(model)]
+
+
+def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
+    config_cls = getattr(ww_pgd_module, "WWTailConfig")
+    kwargs = {
+        "enable_tail_pgd": cfg.enable_tail_pgd,
+        "q": cfg.q,
+        "blend_eta": cfg.blend_eta,
+        "cayley_eta": cfg.cayley_eta,
+        "min_tail": cfg.min_tail,
+        "use_detx": cfg.use_detx,
+        "warmup_epochs": cfg.warmup_epochs,
+        "ramp_epochs": cfg.ramp_epochs,
+        "verbose": cfg.verbose,
+    }
+    try:
+        return config_cls(**kwargs)
+    except TypeError:
+        import inspect
+        sig = inspect.signature(config_cls)
+        accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return config_cls(**accepted)
+
+
+def apply_external_wwpgd(
     model: nn.Module,
     *,
-    details: pd.DataFrame | None = None,
     event_index: int = 0,
     scheduled_token_fraction: float = 0.0,
     actual_step: int = 0,
     actual_tokens_seen: int = 0,
-    strength: float = 1.0,
-    cfg: WWTailConfig | None = None,
+    cfg: ExternalWWTailConfigSpec | None = None,
 ) -> list[dict[str, object]]:
-    cfg = cfg or WWTailConfig()
-    schedule_hardness = projection_hardness(event_index, cfg)
-    effective_hardness = schedule_hardness * strength
-    hardness = effective_hardness
-    effective_cayley_eta = effective_hardness * cfg.cayley_eta
-    effective_blend_eta = effective_hardness * cfg.blend_eta
-    if details is None:
-        details = weightwatcher_details(model)
+    cfg = cfg or resolved_external_wwpgd_config()
+    ww_pgd_module = _external_wwpgd_module()
+    external_cfg = _external_config_object(ww_pgd_module, cfg)
+    layer_names = external_projected_layer_names(model)
+    projector = getattr(ww_pgd_module, "ww_pgd_project")
+    start = time.perf_counter()
+    def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
+        if layer_name not in layer_names:
+            return None
+        cur: nn.Module = mm
+        for part in layer_name.split("."):
+            if part.isdigit() and isinstance(cur, (nn.ModuleList, nn.Sequential)):
+                cur = cur[int(part)]
+            elif hasattr(cur, part):
+                cur = getattr(cur, part)
+            else:
+                return None
+        return cur if hasattr(cur, "weight") else None
 
-    rows = []
-    key = "longname" if "longname" in details.columns else "name"
-    for _, row in details.iterrows():
-        lname = str(row.get(key, row.get("name", "")))
-        if not is_projected_layer(lname):
-            continue
-
-        mod = _resolve_module(model, lname)
-        start = time.perf_counter()
-        reason = ""
-        changed = False
-        rel = 0.0
-        tail_size = 0
-        tl_before = float("nan")
-        tl_after = float("nan")
-        xmin = float(row.get("xmin", float("nan"))) if pd.notna(row.get("xmin", float("nan"))) else float("nan")
-        detx_num = int(row.get("detX_num")) if "detX_num" in row and pd.notna(row.get("detX_num")) else None
-
-        if mod is None or not math.isfinite(xmin) or xmin <= 0 or hardness <= 0:
-            reason = "no_module_or_invalid_xmin_or_zero_strength"
-        else:
-            with torch.no_grad():
-                W = mod.weight.data
-                old = W.detach().clone()
-                W2 = W.reshape(W.size(0), -1).float()
-                U, S, Vh = torch.linalg.svd(W2, full_matrices=False)
-                lam = S.clamp_min(1e-8).square()
-                n = int(lam.numel())
-                powerlaw_tail_size = int((lam >= xmin).sum().item())
-                detx_tail_size = int(detx_num) if detx_num is not None else 0
-                lam_thr = float(xmin)
-                if cfg.use_detx and detx_num is not None and detx_num > 0:
-                    k_pl = max(cfg.min_tail, min(powerlaw_tail_size, n))
-                    k_detx = max(cfg.min_tail, min(detx_tail_size, n))
-                    k_star = max(1, min(n, int(0.5 * (k_pl + k_detx))))
-                    lam_thr = max(float(xmin), float(lam[k_star - 1].detach().cpu()))
-                mask = lam >= lam_thr
-                tail_size = int(mask.sum().item())
-
-                if tail_size < cfg.min_tail:
-                    reason = f"insufficient_tail_size:{tail_size}"
-                else:
-                    lam_tail = lam[mask]
-                    tl_before = float(torch.log(lam_tail + 1e-8).sum().item())
-                    r = torch.arange(1, tail_size + 1, device=lam.device, dtype=torch.float32)
-                    mu = r.pow(-cfg.q)
-                    A = torch.exp(
-                        (torch.log(lam_tail + 1e-8).sum() - torch.log(mu).sum())
-                        / tail_size
-                    )
-                    target = A * mu
-                    new_tail = _cayley(lam_tail, target, effective_cayley_eta)
-                    new_tail = new_tail * torch.exp(
-                        (
-                            torch.log(lam_tail + 1e-8).sum()
-                            - torch.log(new_tail + 1e-8).sum()
-                        )
-                        / tail_size
-                    )
-                    Snew = S.clone()
-                    Snew[mask] = torch.sqrt(new_tail.clamp_min(1e-8))
-                    shaped = (U * Snew.unsqueeze(0)) @ Vh
-                    blend = effective_blend_eta
-
-                    Wnew = (1.0 - blend) * W2 + blend * shaped
-                    S_after = (1.0 - blend) * S + blend * Snew
-
-                    W.copy_(
-                        Wnew.reshape_as(W).to(
-                            device=W.device,
-                            dtype=W.dtype,
-                        )
-                    )
-
-                    rel = float(
-                        (
-                            torch.linalg.norm(W - old)
-                            / (torch.linalg.norm(old) + 1e-12)
-                        ).item()
-                    )
-                    changed = rel > 0
-                    tl_after = float(
-                        torch.log(
-                            S_after.square()[mask] + 1e-8
-                        ).sum().item()
-                    )
-
-        rows.append(
-            {
-                "projection_event": event_index,
-                "scheduled_token_fraction": scheduled_token_fraction,
-                "actual_step": actual_step,
-                "actual_tokens_seen": actual_tokens_seen,
-                "layer_name": lname,
-                "hardness": hardness,
-                "schedule_hardness": schedule_hardness,
-                "scan_strength": strength,
-                "effective_hardness": effective_hardness,
-                "effective_cayley_eta": effective_cayley_eta,
-                "effective_blend_eta": effective_blend_eta,
-                "projection_runtime": time.perf_counter() - start,
-                "changed": changed,
-                "skip_reason": reason,
-                "relative_frobenius_change": rel,
-                "relative_frobenius_weight_change": rel,
-                "xmin": xmin,
-                "detX_num": detx_num,
-                "tail_size": tail_size,
-                "powerlaw_tail_size": locals().get("powerlaw_tail_size", 0),
-                "detx_tail_size": locals().get("detx_tail_size", 0),
-                "selected_tail_size": tail_size,
-                "selected_tail_threshold": locals().get("lam_thr", xmin),
-                "TraceLog_before": tl_before,
-                "TraceLog_after": tl_after,
-                "wwpgd_implementation": "reference",
-                "wwpgd_commit": WWPGD_COMMIT,
-            }
-        )
+    ww_logs: list[pd.DataFrame] = []
+    try:
+        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector)
+    except TypeError:
+        try:
+            result = projector(model=model, config=external_cfg, layer_names=layer_names)
+        except TypeError:
+            result = projector(model, external_cfg, layer_names=layer_names)
+    runtime = time.perf_counter() - start
+    if isinstance(result, pd.DataFrame):
+        rows = result.to_dict("records")
+    elif isinstance(result, list):
+        rows = list(result)
+    elif ww_logs:
+        key = "longname" if "longname" in ww_logs[-1].columns else "name"
+        rows = [{"layer_name": str(row.get(key, row.get("name", "")))} for _, row in ww_logs[-1].iterrows() if str(row.get(key, row.get("name", ""))) in layer_names]
+    elif result is None:
+        rows = []
+    else:
+        rows = [dict(result)] if isinstance(result, dict) else [{"external_result": repr(result)}]
+    if not rows:
+        rows = [{"layer_name": name} for name in layer_names]
+    for row in rows:
+        row.setdefault("projection_event", event_index)
+        row.setdefault("scheduled_token_fraction", scheduled_token_fraction)
+        row.setdefault("actual_step", actual_step)
+        row.setdefault("actual_tokens_seen", actual_tokens_seen)
+        row.setdefault("projection_runtime", runtime / max(1, len(rows)))
+        row.setdefault("wwpgd_implementation", "ww_pgd")
+        row.setdefault("wwpgd_package", "ww_pgd")
+        row.setdefault("wwpgd_commit", WWPGD_COMMIT)
+        row.setdefault("q", cfg.q)
+        row.setdefault("blend_eta", cfg.blend_eta)
+        row.setdefault("cayley_eta", cfg.cayley_eta)
+        row.setdefault("min_tail", cfg.min_tail)
+        row.setdefault("warmup", cfg.warmup_epochs)
+        row.setdefault("ramp", cfg.ramp_epochs)
+        row.setdefault("use_detx", cfg.use_detx)
+        row.setdefault("relative_frobenius_weight_change", row.get("relative_frobenius_change", 0.0))
+        row.setdefault("relative_frobenius_change", row.get("relative_frobenius_weight_change", 0.0))
     return rows
 
 
-def apply_wwpgd(model: nn.Module, target_alpha: float, strength: float, step: int, warmup_steps: int = 0, ramp_steps: int = 1):
-    return apply_wwpgd_reference(model, event_index=step, actual_step=step, strength=strength, cfg=WWTailConfig(warmup_events=warmup_steps, ramp_events=ramp_steps))
+def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 1):
+    return apply_external_wwpgd(model, event_index=step, actual_step=step)
+
 COMPOSITE_SPECIFICATION_VERSION = "raw_and_composite_v1"
 
 

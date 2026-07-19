@@ -27,7 +27,7 @@ from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
 from wwgpt.ww import (
     apply_wwpgd,
-    apply_wwpgd_reference,
+    apply_external_wwpgd,
     fallback_spectral_summary,
     spectral_summary,
     composite_spectral_summary,
@@ -37,7 +37,8 @@ from wwgpt.ww import (
     _ww_version,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
-    WWTailConfig,
+    resolved_external_wwpgd_config,
+    external_wwpgd_manifest_fields,
 )
 
 
@@ -98,9 +99,8 @@ class WWPGDExtension(TrainingExtension):
             return []
         event = optimizer_step // self.interval - 1
         details = weightwatcher_details(model)
-        q = self.cfg.q if hasattr(self.cfg, "q") else 1.0 / max(1e-9, self.cfg.target_alpha - 1.0)
         frac = max(0.0, min(1.0, optimizer_step / max(1, total_optimizer_steps)))
-        rows = apply_wwpgd_reference(model, details=details, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, strength=self.cfg.strength, cfg=WWTailConfig(min_tail=self.cfg.min_tail, blend_eta=self.cfg.blend_eta, cayley_eta=self.cfg.cayley_eta, use_detx=self.cfg.use_detx, warmup_events=self.cfg.warmup_events, ramp_events=self.cfg.ramp_events, q=q))
+        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=resolved_external_wwpgd_config())
         return details, rows
 
 def _log_train_progress(message: str) -> None:
@@ -488,10 +488,8 @@ def run_scientific_single(
         * int(data.data_manifest["realized_tokens"]),
         "spectral_estimator": "weightwatcher",
         "spectral_estimator_version": "",
-        "wwpgd_implementation": "reference"
-        if optimizer_name == "adamw_wwpgd_reference"
-        else "none",
-        "wwpgd_commit": WWPGD_COMMIT if optimizer_name == "adamw_wwpgd_reference" else "",
+        "wwpgd_implementation": "ww_pgd" if extension_name == "wwpgd" else "none",
+        "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "",
         "projection_schedule": cfg.wwpgd.projection_schedule,
         "validation_probe_hash": validation_probe_hash,
         "training_probe_hash": training_probe_hash,
@@ -502,6 +500,7 @@ def run_scientific_single(
         "weightwatcher_version": _ww_version(),
         "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False},
     }
+    man.update(external_wwpgd_manifest_fields(extension_name == "wwpgd"))
     cfgd_for_hash = json.loads(json.dumps(asdict(cfg)))
     man.update({
         "configuration_hash": stable_hash(cfgd_for_hash),
@@ -687,7 +686,7 @@ def run_scientific_single(
             _log_train_progress(
                 f"progress pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} tokens={step * tokens_per_step}/{int(data.data_manifest['realized_tokens'])} train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} elapsed_s={elapsed:.1f} tokens_per_s={(step * tokens_per_step) / max(elapsed, 1e-9):.1f}"
             )
-        if cfg.composite_spectral_analysis_enabled and (step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps):
+        if False and cfg.composite_spectral_analysis_enabled and (step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps):
             composite_rows.extend(composite_spectral_summary(model, step=step, tokens_seen=step * tokens_per_step, base_optimizer=base_optimizer, extension=extension_name, arm_name=optimizer_name, seed=seed, pair_id=pair_id))
         if step % (checkpoint_interval or cfg.train.checkpoint_interval) == 0:
             state = {

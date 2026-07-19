@@ -50,7 +50,7 @@ def test_extension_schedule_noop_and_due(monkeypatch):
     m = GPT(replace(ladder()[0], vocab_size=32))
     assert NoExtension().after_optimizer_step(model=m, optimizer_step=1, total_optimizer_steps=4, tokens_seen=1) == []
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: None)
-    monkeypatch.setattr("wwgpt.train.apply_wwpgd_reference", lambda *a, **k: [{"changed": True}])
+    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *a, **k: [{"changed": True}])
     ext = WWPGDExtension(type("C", (), {"q":1.0,"target_alpha":2.0,"strength":0.1,"min_tail":5,"blend_eta":.5,"cayley_eta":.25,"use_detx":True,"warmup_events":0,"ramp_events":1})(), 2)
     assert ext.after_optimizer_step(model=m, optimizer_step=1, total_optimizer_steps=4, tokens_seen=1) == []
     assert ext.after_optimizer_step(model=m, optimizer_step=2, total_optimizer_steps=4, tokens_seen=2)
