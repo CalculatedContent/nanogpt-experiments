@@ -25,7 +25,7 @@ MANUAL_LAYER_LR_MULTIPLIERS = {
     "block_other": 1.00,
 }
 
-BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
+BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw", "stable_adamw"}
 EXTENSIONS = {"none", "wwpgd"}
 ARM_DISPLAY = {
     "adamw": "AdamW",
@@ -34,6 +34,8 @@ ARM_DISPLAY = {
     "muon_wwpgd": "Muon+WW-PGD",
     "stableadamw": "StableAdamW",
     "stableadamw_wwpgd": "StableAdamW+WW-PGD",
+    "stable_adamw": "StableAdamW",
+    "stable_adamw_wwpgd": "StableAdamW+WW-PGD",
 }
 
 
@@ -178,6 +180,7 @@ def muon_parameter_names(model: nn.Module) -> set[str]:
 
 
 def build_optimizer_bundle(model: nn.Module, cfg: TrainConfig, base_optimizer: str) -> tuple[OptimizerBundle, float]:
+    base_optimizer = "stableadamw" if base_optimizer == "stable_adamw" else base_optimizer
     if base_optimizer == "adamw":
         groups, gamma = build_param_groups(model, cfg.learning_rate, cfg.weight_decay, cfg)
         opt = torch.optim.AdamW(groups, betas=cfg.betas, eps=cfg.epsilon)
