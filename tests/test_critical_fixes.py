@@ -67,3 +67,71 @@ def test_immediate_projection_post_call_count(monkeypatch):
     rows = measured_projection_spectral_rows(pre, object(), projection_rows=proj, target_alpha=2.0, step=1, tokens_seen=1, optimizer="adamw_wwpgd", seed=0, pair_id="p", projection_event=0)
     assert calls["post"] == 1
     assert rows[0]["alpha_before"] == 1.0 and rows[0]["alpha_after"] == 1.5
+
+import math
+import numpy as np
+import torch
+from wwgpt.config import ExperimentConfig, ModelConfig, TrainConfig, WWPGDConfig
+from wwgpt.data import TokenData
+from wwgpt.train import _perplexity_from_cross_entropy, run_scientific_single
+from wwgpt.utils import sha256_bytes
+
+
+def test_metric_formulas_do_not_clip_perplexity_and_gap_semantics():
+    assert _perplexity_from_cross_entropy(2.0) == pytest.approx(math.exp(2.0))
+    assert math.isinf(_perplexity_from_cross_entropy(1000.0))
+    train_ce = 1.25
+    val_ce = 1.75
+    test_ce = 2.0
+    assert val_ce - train_ce == pytest.approx(0.5)
+    assert test_ce - train_ce == pytest.approx(0.75)
+
+
+def test_test_evaluation_runs_once_on_final_selected_checkpoint(tmp_path, monkeypatch):
+    cfg = ExperimentConfig(
+        model=ModelConfig(n_layer=1, n_head=1, n_embd=64, block_size=4, vocab_size=8),
+        train=TrainConfig(batch_size=2, gradient_accumulation=1, max_steps=2, eval_interval=1, checkpoint_interval=10, spectral_interval=99, eval_batches=1, grad_clip=0.0),
+        wwpgd=WWPGDConfig(enabled=False, extension="none"),
+    )
+    manifest = {
+        "storage_format": "raw_memmap_v1",
+        "dataset_name": "unit",
+        "dataset_config": "unit",
+        "dataset_revision": "unit",
+        "realized_tokens": 16,
+        "validation_document_count": 1,
+    }
+    data = TokenData(
+        train=np.full(64, 1, dtype=np.int64),
+        val=np.full(64, 2, dtype=np.int64),
+        test=np.full(64, 3, dtype=np.int64),
+        vocab_size=8,
+        corpus_hash="corpus",
+        data_manifest=manifest,
+        tokenizer_manifest={"tokenizer_hash": "tok"},
+    )
+    torch.manual_seed(0)
+    init_state = {k: v.detach().clone() for k, v in __import__("wwgpt.model", fromlist=["GPT"]).GPT(cfg.model).state_dict().items()}
+    calls = {"train": 0, "val": 0, "test": 0}
+
+    def fake_eval(model, probe_x, probe_y, device):
+        split = int(np.asarray(probe_y).max())
+        if split == 1:
+            calls["train"] += 1
+            loss = 1.0
+        elif split == 2:
+            calls["val"] += 1
+            loss = 0.5 if calls["val"] == 1 else 0.9
+        else:
+            calls["test"] += 1
+            loss = 0.7
+        return {"loss": loss, "perplexity": math.exp(loss), "bits_per_token": loss / math.log(2), "top1_accuracy": 0.25, "top5_accuracy": 0.5, "token_error": 0.75}, loss
+
+    monkeypatch.setattr("wwgpt.train._evaluate_probe_batches", fake_eval)
+    monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *a, **k: [])
+    run_dir = run_scientific_single(tmp_path, "adamw", 7, cfg, data, "pair", init_state, sha256_bytes(b"init"), 0, 1)
+    rows = list(__import__("csv").DictReader((run_dir / "metrics.csv").open()))
+    assert calls == {"train": 2, "val": 2, "test": 1}
+    assert rows[0]["test_loss"] == "nan"
+    assert float(rows[-1]["test_loss"]) == pytest.approx(0.7)
+    assert int(float(rows[-1]["selected_checkpoint_step"])) == 1

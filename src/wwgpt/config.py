@@ -66,6 +66,7 @@ class TrainConfig:
     stable_triton: bool = False
     max_train_tokens: int | None = None
     evaluation_sampling: str = "random_per_eval"
+    test_evaluation_mode: str = "final_checkpoint"
     training_sampling: str = "random_window"
     wwpgd_interval: int | None = 1
 
@@ -74,6 +75,8 @@ class TrainConfig:
             raise ValueError(f"unknown lr_schedule {self.lr_schedule}")
         if self.layer_lr not in {"flat", "llrd", "manual"}:
             raise ValueError(f"unknown layer_lr {self.layer_lr}")
+        if self.test_evaluation_mode not in {"final_checkpoint", "diagnostic_periodic"}:
+            raise ValueError(f"unknown test_evaluation_mode {self.test_evaluation_mode}")
         if not 0.0 <= self.warmup_ratio < 1.0:
             raise ValueError("warmup_ratio must satisfy 0.0 <= warmup_ratio < 1.0")
         if not 0.0 <= self.min_lr_ratio <= 1.0:
@@ -185,6 +188,8 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError(f"unknown lr_schedule {cfg.lr_schedule}")
     if cfg.layer_lr not in {"flat", "llrd", "manual"}:
         raise ValueError(f"unknown layer_lr {cfg.layer_lr}")
+    if cfg.test_evaluation_mode not in {"final_checkpoint", "diagnostic_periodic"}:
+        raise ValueError(f"unknown test_evaluation_mode {cfg.test_evaluation_mode}")
     if not 0.0 <= cfg.warmup_ratio < 1.0:
         raise ValueError("warmup_ratio must satisfy 0.0 <= warmup_ratio < 1.0")
     if not 0.0 <= cfg.min_lr_ratio <= 1.0:
