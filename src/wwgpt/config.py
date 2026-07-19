@@ -9,7 +9,7 @@ import yaml
 DEFAULT_SEEDS = [1337, 2027, 4099, 7919, 104729]
 TOKEN_MULTIPLIERS = [20, 40, 80, 160]
 SCIENTIFIC_SCHEMA_VERSION = 3
-MODEL_ARCHITECTURE_VERSION = "separate_qkv_bias_free_untied_head_v1"
+MODEL_ARCHITECTURE_VERSION = "nanogpt_separate_qkv_tied_head_v2"
 VALID_BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
 VALID_EXTENSIONS = {"none", "wwpgd"}
 
@@ -29,7 +29,7 @@ class ModelConfig:
     init_mode: str = "nanogpt_normal_0p02"
     profile_name: str = "scaling_level0"
     activation: str = "gelu"
-    tie_weights: bool = False
+    tie_weights: bool = True
     mlp_mult: int = 4
     model_architecture_version: str = MODEL_ARCHITECTURE_VERSION
 
@@ -38,14 +38,14 @@ class ModelConfig:
 class TrainConfig:
     batch_size: int = 16
     gradient_accumulation: int = 1
-    learning_rate: float = 3e-4
+    learning_rate: float = 6e-4
     betas: tuple[float, float] = (0.9, 0.95)
     epsilon: float = 1e-8
-    weight_decay: float = 0.01
+    weight_decay: float = 0.1
     warmup_steps: int | None = None
     lr_decay_steps: int | None = None
     max_steps: int | None = None
-    grad_clip: float = 0.0
+    grad_clip: float = 1.0
     eval_interval: int = 10
     checkpoint_interval: int = 50
     spectral_interval: int = 10
@@ -60,7 +60,7 @@ class TrainConfig:
     muon_learning_rate: float = 2e-2
     muon_momentum: float = 0.95
     newton_schulz_steps: int = 5
-    stable_learning_rate: float = 3e-4
+    stable_learning_rate: float = 6e-4
     stable_betas: tuple[float, float] = (0.9, 0.99)
     stable_epsilon: float = 1e-6
     stable_triton: bool = False

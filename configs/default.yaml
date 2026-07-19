@@ -1,5 +1,5 @@
 scientific_schema_version: 3
-model_architecture_version: separate_qkv_bias_free_untied_head_v1
+model_architecture_version: nanogpt_separate_qkv_tied_head_v2
 parameter_count_convention: total
 base_optimizer: adamw
 extensions:
@@ -16,7 +16,7 @@ model:
   vocab_size: 8192
   dropout: 0.0
   bias: false
-  tie_weights: false
+  tie_weights: true
   linear_bias: false
   layernorm_bias: true
   init_mode: nanogpt_normal_0p02
@@ -25,13 +25,13 @@ model:
 train:
   batch_size: 16
   gradient_accumulation: 1
-  learning_rate: 0.0003
+  learning_rate: 0.0006
   betas:
   - 0.9
   - 0.95
   epsilon: 1.0e-08
-  weight_decay: 0.01
-  grad_clip: 0.0
+  weight_decay: 0.1
+  grad_clip: 1.0
   eval_interval: 10
   spectral_interval: 10
   checkpoint_interval: 50

@@ -20,15 +20,24 @@ class CausalSelfAttention(nn.Module):
         self.query = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
         self.value = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias)
-        self.dropout = nn.Dropout(cfg.dropout)
+        self.attn_dropout = nn.Dropout(cfg.dropout)
+        self.resid_dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
         q = self.query(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         k = self.key(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         v = self.value(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.head_dim ** -0.5)
-        return self.dropout(self.proj(y.transpose(1, 2).contiguous().view(b, t, c)))
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
+            scale=self.head_dim ** -0.5,
+        )
+        return self.resid_dropout(self.proj(y.transpose(1, 2).contiguous().view(b, t, c)))
 
 
 class Block(nn.Module):
@@ -77,6 +86,7 @@ class GPT(nn.Module):
             self.lm_head.weight = self.wte.weight
         if cfg.init_mode == "nanogpt_normal_0p02":
             self.apply(self._init_weights)
+            self._init_residual_projections()
         elif cfg.init_mode != "pytorch_default":
             raise ValueError(f"unknown init_mode: {cfg.init_mode}")
 
@@ -85,6 +95,12 @@ class GPT(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+    def _init_residual_projections(self) -> None:
+        std = 0.02 / (2 * self.cfg.n_layer) ** 0.5
+        for name, module in self.named_modules():
+            if name.endswith(("attn.proj", "mlp.2")) and isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=std)
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
         _, t = idx.shape
