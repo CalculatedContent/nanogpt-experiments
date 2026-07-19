@@ -116,7 +116,7 @@ def test_prepare_scientific_data_logs_progress(tmp_path: Path, capsys):
 model:
   n_layer: 1
   n_head: 1
-  n_embd: 8
+  n_embd: 64
   block_size: 8
   vocab_size: 64
 train:
@@ -126,7 +126,7 @@ train:
     docs = []
     i = 0
     while sum(1 for d in docs if split_for_doc(d) == "train") < 350 or sum(1 for d in docs if split_for_doc(d) == "val") < 10:
-        docs.append(f"scientific logging fixture document {i} " + ("abc xyz " * 30))
+        docs.append(f"scientific logging fixture document {i} " + ("abc xyz " * 120))
         i += 1
     prepared = prepare_scientific_data(tmp_path, 0, 1, cfg, docs, min_validation_tokens=1)
     stderr = capsys.readouterr().err

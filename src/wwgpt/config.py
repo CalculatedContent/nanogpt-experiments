@@ -122,9 +122,12 @@ class ExperimentConfig:
     extensions: list[str] = field(default_factory=lambda: ["none", "wwpgd"])
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     dataset_config: str = "sample-10BT"
+    dataset_subset: str | None = None
+    dataset_split: str = "train"
     dataset_revision: str = "main"
     data_mode: str = "fineweb_custom_bpe_scaling"
     tokenizer: str | None = None
+    tokenizer_revision: str | None = None
     composite_spectral_analysis_enabled: bool = False
 
 
@@ -222,6 +225,10 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
     invalid_extensions = [ext for ext in cfg.extensions if ext not in VALID_EXTENSIONS]
     if invalid_extensions:
         raise ValueError(f"unknown extension(s): {', '.join(invalid_extensions)}")
+    if not cfg.dataset_revision:
+        raise ValueError("dataset_revision must be configured; refusing unpinned dataset revision")
+    if not cfg.dataset_split:
+        raise ValueError("dataset_split must be configured")
 
 
 def _reject_unknown_keys(section: str, data: dict[str, Any], allowed: set[str]) -> None:

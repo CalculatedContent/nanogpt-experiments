@@ -1,6 +1,9 @@
 tokenizer: gpt2
+tokenizer_revision: builtin-tiktoken-gpt2
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
+dataset_subset: sample-10BT
+dataset_split: train
 dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
 data_mode: fineweb_gpt2_reproduction
 model:
