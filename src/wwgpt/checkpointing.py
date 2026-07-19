@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION = 2
-REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version")
+REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version","optimizer_fingerprint")
 
 
 def stable_hash(obj: Any) -> str:
@@ -14,7 +14,9 @@ def stable_hash(obj: Any) -> str:
 
 def rng_state() -> dict[str, Any]:
     out={"python_random_state": random.getstate(), "numpy_random_state": np.random.get_state(), "torch_cpu_rng_state": torch.get_rng_state()}
-    out["torch_cuda_rng_states"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    out["torch_cuda_rng_states"] = cuda_states
+    out["accelerator_rng_states"] = {"cuda": cuda_states}
     return out
 
 def restore_rng_state(state: dict[str, Any]) -> None:
@@ -25,11 +27,12 @@ def restore_rng_state(state: dict[str, Any]) -> None:
         torch.cuda.set_rng_state_all(state["torch_cuda_rng_states"])
 
 REQUIRED_CHECKPOINT_KEYS = (
-    "model_state_dict","optimizer_state_dict","scheduler_state_dict","gradient_scaler_state_dict",
+    "model_state_dict","optimizer_state_dict","base_optimizer_state_dict","scheduler_state_dict","gradient_scaler_state_dict",
     "current_step","next_step","tokens_processed","training_reader_position","seed",
-    "python_random_state","numpy_random_state","torch_cpu_rng_state","torch_cuda_rng_states",
+    "wwpgd_state","python_random_state","numpy_random_state","torch_cpu_rng_state","torch_cuda_rng_states","accelerator_rng_states",
     "device_type","precision_policy","gradient_accumulation_position","metrics_rows",
     "periodic_weightwatcher_rows","wwpgd_projection_rows","immediate_projection_weightwatcher_rows",
+    "resolved_config","optimizer_fingerprint","data_hash","tokenizer_hash",
     "scientific_schema_version","checkpoint_schema_version","created_at",
 )
 
@@ -102,14 +105,14 @@ def save_checkpoint(run_dir: Path, state: dict):
 def complete_test_checkpoint_state(**overrides) -> dict:
     """Explicit test helper for constructing a complete scientific checkpoint."""
     state = {
-        "model_state_dict": {}, "optimizer_state_dict": {}, "scheduler_state_dict": None,
+        "model_state_dict": {}, "optimizer_state_dict": {}, "base_optimizer_state_dict": {}, "scheduler_state_dict": None,
         "gradient_scaler_state_dict": None, "current_step": 0, "next_step": 1,
         "tokens_processed": 0, "training_reader_position": 0, "reader_position": 0,
-        "seed": 0, **rng_state(), "device_type": "cpu",
+        "seed": 0, "wwpgd_state": {}, **rng_state(), "device_type": "cpu",
         "precision_policy": "torch_default", "gradient_accumulation_position": 0,
         "metrics_rows": [], "periodic_weightwatcher_rows": [],
         "wwpgd_projection_rows": [], "immediate_projection_weightwatcher_rows": [],
-        "scientific_schema_version": 0, "compatibility": {},
+        "scientific_schema_version": 0, "compatibility": {}, "resolved_config": {}, "optimizer_fingerprint": "", "data_hash": "", "tokenizer_hash": "",
     }
     state.update(overrides)
     return state
@@ -168,6 +171,7 @@ def expected_compatibility_from_run(run_dir: Path) -> dict:
         "validation_probe_hash": manifest.get("validation_probe_hash"),
         "training_probe_hash": manifest.get("training_probe_hash"),
         "scientific_schema_version": manifest.get("scientific_schema_version"),
+        "optimizer_fingerprint": manifest.get("optimizer_fingerprint"),
     }
 
 
