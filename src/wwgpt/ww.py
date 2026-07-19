@@ -44,11 +44,11 @@ def _ww_version() -> str:
         return getattr(ww, "__version__", "unknown")
 
 
-def weightwatcher_details(model: nn.Module) -> pd.DataFrame:
+def weightwatcher_details(model: nn.Module, *, randomize: bool = False) -> pd.DataFrame:
     import weightwatcher
     start = time.perf_counter()
     watcher = weightwatcher.WeightWatcher(model=model)
-    details = watcher.analyze(detX=True, randomize=False, plot=False)
+    details = watcher.analyze(detX=True, randomize=randomize, plot=False)
     if details is None:
         raise RuntimeError("WeightWatcher.analyze returned None")
     df = details.copy()
@@ -56,15 +56,86 @@ def weightwatcher_details(model: nn.Module) -> pd.DataFrame:
     df["weightwatcher_version"] = _ww_version()
     df["spectral_estimator"] = "weightwatcher"
     df["spectral_estimator_version"] = df["weightwatcher_version"]
-    df["weightwatcher_configuration"] = '{"detX": true, "randomize": false, "plot": false}'
+    df["weightwatcher_configuration"] = json.dumps({"detX": True, "randomize": bool(randomize), "plot": False}, sort_keys=True)
     df["valid_for_science"] = True
     return df
 
 
+WW_DIAGNOSTIC_FIELDS = (
+    "layer_id",
+    "name",
+    "longname",
+    "matrix_shape",
+    "alpha",
+    "spectral_norm",
+    "stable_rank",
+    "matrix_rank",
+    "ww_softrank",
+    "rand_mp_softrank",
+    "rand_num_spikes",
+    "num_traps",
+    "num_pl_spikes",
+    "num_ERG_spikes",
+    "trap_flag",
+    "trap_rule",
+    "unsupported_field_explanation",
+)
+
+
+def _null_explanation(field: str) -> str:
+    return f"not returned by installed WeightWatcher {_ww_version()} for this analysis"
+
+
+def add_weightwatcher_diagnostic_fields(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize supported installed-WeightWatcher diagnostics without computing them."""
+    out = df.copy()
+    if "longname" not in out.columns:
+        out["longname"] = out["name"] if "name" in out.columns else pd.NA
+    if "matrix_shape" not in out.columns:
+        if {"M", "N"}.issubset(out.columns):
+            out["matrix_shape"] = [json.dumps([None if pd.isna(m) else int(m), None if pd.isna(n) else int(n)]) for m, n in zip(out["M"], out["N"], strict=False)]
+        else:
+            out["matrix_shape"] = pd.NA
+    supported_trap_metrics = [c for c in ("num_traps", "rand_num_spikes", "num_pl_spikes", "num_ERG_spikes") if c in out.columns]
+    if "trap_flag" not in out.columns:
+        if "num_traps" in out.columns:
+            out["trap_flag"] = out["num_traps"].fillna(0).astype(float) > 0
+            rule = "WeightWatcher randomize=True; trap_flag is num_traps > 0"
+        elif "rand_num_spikes" in out.columns:
+            out["trap_flag"] = out["rand_num_spikes"].fillna(0).astype(float) > 0
+            rule = "WeightWatcher randomize=True; trap_flag is rand_num_spikes > 0"
+        else:
+            out["trap_flag"] = pd.NA
+            rule = "unsupported: installed WeightWatcher returned no num_traps or rand_num_spikes column"
+        out["trap_rule"] = rule
+    if "unsupported_field_explanation" not in out.columns:
+        missing = [field for field in WW_DIAGNOSTIC_FIELDS if field not in out.columns]
+        out["unsupported_field_explanation"] = "; ".join(_null_explanation(f) for f in missing) if missing else ""
+    for field in WW_DIAGNOSTIC_FIELDS:
+        if field not in out.columns:
+            out[field] = pd.NA
+    out["trap_metric_columns"] = ",".join(supported_trap_metrics)
+    return out
+
+
 def spectral_summary(model: nn.Module, *, step: int, tokens_seen: int, optimizer: str, seed: int, pair_id: str) -> list[dict[str, object]]:
-    df = weightwatcher_details(model)
+    df = add_weightwatcher_diagnostic_fields(weightwatcher_details(model, randomize=True))
     df["step"] = step; df["tokens_seen"] = tokens_seen; df["optimizer"] = optimizer; df["seed"] = seed; df["pair_id"] = pair_id
     return df.to_dict("records")
+
+
+def weightwatcher_run_aggregates(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    if not rows:
+        return []
+    df = pd.DataFrame(rows)
+    out=[]
+    for (step, tokens_seen, optimizer, seed, pair_id), g in df.groupby(["step", "tokens_seen", "optimizer", "seed", "pair_id"], dropna=False):
+        traps = pd.to_numeric(g.get("trap_flag", pd.Series(dtype=float)), errors="coerce")
+        alpha = pd.to_numeric(g.get("alpha", pd.Series(dtype=float)), errors="coerce")
+        spectral = pd.to_numeric(g.get("spectral_norm", pd.Series(dtype=float)), errors="coerce")
+        sr = pd.to_numeric(g.get("stable_rank", pd.Series(dtype=float)), errors="coerce")
+        out.append({"step": step, "tokens_seen": tokens_seen, "optimizer": optimizer, "seed": seed, "pair_id": pair_id, "eligible_layer_count": int(len(g)), "mean_alpha": float(alpha.mean()) if alpha.notna().any() else math.nan, "median_alpha": float(alpha.median()) if alpha.notna().any() else math.nan, "mean_spectral_norm": float(spectral.mean()) if spectral.notna().any() else math.nan, "mean_stable_rank": float(sr.mean()) if sr.notna().any() else math.nan, "trap_layer_count": int(traps.fillna(False).astype(bool).sum()) if len(traps) else 0, "trap_layer_fraction": float(traps.fillna(False).astype(bool).mean()) if len(traps) else math.nan, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": json.dumps({"detX": True, "randomize": True, "plot": False}, sort_keys=True)})
+    return out
 
 
 def fallback_spectral_summary(model: nn.Module, *, step: int = 0, tokens_seen: int = 0, optimizer: str = "smoke", seed: int = 0, pair_id: str = "smoke") -> list[dict[str, object]]:
