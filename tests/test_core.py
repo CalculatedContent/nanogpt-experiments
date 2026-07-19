@@ -125,7 +125,7 @@ train:
 """)
     docs = []
     i = 0
-    while sum(1 for d in docs if split_for_doc(d) == "train") < 350 or sum(1 for d in docs if split_for_doc(d) == "val") < 10:
+    while sum(1 for d in docs if split_for_doc(d) == "train") < 350 or sum(1 for d in docs if split_for_doc(d) == "val") < 10 or sum(1 for d in docs if __import__("wwgpt.data", fromlist=["split_for_doc3"]).split_for_doc3(d) == "test") < 3:
         docs.append(f"scientific logging fixture document {i} " + ("abc xyz " * 120))
         i += 1
     prepared = prepare_scientific_data(tmp_path, 0, 1, cfg, docs, min_validation_tokens=1)
@@ -133,7 +133,7 @@ train:
     assert prepared.root is not None
     assert "[wwgpt prepare-data] starting" in stderr
     assert "training BPE tokenizer" in stderr
-    assert "wrote train_tokens.npy" in stderr
+    assert "wrote train_tokens.bin" in stderr
 
 
 def test_notebooks_parse():
