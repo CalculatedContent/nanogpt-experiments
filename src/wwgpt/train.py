@@ -48,7 +48,7 @@ def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
         raise FileNotFoundError(f"no runs exist for resume arm directory: {arm_dir}")
     candidates=[]; incompatible=[]
     for run in sorted([p for p in arm_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
-        if not (run / "checkpoints" / "latest.json").exists():
+        if not (run / "checkpoints" / "latest.json").exists() or (run / "run_complete.json").exists():
             continue
         try:
             manifest=json.loads((run / "manifest.json").read_text())
@@ -107,10 +107,10 @@ def _log_train_progress(message: str) -> None:
     print(f"[wwgpt run-multiseed] {message}", file=sys.stderr, flush=True)
 
 
-def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+def _write_csv(path: Path, rows: list[dict[str, object]], *, overwrite: bool = False) -> None:
     if not rows:
         return
-    if path.exists():
+    if path.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite {path}")
     with path.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
@@ -541,14 +541,15 @@ def run_scientific_single(
         run_dir = unique_dir(run_parent / optimizer_name, "run")
         ckpt = run_dir / "checkpoints"
         ckpt.mkdir(parents=True, exist_ok=True)
-    write_json(run_dir / "environment.json", environment())
-    (run_dir / "initialization_hash.txt").write_text(init_hash)
-    write_json(run_dir / "manifest.json", man)
-    write_json(run_dir / "data_manifest.json", data.data_manifest)
-    write_json(run_dir / "tokenizer_manifest.json", data.tokenizer_manifest)
     cfgd = json.loads(json.dumps(asdict(cfg)))
-    (run_dir / "config.yaml").write_text(yaml.safe_dump(cfgd))
-    write_json(run_dir / "config.json", cfgd)
+    if not resume:
+        write_json(run_dir / "environment.json", environment())
+        (run_dir / "initialization_hash.txt").write_text(init_hash)
+        write_json(run_dir / "manifest.json", man)
+        write_json(run_dir / "data_manifest.json", data.data_manifest)
+        write_json(run_dir / "tokenizer_manifest.json", data.tokenizer_manifest)
+        (run_dir / "config.yaml").write_text(yaml.safe_dump(cfgd))
+        write_json(run_dir / "config.json", cfgd)
     metric_rows = []
     spectral_rows = []
     composite_rows = []
@@ -580,6 +581,8 @@ def run_scientific_single(
         spectral_rows = list(loaded.get("periodic_weightwatcher_rows", []))
         proj_rows = list(loaded.get("wwpgd_projection_rows", []))
         immediate_spectral_rows = list(loaded.get("immediate_projection_weightwatcher_rows", []))
+        lr_rows = list(loaded.get("lr_rows", []))
+        composite_rows = list(loaded.get("composite_spectral_rows", []))
         best_validation_loss = float(loaded.get("best_validation_loss", best_validation_loss))
         best_validation_step = int(loaded.get("best_validation_step", best_validation_step))
         latest_validation_loss = float(loaded.get("latest_validation_loss", latest_validation_loss))
@@ -734,6 +737,8 @@ def run_scientific_single(
                 "periodic_weightwatcher_rows": spectral_rows,
                 "wwpgd_projection_rows": proj_rows,
                 "immediate_projection_weightwatcher_rows": immediate_spectral_rows,
+                "lr_rows": lr_rows,
+                "composite_spectral_rows": composite_rows,
                 "elapsed_training_time": elapsed_prior + time.perf_counter() - start,
                 "initialization_hash": init_hash,
                 "compatibility": compatibility,
@@ -745,17 +750,17 @@ def run_scientific_single(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
-    _write_csv(run_dir / "metrics.csv", metric_rows)
-    _write_csv(run_dir / "spectral.csv", spectral_rows)
+    _write_csv(run_dir / "metrics.csv", metric_rows, overwrite=resume)
+    _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
     if cfg.composite_spectral_analysis_enabled:
-        _write_csv(run_dir / "composite_spectral.csv", composite_rows)
-    _write_csv(run_dir / "lrs.csv", lr_rows)
+        _write_csv(run_dir / "composite_spectral.csv", composite_rows, overwrite=resume)
+    _write_csv(run_dir / "lrs.csv", lr_rows, overwrite=resume)
     if extension_name == "wwpgd":
-        _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)
+        _write_csv(run_dir / "wwpgd_projection.csv", proj_rows, overwrite=resume)
         if immediate_projection_spectral:
-            _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows)
+            _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
     write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss})
     _log_train_progress(
@@ -806,21 +811,27 @@ def run_multiseed_scientific(
         else:
             pair = unique_dir(exp_root, f"pair_{seed}")
         pair_id = pair.name
-        torch.manual_seed(seed)
-        init_model = GPT(cfg.model)
-        init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
-        init_hash = _state_hash(init_state)
+        init_dir = pair / "initial_state"
+        if resume and (init_dir / "model.pt").exists():
+            init_state = torch.load(init_dir / "model.pt", map_location="cpu", weights_only=False)
+            init_hash = (init_dir / "initialization_hash.txt").read_text().strip()
+        else:
+            torch.manual_seed(seed)
+            init_model = GPT(cfg.model)
+            init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
+            init_hash = _state_hash(init_state)
         _log_train_progress(
             f"starting seed {seed_index}/{len(run_seeds)} seed={seed} pair={pair_id}"
         )
-        init_dir = pair / "initial_state"
         init_dir.mkdir(exist_ok=True)
         if not (init_dir / "model.pt").exists():
             torch.save(init_state, init_dir / "model.pt")
-        (init_dir / "initialization_hash.txt").write_text(init_hash)
-        write_json(
-            pair / "pair_manifest.json",
-            {
+        if not (init_dir / "initialization_hash.txt").exists():
+            (init_dir / "initialization_hash.txt").write_text(init_hash)
+        if not (resume and (pair / "pair_manifest.json").exists()):
+            write_json(
+                pair / "pair_manifest.json",
+                {
                 "pair_id": pair_id,
                 "seed": seed,
                 "level": level,
@@ -829,8 +840,8 @@ def run_multiseed_scientific(
                 "base_optimizer": optimizer,
                 "extensions": extensions or ["none", "wwpgd"],
                 "arms": [make_arm_name(optimizer, e) for e in (extensions or ["none", "wwpgd"])],
-            },
-        )
+                },
+            )
         for ext in (extensions or ["none", "wwpgd"]):
             arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))
             run_scientific_single(

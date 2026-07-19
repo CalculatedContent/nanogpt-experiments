@@ -389,3 +389,172 @@ def paired_extension_effects(df: pd.DataFrame, metric: str) -> pd.DataFrame:
     if {"none","wwpgd"}.issubset(p.columns):
         p[f"wwpgd_minus_none_{metric}"]=p["wwpgd"]-p["none"]
     return p
+
+# Pass 6 schema-v3 analysis entry points.  These definitions intentionally
+# override the compatibility shims above for current reproduction/scaling runs.
+CANONICAL_ARMS = ("adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stableadamw", "stableadamw_wwpgd")
+CANONICAL_BASES = ("adamw", "muon", "stableadamw")
+
+def _canonical_arm_from_manifest(man: dict[str, Any], opt_dir: Path | None = None) -> tuple[str, str, str] | None:
+    base = str(man.get("base_optimizer") or "").lower()
+    ext = str(man.get("extension") or "none").lower()
+    raw = str(man.get("arm_name") or man.get("optimizer") or (opt_dir.name if opt_dir else "")).lower()
+    if base in CANONICAL_BASES and ext in {"none", "wwpgd"}:
+        arm = f"{base}_wwpgd" if ext == "wwpgd" else base
+    elif raw == "adamw_wwpgd_reference":
+        base, ext, arm = "adamw", "wwpgd", "adamw_wwpgd"
+    elif raw in CANONICAL_ARMS:
+        arm = raw; base = raw.removesuffix("_wwpgd"); ext = "wwpgd" if raw.endswith("_wwpgd") else "none"
+    else:
+        return None
+    return arm, base, ext
+
+def _run_record(pair_dir: Path, opt_dir: Path, include_legacy: bool = False) -> RunRecord | None:  # type: ignore[override]
+    runs = sorted([p for p in opt_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], key=lambda p: (_run_mtime(p), p.name), reverse=True) if opt_dir.exists() else []
+    if not runs:
+        return None
+    run = runs[0]
+    man = read_json_file(run / "manifest.json")
+    arm_info = _canonical_arm_from_manifest(man, opt_dir)
+    if arm_info is None:
+        if not include_legacy:
+            return None
+        norm = normalize_optimizer(str(man.get("optimizer") or opt_dir.name), include_legacy=True)
+        arm, base, ext = norm["optimizer_family"], str(man.get("base_optimizer") or norm["optimizer_family"]), str(man.get("extension") or "none")
+    else:
+        arm, base, ext = arm_info
+    seed = _manifest_value(man, "seed")
+    if seed is None:
+        m = re.search(r"pair_(\d+)", pair_dir.name); seed = int(m.group(1)) if m else None
+    schema = int(man.get("scientific_schema_version") or 0)
+    valid = bool(man.get("valid_for_science", True) is True and schema >= 3 and arm in CANONICAL_ARMS)
+    return RunRecord(pair_dir.name, pair_dir, run, arm, arm, OPTIMIZER_LABELS.get(arm, arm), int(seed) if seed is not None else None, {**man, "base_optimizer": base, "extension": ext, "arm_name": arm}, (run / "run_complete.json").exists(), schema < 3, valid)
+
+def discover_pair_candidates(results_root: Path, include_legacy: bool = False) -> list[PairCandidate]:  # type: ignore[override]
+    root = resolve_experiment_root(results_root); out: list[PairCandidate] = []
+    if not root.exists():
+        return out
+    opt_dirs = list(CANONICAL_ARMS) + ["adamw_wwpgd_reference"]
+    for pair in sorted([p for p in root.iterdir() if p.is_dir() and p.name.startswith("pair_")]):
+        runs: dict[str, RunRecord] = {}
+        for opt in opt_dirs:
+            r = _run_record(pair, pair / opt, include_legacy)
+            if r:
+                runs[r.optimizer_family] = r
+        reasons: list[str] = []
+        for base in CANONICAL_BASES:
+            a, w = runs.get(base), runs.get(f"{base}_wwpgd")
+            if a and w:
+                for r in (a, w):
+                    for fn in ["manifest.json", "metrics.csv", "run_complete.json"]:
+                        if not (r.run_dir / fn).exists(): reasons.append(f"{r.optimizer_raw} missing {fn}")
+                    if not r.complete: reasons.append(f"{r.optimizer_raw} incomplete")
+                    if not r.valid_for_science: reasons.append(f"{r.optimizer_raw} invalid schema/profile")
+                if a.seed != w.seed: reasons.append(f"{base} seed mismatch")
+                for key in ["initialization_hash", "tokenizer_hash", "validation_probe_hash", "training_probe_hash", "realized_tokens"]:
+                    if _manifest_value(a.manifest, key) != _manifest_value(w.manifest, key): reasons.append(f"{base} {key} mismatch")
+        if not any((runs.get(b) and runs.get(f"{b}_wwpgd")) for b in CANONICAL_BASES):
+            reasons.append("no complete within-optimizer canonical arm pair")
+        mt = max([_run_mtime(r.run_dir) for r in runs.values()] or [pair.stat().st_mtime])
+        seed = next((r.seed for r in runs.values() if r.seed is not None), None)
+        out.append(PairCandidate(pair.name, pair, seed, runs, not reasons, "; ".join(dict.fromkeys(reasons)), mt))
+    return out
+
+def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:  # type: ignore[override]
+    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
+    rows: list[dict[str, Any]] = []
+    for c in pairs:
+        for arm in CANONICAL_ARMS:
+            r = c.runs.get(arm)
+            if r:
+                rows.append({"pair_id": c.pair_id, "pair_dir": c.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": r.manifest.get("base_optimizer"), "extension": r.manifest.get("extension"), "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science})
+    return rows
+
+def paired_extension_effects(df: pd.DataFrame, metric: str) -> pd.DataFrame:  # type: ignore[override]
+    keys = [c for c in ["experiment_profile", "scientific_schema_version", "level", "token_multiplier", "base_optimizer", "seed"] if c in df.columns]
+    if "base_optimizer" not in keys or "extension" not in df.columns:
+        return pd.DataFrame()
+    p = df.pivot_table(index=keys, columns="extension", values=metric, aggfunc="first").reset_index()
+    if {"none", "wwpgd"}.issubset(p.columns):
+        p[f"wwpgd_minus_none_{metric}"] = p["wwpgd"] - p["none"]
+        p["paired_comparison"] = p["base_optimizer"].map({"adamw": "AdamW+WW-PGD - AdamW", "muon": "Muon+WW-PGD - Muon", "stableadamw": "StableAdamW+WW-PGD - StableAdamW"})
+    return p
+
+# Schema-v2/v3 isolated discovery override: keep old schema-v2 fixture behavior while
+# still discovering all six schema-v3 arms when present.  A single root is treated as
+# one schema/profile stratum; callers must pass separate roots for reproduction and scaling.
+def _run_record(pair_dir: Path, opt_dir: Path, include_legacy: bool = False) -> RunRecord | None:  # type: ignore[override]
+    runs = sorted([p for p in opt_dir.iterdir() if p.is_dir() and p.name.startswith("run_")], key=lambda p: (_run_mtime(p), p.name), reverse=True) if opt_dir.exists() else []
+    if not runs:
+        return None
+    run = runs[0]; man = read_json_file(run / "manifest.json"); schema = int(man.get("scientific_schema_version") or 0)
+    raw = str(man.get("optimizer") or opt_dir.name).lower()
+    if schema < 3 and raw in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
+        arm, base, ext, fam = raw, "adamw", "wwpgd", "wwpgd"
+    else:
+        arm_info = _canonical_arm_from_manifest(man, opt_dir)
+        if arm_info is None:
+            if not include_legacy: return None
+            norm = normalize_optimizer(raw, include_legacy=True); arm = raw; base = str(man.get("base_optimizer") or norm["optimizer_family"]); ext = str(man.get("extension") or "none"); fam = norm["optimizer_family"]
+        else:
+            arm, base, ext = arm_info; fam = arm
+    seed = _manifest_value(man, "seed")
+    if seed is None:
+        m = re.search(r"pair_(\d+)", pair_dir.name); seed = int(m.group(1)) if m else None
+    allowed = (schema >= 3 and fam in CANONICAL_ARMS) or (schema >= 2 and fam in {"adamw", "wwpgd"})
+    valid = bool(man.get("valid_for_science", True) is True and allowed)
+    return RunRecord(pair_dir.name, pair_dir, run, raw, fam, OPTIMIZER_LABELS.get(fam, fam), int(seed) if seed is not None else None, {**man, "base_optimizer": base, "extension": ext, "arm_name": arm}, (run / "run_complete.json").exists(), schema < 2, valid)
+
+def discover_pair_candidates(results_root: Path, include_legacy: bool = False) -> list[PairCandidate]:  # type: ignore[override]
+    root = resolve_experiment_root(results_root); out: list[PairCandidate] = []
+    if not root.exists(): return out
+    opt_dirs = list(CANONICAL_ARMS) + ["adamw_wwpgd_reference"]
+    for pair in sorted([p for p in root.iterdir() if p.is_dir() and p.name.startswith("pair_")]):
+        runs: dict[str, RunRecord] = {}
+        for opt in opt_dirs:
+            r = _run_record(pair, pair / opt, include_legacy)
+            if r: runs[r.optimizer_family] = r
+        reasons: list[str] = []
+        bases = [b for b in CANONICAL_BASES if runs.get(b) or runs.get(f"{b}_wwpgd")]
+        if not bases and (runs.get("adamw") or runs.get("wwpgd")): bases = ["adamw"]
+        for base in bases:
+            a = runs.get(base)
+            w = runs.get(f"{base}_wwpgd") or (runs.get("wwpgd") if base == "adamw" else None)
+            if not (a and w):
+                reasons.append(f"missing {base} within-optimizer pair"); continue
+            for r in (a, w):
+                for fn in ["manifest.json", "metrics.csv", "run_complete.json"]:
+                    if not (r.run_dir / fn).exists(): reasons.append(f"{r.optimizer_raw} missing {fn}")
+                if not r.complete: reasons.append(f"{r.optimizer_raw} incomplete")
+                if not r.valid_for_science: reasons.append(f"{r.optimizer_raw} invalid schema/profile")
+            if a.seed != w.seed: reasons.append(f"{base} seed mismatch")
+            for key in ["initialization_hash", "tokenizer_hash", "validation_probe_hash", "training_probe_hash", "realized_tokens"]:
+                av, wv = _manifest_value(a.manifest, key), _manifest_value(w.manifest, key)
+                if av is not None and wv is not None and av != wv: reasons.append(f"{base} {key} mismatch")
+        if not bases: reasons.append("no complete within-optimizer canonical arm pair")
+        mt = max([_run_mtime(r.run_dir) for r in runs.values()] or [pair.stat().st_mtime])
+        seed = next((r.seed for r in runs.values() if r.seed is not None), None)
+        out.append(PairCandidate(pair.name, pair, seed, runs, not reasons, "; ".join(dict.fromkeys(reasons)), mt))
+    return out
+
+def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:  # type: ignore[override]
+    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
+    rows: list[dict[str, Any]] = []
+    for c in pairs:
+        arms = list(CANONICAL_ARMS) if any(k in c.runs for k in CANONICAL_ARMS) else ["adamw", "wwpgd"]
+        for arm in arms:
+            r = c.runs.get(arm)
+            if r:
+                rows.append({"pair_id": c.pair_id, "pair_dir": c.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": r.manifest.get("base_optimizer"), "extension": r.manifest.get("extension"), "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science})
+    return rows
+
+def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:  # type: ignore[override]
+    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
+    rows: list[dict[str, Any]] = []
+    for c in pairs:
+        arms = ["adamw", "wwpgd"] if "wwpgd" in c.runs else list(CANONICAL_ARMS)
+        for arm in arms:
+            r = c.runs.get(arm)
+            if r:
+                rows.append({"pair_id": c.pair_id, "pair_dir": c.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": r.manifest.get("base_optimizer"), "extension": r.manifest.get("extension"), "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science})
+    return rows
