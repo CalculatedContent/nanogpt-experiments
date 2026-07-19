@@ -347,20 +347,42 @@ def invalid_weightwatcher_rows(exc: BaseException, *, step: int, tokens_seen: in
     return [row]
 
 
+def _match_ww_row(df: pd.DataFrame, layer_name: str) -> dict[str, object] | None:
+    for key in ("longname", "name"):
+        if key in df.columns:
+            matches = df[df[key].astype(str).eq(layer_name)]
+            if len(matches):
+                return matches.iloc[0].to_dict()
+    return None
+
+
 def measured_projection_spectral_rows(*args, **kwargs) -> list[dict[str, object]]:
-    """Return real WeightWatcher pre/post rows; legacy DataFrame mode preserves missing fields as NaN."""
+    """Return paired WeightWatcher pre/post projection rows."""
     if args and isinstance(args[0], pd.DataFrame):
-        pre, post, proj_rows = args[:3]
-        target_alpha = args[3] if len(args) > 3 else kwargs.get("target_alpha", float("nan"))
+        pre = args[0]
+        if len(args) > 1 and isinstance(args[1], pd.DataFrame):
+            post = args[1]
+            proj_rows = args[2] if len(args) > 2 else kwargs.get("projection_rows", [])
+        else:
+            model = args[1] if len(args) > 1 else kwargs.pop("model")
+            proj_rows = kwargs.get("projection_rows", [])
+            try:
+                post = weightwatcher_details(model)
+            except Exception as e:
+                rows=[]
+                for pr in proj_rows:
+                    rows.append({**pr, "alpha_before": float("nan"), "alpha_after": float("nan"), "alpha_delta": float("nan"), "target_alpha": kwargs.get("target_alpha", float("nan")), "spectral_estimator": "weightwatcher", "immediate_spectral_source": "weightwatcher_failed", "measurement_valid_for_science": False, "valid_for_science": False, "weightwatcher_exception_type": type(e).__name__, "weightwatcher_exception_message": str(e)})
+                return rows
+        target_alpha = kwargs.get("target_alpha", args[3] if len(args) > 3 and isinstance(args[1], pd.DataFrame) else float("nan"))
         rows=[]
-        key = "longname" if "longname" in post.columns else "name"
         for pr in proj_rows:
             lname=str(pr.get("layer_name", ""))
-            matches=post[post.get(key, pd.Series(dtype=object)).astype(str).eq(lname)] if key in post.columns else pd.DataFrame()
-            row = matches.iloc[0].to_dict() if len(matches) else {}
-            alpha = row.get("alpha", float("nan"))
-            valid = bool(pd.notna(alpha))
-            out={**pr, **row, "alpha_before": (pre.iloc[0].to_dict().get("alpha", float("nan")) if len(pre) else float("nan")), "alpha_after": row.get("alpha", float("nan")), "alpha_delta": ((row.get("alpha", float("nan")) - (pre.iloc[0].to_dict().get("alpha", float("nan")) if len(pre) else float("nan"))) if pd.notna(row.get("alpha", float("nan"))) else float("nan")), "target_alpha": target_alpha, "spectral_estimator": "weightwatcher", "immediate_spectral_source": "weightwatcher_measured", "measurement_valid_for_science": valid, "valid_for_science": valid}
+            before=_match_ww_row(pre, lname)
+            after=_match_ww_row(post, lname)
+            alpha_before = before.get("alpha", float("nan")) if before else float("nan")
+            alpha_after = after.get("alpha", float("nan")) if after else float("nan")
+            valid = bool(before and after and pd.notna(alpha_before) and pd.notna(alpha_after))
+            out={**pr, **(after or {}), "layer_name": lname, "alpha_before": alpha_before, "alpha_after": alpha_after, "alpha_delta": (alpha_after-alpha_before if valid else float("nan")), "target_alpha": target_alpha, "spectral_estimator": "weightwatcher", "immediate_spectral_source": "weightwatcher_measured" if valid else "weightwatcher_unmatched", "measurement_valid_for_science": valid, "valid_for_science": valid}
             for fld in ("alpha","D","num_evals","xmin","detX_num"):
                 out.setdefault(fld, float("nan"))
             rows.append(out)

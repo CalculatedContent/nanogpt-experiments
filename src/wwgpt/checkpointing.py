@@ -91,25 +91,28 @@ def save_checkpoint(run_dir: Path, state: dict):
     full={**state,"step":step,"current_step":step,"next_step":int(state.get("next_step", step+1)),"checkpoint_schema_version":SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION,"created_at":state.get("created_at") or created,"saved_at":created}
     for k, v in compatibility.items():
         full.setdefault(k, v)
-    # Fill mandatory nullable fields for compatibility with older callers while still writing a full-state checkpoint.
-    if "model_state_dict" not in full and "model_state" in full:
-        full["model_state_dict"] = full["model_state"]
-    if "optimizer_state_dict" not in full and "optimizer_state" in full:
-        full["optimizer_state_dict"] = full["optimizer_state"]
-    for k, v in {
-        "model_state_dict": {}, "optimizer_state_dict": {}, "seed": 0,
-        "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "training_reader_position": state.get("reader_position",0),
-        "python_random_state": random.getstate(), "numpy_random_state": np.random.get_state(), "torch_cpu_rng_state": torch.get_rng_state(),
-        "torch_cuda_rng_states": [], "device_type": "unknown", "precision_policy": "torch_default", "gradient_accumulation_position": 0,
-        "metrics_rows": [], "periodic_weightwatcher_rows": [], "wwpgd_projection_rows": [], "immediate_projection_weightwatcher_rows": [],
-        "scientific_schema_version": 0,
-    }.items(): full.setdefault(k, v)
     path=ck/f"checkpoint_step_{step:06d}.pt"
     path, sha, size = atomic_torch_save(full,path)
     meta={"checkpoint":path.name,"current_step":step,"next_step":full["next_step"],"tokens_processed":full.get("tokens_processed",0),"created_at":full["created_at"],"sha256":sha,"size_bytes":size,"verified":True,"compatibility_hash":stable_hash(compatibility),"checkpoint_schema_version":SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION}
     _atomic_write_json(ck/"latest.json", meta)
     _append_inventory_atomic(ck/"checkpoint_inventory.csv", meta)
     return path
+
+
+def complete_test_checkpoint_state(**overrides) -> dict:
+    """Explicit test helper for constructing a complete scientific checkpoint."""
+    state = {
+        "model_state_dict": {}, "optimizer_state_dict": {}, "scheduler_state_dict": None,
+        "gradient_scaler_state_dict": None, "current_step": 0, "next_step": 1,
+        "tokens_processed": 0, "training_reader_position": 0, "reader_position": 0,
+        "seed": 0, **rng_state(), "device_type": "cpu",
+        "precision_policy": "torch_default", "gradient_accumulation_position": 0,
+        "metrics_rows": [], "periodic_weightwatcher_rows": [],
+        "wwpgd_projection_rows": [], "immediate_projection_weightwatcher_rows": [],
+        "scientific_schema_version": 0, "compatibility": {},
+    }
+    state.update(overrides)
+    return state
 
 def load_latest_checkpoint(run_dir: Path):
     ck=Path(run_dir)/"checkpoints"; latest=ck/"latest.json"
@@ -143,6 +146,33 @@ def inspect_checkpoint(path: Path):
     out.update({"sha256": sha, "size_bytes": size, "sha256_verified": True, "size_verified": True})
     return out
 
+def _load_json(path: Path) -> dict:
+    return json.loads(Path(path).read_text())
+
+
+def expected_compatibility_from_run(run_dir: Path) -> dict:
+    run_dir=Path(run_dir)
+    manifest=_load_json(run_dir/"manifest.json")
+    config=_load_json(run_dir/"config.json")
+    data_manifest=_load_json(run_dir/"data_manifest.json")
+    tokenizer_manifest=_load_json(run_dir/"tokenizer_manifest.json")
+    init_hash=(run_dir/"initialization_hash.txt").read_text().strip()
+    return {
+        "configuration_hash": manifest.get("configuration_hash", stable_hash(config)),
+        "data_hash": manifest.get("data_hash", data_manifest.get("corpus_hash")),
+        "tokenizer_hash": manifest.get("tokenizer_hash", tokenizer_manifest.get("tokenizer_hash")),
+        "initialization_hash": init_hash,
+        "model_configuration_hash": manifest.get("model_configuration_hash", stable_hash(config.get("model", {}))),
+        "training_configuration_hash": manifest.get("training_configuration_hash", stable_hash(config.get("train", {}))),
+        "wwpgd_configuration_hash": manifest.get("wwpgd_configuration_hash", stable_hash(config.get("wwpgd", {}))),
+        "validation_probe_hash": manifest.get("validation_probe_hash"),
+        "training_probe_hash": manifest.get("training_probe_hash"),
+        "scientific_schema_version": manifest.get("scientific_schema_version"),
+    }
+
+
 def validate_resume(run_dir: Path, expected: dict|None=None):
-    ck=load_latest_checkpoint(run_dir); exp=expected or ck.get("compatibility",{}); mm=compatibility_mismatches(ck, exp)
-    return {"compatible":not mm,"mismatches":mm,"next_step":int(ck.get("next_step", int(ck.get("step",0))+1)),"token_position":ck.get("training_reader_position", ck.get("reader_position")),"checkpoint_step":ck.get("step")}
+    ck=load_latest_checkpoint(run_dir); exp=expected or expected_compatibility_from_run(run_dir); mm=compatibility_mismatches(ck, exp)
+    if mm:
+        raise RuntimeError("checkpoint compatibility validation failed: "+json.dumps(mm, sort_keys=True, default=str))
+    return {"compatible":True,"mismatches":mm,"next_step":int(ck.get("next_step", int(ck.get("step",0))+1)),"token_position":ck.get("training_reader_position", ck.get("reader_position")),"checkpoint_step":ck.get("step")}

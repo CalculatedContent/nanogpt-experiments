@@ -1,7 +1,7 @@
 from pathlib import Path
 import ast, pandas as pd, torch
 from wwgpt.ww import measured_projection_spectral_rows
-from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, validate_resume
+from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, validate_resume, complete_test_checkpoint_state
 from wwgpt.device import detect_device
 from wwgpt.integrity import audit_experiment
 
@@ -29,10 +29,15 @@ def test_missing_weightwatcher_outputs_remain_nan_and_invalid():
     assert pd.isna(rows[0]['alpha_delta'])
 
 def test_checkpoint_atomic_latest_and_restore(tmp_path):
-    state={'step':3,'tokens_processed':96,'reader_position':96,'model_state':{'w':torch.tensor([1])},'optimizer_state':{'x':1},'rng_state':torch.get_rng_state(),'compatibility':{'configuration_hash':'c','data_hash':'d','tokenizer_hash':'t','initialization_hash':'i','scientific_schema_version':2}}
+    state=complete_test_checkpoint_state(current_step=3, next_step=4, step=3, tokens_processed=96, training_reader_position=96, reader_position=96, model_state_dict={'w':torch.tensor([1])}, optimizer_state_dict={'x':1}, compatibility={'configuration_hash':'c','data_hash':'d','tokenizer_hash':'t','initialization_hash':'i','scientific_schema_version':2,'model_configuration_hash':'m','training_configuration_hash':'tr','wwpgd_configuration_hash':'w'})
+    (tmp_path/'manifest.json').write_text('{"configuration_hash":"c","data_hash":"d","tokenizer_hash":"t","initialization_hash":"i","scientific_schema_version":2,"model_configuration_hash":"m","training_configuration_hash":"tr","wwpgd_configuration_hash":"w"}')
+    (tmp_path/'config.json').write_text('{}')
+    (tmp_path/'data_manifest.json').write_text('{"corpus_hash":"d"}')
+    (tmp_path/'tokenizer_manifest.json').write_text('{"tokenizer_hash":"t"}')
+    (tmp_path/'initialization_hash.txt').write_text('i')
     save_checkpoint(tmp_path,state)
     loaded=load_latest_checkpoint(tmp_path)
-    assert loaded['step']==3 and loaded['reader_position']==96 and loaded['optimizer_state']['x']==1
+    assert loaded['step']==3 and loaded['reader_position']==96 and loaded['optimizer_state_dict']['x']==1
     assert validate_resume(tmp_path)['next_step']==4
 
 def test_cpu_fallback_explicit():
