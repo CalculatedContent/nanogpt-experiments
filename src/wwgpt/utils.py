@@ -44,15 +44,23 @@ def sha256_file(path: Path) -> str:
 
 
 def environment() -> dict[str, Any]:
+    from wwgpt.device import device_summary
+
+    summary = device_summary("auto")
     return {
-        "device": "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu",
+        "device": summary["device_type"],
+        "resolved_device": summary["resolved_device"],
+        "device_selection_reason": summary["selection_reason"],
         "backend": "pytorch",
-        "precision": "bf16" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "fp32",
+        "precision": summary["precision_selected"],
+        "mixed_precision_policy": summary["mixed_precision_policy"],
+        "single_device_only": summary["single_device_only"],
+        "distributed_training": summary["distributed_training"],
         "torch_version": torch.__version__,
         "python_version": sys.version,
         "operating_system": platform.platform(),
         "processor": platform.processor(),
         "cuda_version": torch.version.cuda,
-        "mps_available": torch.backends.mps.is_available(),
-        "xla_version": None,
+        "mps_available": summary["mps_available"],
+        "xla_version": summary["torch_xla_version"],
     }

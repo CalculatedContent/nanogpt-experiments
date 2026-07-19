@@ -29,6 +29,12 @@ ignore = ["E501", "E701", "E702", "E703", "F401", "I001", "E401", "E731", "F841"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 norecursedirs = ["backups"]
+markers = [
+    "hardware: smoke tests requiring optional accelerator hardware",
+    "cuda: tests requiring CUDA hardware",
+    "mps: tests requiring Apple MPS hardware",
+    "xla: tests requiring torch_xla and an XLA device",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "src/wwgpt/analysis.py" = ["E401", "UP035", "B007", "B905", "SIM102", "F811"]
