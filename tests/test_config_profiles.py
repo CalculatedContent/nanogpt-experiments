@@ -74,7 +74,7 @@ def test_resolved_wwpgd_defaults_are_exact():
     assert cfg.wwpgd.cayley_eta == 0.25
     assert cfg.wwpgd.min_tail == 5
     assert cfg.wwpgd.warmup_events == 0
-    assert cfg.wwpgd.ramp_events == 5
+    assert cfg.wwpgd.ramp_events == 0
     assert cfg.wwpgd.use_detx is True
 
 

@@ -26,8 +26,8 @@ from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
 from wwgpt.ww import (
-    apply_wwpgd,
     apply_external_wwpgd,
+    external_wwpgd_config_from_experiment,
     fallback_spectral_summary,
     spectral_summary,
     composite_spectral_summary,
@@ -278,7 +278,7 @@ def run_single(
         proj_time = 0.0
         if optimizer_name in {"adamw_wwpgd", "adamw_wwpgd_reference"}:
             pstart = time.perf_counter()
-            proj_rows.extend(apply_wwpgd(model, cfg.wwpgd.target_alpha, cfg.wwpgd.strength, step))
+            proj_rows.extend(apply_external_wwpgd(model, event_index=step, actual_step=step, cfg=external_wwpgd_config_from_experiment(cfg.wwpgd)))
             proj_time = time.perf_counter() - pstart
         with torch.no_grad():
             vx, vy = val_reader.next_batch(cfg.train.batch_size)
@@ -359,7 +359,7 @@ def smoke(root: Path, steps: int = 3, seeds: list[int] | None = None) -> Path:
     cfg = ExperimentConfig(
         model=ModelConfig(n_layer=1, n_head=1, n_embd=32, block_size=16, vocab_size=128),
         train=TrainConfig(batch_size=2, max_steps=steps, eval_interval=1),
-        wwpgd=WWPGDConfig(enabled=True, strength=0.01),
+        wwpgd=WWPGDConfig(enabled=True, extension="wwpgd"),
     )
     data = prepare_local_text(
         smoke_dir / "data",

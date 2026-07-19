@@ -55,6 +55,6 @@ wwpgd:
   min_tail: 5
   use_detx: true
   warmup_events: 0
-  ramp_events: 5
+  ramp_events: 0
   project_embeddings: false
   project_output_head: false
