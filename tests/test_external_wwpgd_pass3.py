@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import torch
 
-from wwgpt.config import ModelConfig, TrainConfig
+from wwgpt.config import ModelConfig, TrainConfig, WWPGDConfig
 from wwgpt.model import GPT
 from wwgpt.optim import build_optimizer_bundle, optimizer_group_signature
 from wwgpt.train import WWPGDExtension
@@ -61,7 +61,7 @@ def test_resolved_external_configuration_exact_values():
     assert cfg.min_tail == 5
     assert cfg.use_detx is True
     assert cfg.warmup_epochs == 0
-    assert cfg.ramp_epochs == 5
+    assert cfg.ramp_epochs == 0
     assert cfg.verbose is False
 
 
@@ -77,7 +77,7 @@ def test_no_strength_multiplier_external_blend_eta(monkeypatch):
 def test_projection_interval_and_due_steps(monkeypatch):
     calls = []
     install_fake_ww_pgd(monkeypatch, calls)
-    ext = WWPGDExtension(cfg=object(), interval=3)
+    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=3)
     m = tiny_model()
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
     assert ext.after_optimizer_step(model=m, optimizer_step=1, total_optimizer_steps=6, tokens_seen=8) == []
@@ -102,7 +102,7 @@ def test_base_step_occurs_before_projection(monkeypatch):
         orig_step()
 
     bundle.step = step
-    ext = WWPGDExtension(cfg=object(), interval=1)
+    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=1)
     bundle.step()
     ext.after_optimizer_step(model=m, optimizer_step=1, total_optimizer_steps=1, tokens_seen=8)
     assert order[0] == "base_step"
@@ -117,7 +117,7 @@ def test_base_and_projected_arms_identical_before_first_projection(monkeypatch):
     projected = tiny_model()
     projected.load_state_dict(base.state_dict())
     assert all(torch.equal(base.state_dict()[k], projected.state_dict()[k]) for k in base.state_dict())
-    ext = WWPGDExtension(cfg=object(), interval=10)
+    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=10)
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
     assert ext.after_optimizer_step(model=projected, optimizer_step=9, total_optimizer_steps=20, tokens_seen=72) == []
     assert len(calls) == 0
@@ -172,8 +172,55 @@ def test_src_wwgpt_has_no_wwpgd_svd_calls():
     assert "torch.linalg.svdvals" not in text
 
 
-def test_installed_external_package_performs_projection(monkeypatch):
-    calls = []
-    mod = install_fake_ww_pgd(monkeypatch, calls)
-    apply_external_wwpgd(tiny_model(), actual_step=5)
-    assert calls and calls[0]["args"][1].__class__ is mod.WWTailConfig
+def test_manifest_records_requested_and_resolved_external_config():
+    from wwgpt.ww import external_wwpgd_manifest_fields
+
+    cfg = WWPGDConfig(q=1.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
+    fields = external_wwpgd_manifest_fields(True, cfg)
+
+    assert fields["blend_eta"] == 0.5
+    assert fields["q"] == 1.0
+    assert fields["cayley_eta"] == 0.25
+    assert fields["min_tail"] == 5
+    assert fields["warmup"] == 0
+    assert fields["ramp"] == 0
+    assert fields["requested_external_wwpgd_config"]["blend_eta"] == 0.5
+    assert fields["requested_external_wwpgd_config"]["ramp_events"] == 0
+    assert fields["resolved_external_wwpgd_config"] == {
+        "enable_tail_pgd": True,
+        "q": 1.0,
+        "blend_eta": 0.5,
+        "cayley_eta": 0.25,
+        "min_tail": 5,
+        "use_detx": True,
+        "warmup_epochs": 0,
+        "ramp_epochs": 0,
+        "verbose": False,
+    }
+
+
+def test_real_extension_passes_resolved_experiment_config_to_installed_package(monkeypatch):
+    import ww_pgd
+
+    captured = {}
+
+    def capture_projector(model, cfg, **kwargs):
+        captured["cfg"] = cfg
+        captured["kwargs"] = kwargs
+        return [{"layer_name": name, "changed": False} for name in external_projected_layer_names(model)]
+
+    monkeypatch.setattr(ww_pgd, "ww_pgd_project", capture_projector)
+    monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
+    cfg = WWPGDConfig(q=1.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
+    ext = WWPGDExtension(cfg=cfg, interval=1)
+    details, rows = ext.after_optimizer_step(model=tiny_model(), optimizer_step=1, total_optimizer_steps=1, tokens_seen=8)
+
+    external_cfg = captured["cfg"]
+    assert external_cfg.__class__ is ww_pgd.WWTailConfig
+    assert external_cfg.blend_eta == 0.5
+    assert external_cfg.q == 1.0
+    assert external_cfg.cayley_eta == 0.25
+    assert external_cfg.min_tail == 5
+    assert external_cfg.warmup_epochs == 0
+    assert external_cfg.ramp_epochs == 0
+    assert all(row["blend_eta"] == 0.5 and row["q"] == 1.0 and row["ramp"] == 0 for row in rows)

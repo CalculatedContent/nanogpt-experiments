@@ -37,7 +37,7 @@ from wwgpt.ww import (
     _ww_version,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
-    resolved_external_wwpgd_config,
+    external_wwpgd_config_from_experiment,
     external_wwpgd_manifest_fields,
 )
 
@@ -100,7 +100,7 @@ class WWPGDExtension(TrainingExtension):
         event = optimizer_step // self.interval - 1
         details = weightwatcher_details(model)
         frac = max(0.0, min(1.0, optimizer_step / max(1, total_optimizer_steps)))
-        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=resolved_external_wwpgd_config())
+        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg))
         return details, rows
 
 def _log_train_progress(message: str) -> None:
@@ -523,7 +523,7 @@ def run_scientific_single(
         "weightwatcher_version": _ww_version(),
         "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False},
     }
-    man.update(external_wwpgd_manifest_fields(extension_name == "wwpgd"))
+    man.update(external_wwpgd_manifest_fields(extension_name == "wwpgd", cfg.wwpgd if extension_name == "wwpgd" else None))
     cfgd_for_hash = json.loads(json.dumps(asdict(cfg)))
     man.update({
         "configuration_hash": stable_hash(cfgd_for_hash),
