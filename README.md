@@ -19,9 +19,17 @@ Smoke test only, invalid for scientific conclusions:
 ```
 
 
+## Execution interface
+
+The CLI prints a resolved execution configuration before data preparation or training. Use `--dry-run` on `prepare-data`, `run-multiseed`, `run-canonical-trials`, or `run-strength-scan` to report trial counts, arm counts, levels, seeds, token budgets, estimated optimizer steps, output directories, dataset revision, and the resolved YAML-backed configuration without downloading data or training.
+
+Profiles map directly to pinned configuration files: `scaling` -> `configs/default.yaml`, `reproduction_tiny` -> `configs/reproduction_tiny.yaml`, and `reproduction_fineweb` -> `configs/reproduction_fineweb.yaml`. If `--profile` is supplied, it is the configuration source; conflicting explicit `--config` values are rejected instead of ignored. Publication and multiseed entry points use the canonical six-arm design: AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD. Non-canonical optimizer/extension ablations belong in explicit scan commands rather than `run-multiseed`.
+
+Environment-variable overrides are intentionally minimized. General workflows should pass CLI arguments. The Colab helper reads only `LEVEL`, `DATA_ROOT`, `RESULTS_ROOT`, `TOKEN_MULTIPLIER`, `SEEDS`, and optional `CONFIG`. The level-0 strength-scan helper additionally supports documented scan conveniences (`WWPGD_STRENGTH`, `DEVICE`, interval variables, `RUN_LOG`, and `PID_FILE`) and exports `WWGPT_STRENGTH_SCAN_ROOT` for notebooks.
+
 ## Schema v3 highlights
 
-Scientific schema v3 separates base optimizers from extensions. Use `--optimizer {adamw,muon,stableadamw}` with `--extensions none,wwpgd` for paired runs, or `--extension {none,wwpgd}` for a single arm. The six canonical arms are AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD.
+Scientific schema v3 separates base optimizers from extensions. Publication commands run the canonical base optimizer plus extension pairs. The six canonical arms are AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD.
 
 The default ladder is level 0 `(n_layer=1,n_head=1,n_embd=64,block_size=256)`, then levels 1-4 `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)`, always with 64-dimensional attention heads. Blocks use separate bias-free key/query/value/projection matrices, bias-free MLP linears, and an untied bias-free LM head.
 
@@ -62,7 +70,7 @@ The strength scan is a secondary ablation for AdamW + WW-PGD. It is not run by d
 Run a scan:
 
 ```bash
-wwgpt run-strength-scan --level 0 --data-root /tmp/wwpgd_v2/data --results-root /tmp/wwpgd_strength_scan --token-multiplier 20 --seeds 1337 --strengths 0.02,0.1,0.25,0.5,1.0 --device mps --eval-interval 25 --spectral-interval 100 --checkpoint-interval 500 --immediate-projection-spectral --resume
+wwgpt run-strength-scan --level 0 --data-root /tmp/wwpgd_v2/data --results-root /tmp/wwpgd_strength_scan --token-multiplier 20 --seeds 1337 --strengths 0.1,0.25,0.5,1.0 --device mps --eval-interval 25 --spectral-interval 100 --checkpoint-interval 500 --immediate-projection-spectral --resume
 ```
 
 Analyze without notebooks:
