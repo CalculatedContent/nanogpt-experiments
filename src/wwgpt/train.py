@@ -177,6 +177,8 @@ def run_single(
     torch.manual_seed(seed)
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
+    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd"}:
+        base_optimizer, extension_name = optimizer_name.removesuffix("_wwpgd"), "wwpgd"
     elif optimizer_name in {"adamw", "muon", "stableadamw"}:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
     else:
@@ -413,6 +415,8 @@ def run_scientific_single(
     torch.manual_seed(seed)
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
+    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd"}:
+        base_optimizer, extension_name = optimizer_name.removesuffix("_wwpgd"), "wwpgd"
     elif optimizer_name in {"adamw", "muon", "stableadamw"}:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
     else:
@@ -701,7 +705,7 @@ def run_scientific_single(
             _log_train_progress(
                 f"progress pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} tokens={step * tokens_per_step}/{int(data.data_manifest['realized_tokens'])} train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} elapsed_s={elapsed:.1f} tokens_per_s={(step * tokens_per_step) / max(elapsed, 1e-9):.1f}"
             )
-        if False and cfg.composite_spectral_analysis_enabled and (step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps):
+        if cfg.composite_spectral_analysis_enabled and (step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps):
             composite_rows.extend(composite_spectral_summary(model, step=step, tokens_seen=step * tokens_per_step, base_optimizer=base_optimizer, extension=extension_name, arm_name=optimizer_name, seed=seed, pair_id=pair_id))
         if step % (checkpoint_interval or cfg.train.checkpoint_interval) == 0:
             state = {
@@ -745,7 +749,8 @@ def run_scientific_single(
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _write_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows)
-    _write_csv(run_dir / "composite_spectral.csv", composite_rows)
+    if cfg.composite_spectral_analysis_enabled:
+        _write_csv(run_dir / "composite_spectral.csv", composite_rows)
     _write_csv(run_dir / "lrs.csv", lr_rows)
     if extension_name == "wwpgd":
         _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)

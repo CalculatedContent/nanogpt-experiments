@@ -1,6 +1,8 @@
 tokenizer: gpt2
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
+dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
+data_mode: fineweb_gpt2_reproduction
 model:
   n_layer: 1
   n_head: 1
@@ -26,3 +28,4 @@ train:
   layer_lr: manual
   warmup_ratio: 0.03
   min_lr_ratio: 0.25
+composite_spectral_analysis_enabled: false

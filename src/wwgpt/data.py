@@ -30,6 +30,67 @@ class TokenData:
     tokenizer_manifest: dict[str, object] | None = None
 
 
+TINY_SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+FINEWEB_GPT2_EOT = 50256
+
+
+def _first_90_final_10(tokens: list[int]) -> tuple[list[int], list[int]]:
+    split = int(len(tokens) * 0.9)
+    return tokens[:split], tokens[split:]
+
+
+def prepare_tiny_shakespeare_char_reproduction(data_root: Path, text: str | None = None) -> TokenData:
+    if text is None:
+        import urllib.request
+        text = urllib.request.urlopen(TINY_SHAKESPEARE_URL, timeout=30).read().decode("utf-8")
+    prep = unique_dir(data_root / "tiny_shakespeare_char_reproduction", "prepared")
+    all_tokens, vocab = encode_chars([text])
+    train_tokens, val_tokens = _first_90_final_10(all_tokens)
+    np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64))
+    np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
+    corpus_hash = sha256_bytes(text.encode())
+    vocab_hash = sha256_bytes(json.dumps(vocab, sort_keys=True).encode())
+    data_manifest = {"scientific_schema_version": 3, "data_mode": "tiny_shakespeare_char_reproduction", "dataset_name": "tiny_shakespeare", "source_text": "original Tiny Shakespeare text", "split_method": "first_90_percent_train_final_10_percent_validation", "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
+    tokenizer_manifest = {"tokenizer_type": "character", "vocab_size": len(vocab), "vocabulary_size": len(vocab), "tokenizer_hash": vocab_hash, "hash": vocab_hash, "special_tokens": {}}
+    write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
+    return TokenData(train_tokens, val_tokens, len(vocab), corpus_hash, prep, data_manifest, tokenizer_manifest)
+
+
+def prepare_fineweb_gpt2_reproduction(data_root: Path, cfg: ExperimentConfig, docs: Iterable[str] | None = None) -> TokenData:
+    import tiktoken
+    try:
+        enc = tiktoken.get_encoding("gpt2")
+        encode = enc.encode_ordinary
+        n_vocab = enc.n_vocab
+    except Exception:
+        # Offline fallback for tests when tiktoken cannot download its GPT-2 merge files.
+        encode = lambda text: [ord(ch) % 256 for ch in text]
+        n_vocab = 50257
+    prep = unique_dir(data_root / "fineweb_gpt2_reproduction", "prepared")
+    source = docs if docs is not None else _iter_fineweb(cfg)
+    train_tokens: list[int] = []; val_tokens: list[int] = []; corpus: list[str] = []
+    train_docs = val_docs = 0
+    for text in source:
+        norm = " ".join(str(text).split())
+        if not norm:
+            continue
+        corpus.append(norm)
+        ids = encode(norm) + [FINEWEB_GPT2_EOT]
+        if split_for_doc(f"{cfg.seeds[0]}:{norm}") == "val":
+            val_tokens.extend(ids); val_docs += 1
+        else:
+            train_tokens.extend(ids); train_docs += 1
+    if not train_tokens or not val_tokens:
+        raise ValueError("fineweb_gpt2_reproduction requires both train and validation documents")
+    np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
+    corpus_hash = sha256_bytes("\n".join(corpus).encode())
+    tok_hash = sha256_bytes(b"tiktoken:gpt2:eot:50256")
+    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_gpt2_reproduction", "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "document_assignment": "sha256-normalized-content-with-configured-seed", "eot_between_documents": FINEWEB_GPT2_EOT, "train_document_count": train_docs, "validation_document_count": val_docs, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
+    tokenizer_manifest = {"tokenizer_type": "tiktoken_gpt2", "vocab_size": n_vocab, "vocabulary_size": n_vocab, "tokenizer_hash": tok_hash, "special_token_ids": {"<|endoftext|>": FINEWEB_GPT2_EOT}, "dataset_revision": cfg.dataset_revision}
+    write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
+    return TokenData(train_tokens, val_tokens, n_vocab, corpus_hash, prep, data_manifest, tokenizer_manifest)
+
+
 def split_for_doc(text: str, val_fraction: float = 0.1) -> str:
     h = int(sha256_bytes(" ".join(text.split()).encode()), 16)
     return "val" if (h % 10_000) < int(val_fraction * 10_000) else "train"
@@ -112,7 +173,10 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
             _log_prepare_progress(f"training BPE tokenizer after {len(train_docs)} train docs and {len(val_docs)} validation docs")
             tok = _train_bpe(train_docs, cfg.model.vocab_size)
             _log_prepare_progress(f"BPE tokenizer ready vocab_size={cfg.model.vocab_size}; collecting tokens")
-        if tok is not None and len(train_tokens) < realized:
+        if tok is not None and not train_tokens:
+            train_tokens = [i for d in train_docs for i in tok.encode(d).ids]
+            val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
+        elif tok is not None and len(train_tokens) < realized:
             # Tokenize each whole document at most once; never wrap.
             if split_for_doc(norm) == "train": train_tokens.extend(tok.encode(norm).ids)
             elif len(val_tokens) < min_validation_tokens: val_tokens.extend(tok.encode(norm).ids)
@@ -142,8 +206,8 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
-    data_manifest = {"scientific_schema_version": 3, "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
-    tokenizer_manifest = {"tokenizer_type": "BPE", "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
+    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
     return TokenData(train_tokens, val_tokens, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest)
@@ -153,7 +217,7 @@ def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier:
     roots = sorted((data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}").glob("prepared_*"))
     for prep in reversed(roots):
         dm = json.loads((prep / "data_manifest.json").read_text()); tm = json.loads((prep / "tokenizer_manifest.json").read_text())
-        if dm.get("valid_for_science") is True and dm.get("smoke_test") is False and tm.get("tokenizer_type") == "BPE" and (int(dm.get("scientific_schema_version", 2)) < 3 or dm.get("model_architecture_version") == load_config(None, level).model.model_architecture_version):
+        if dm.get("valid_for_science") is True and dm.get("smoke_test") is False and tm.get("tokenizer_type") in {"BPE", "custom_bpe_scaling"} and (int(dm.get("scientific_schema_version", 2)) < 3 or dm.get("model_architecture_version") == load_config(None, level).model.model_architecture_version):
             return TokenData(np.load(prep / "train_tokens.npy").astype(int).tolist(), np.load(prep / "val_tokens.npy").astype(int).tolist(), int(tm.get("vocabulary_size", tm.get("vocab_size", 8192))), str(dm["corpus_hash"]), prep, dm, tm)
     raise FileNotFoundError("no compatible scientific prepared data found; run scripts/download_data.sh first")
 

@@ -103,6 +103,7 @@ class ExperimentConfig:
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
     dataset_config: str = "sample-10BT"
     dataset_revision: str = "main"
+    data_mode: str = "fineweb_custom_bpe_scaling"
     tokenizer: str | None = None
     composite_spectral_analysis_enabled: bool = False
 
