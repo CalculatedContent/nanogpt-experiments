@@ -23,3 +23,6 @@ train:
   layer_lr: manual
   warmup_ratio: 0.03
   min_lr_ratio: 0.25
+
+data_mode: tiny_shakespeare_char_reproduction
+composite_spectral_analysis_enabled: false
