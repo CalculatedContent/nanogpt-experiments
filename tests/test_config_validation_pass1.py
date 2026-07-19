@@ -37,11 +37,20 @@ def test_invalid_wwpgd_values_are_rejected(tmp_path):
 
 
 def test_invalid_schedule_values_are_rejected(tmp_path):
+    with pytest.raises(ValueError, match="train.batch_size"):
+        load_config(_write_config(tmp_path, {"train": {"batch_size": 0}}), level=0)
+
+    with pytest.raises(ValueError, match="model.block_size"):
+        load_config(_write_config(tmp_path, {"model": {"block_size": 0}}), level=0)
+
     with pytest.raises(ValueError, match="train.learning_rate"):
         load_config(_write_config(tmp_path, {"train": {"learning_rate": 0.0}}), level=0)
 
     with pytest.raises(ValueError, match="train.weight_decay"):
         load_config(_write_config(tmp_path, {"train": {"weight_decay": -0.1}}), level=0)
+
+    with pytest.raises(ValueError, match="warmup_steps"):
+        load_config(_write_config(tmp_path, {"train": {"warmup_steps": -1}}), level=0)
 
     with pytest.raises(ValueError, match="lr_decay_steps.*greater than.*warmup_steps"):
         load_config(
@@ -67,3 +76,6 @@ def test_invalid_seed_and_optimizer_names_are_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="unknown base_optimizer"):
         load_config(_write_config(tmp_path, {"base_optimizer": "not_an_optimizer"}), level=0)
+
+    with pytest.raises(ValueError, match="unknown extension"):
+        load_config(_write_config(tmp_path, {"extensions": ["none", "invalid_extension"]}), level=0)
