@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-OPTIMIZER_LABELS={"adamw":"AdamW","wwpgd":"AdamW + WW-PGD","muon":"Muon","muon_wwpgd":"Muon+WW-PGD","stableadamw":"StableAdamW","stableadamw_wwpgd":"StableAdamW+WW-PGD"}
+OPTIMIZER_LABELS={"adamw":"AdamW","wwpgd":"AdamW + WW-PGD","muon":"Muon","muon_wwpgd":"Muon+WW-PGD","stableadamw":"StableAdamW","stableadamw_wwpgd":"StableAdamW+WW-PGD","stable_adamw":"StableAdamW","stable_adamw_wwpgd":"StableAdamW+WW-PGD"}
 OPTIMIZER_COLORS={"adamw":"#1f77b4","wwpgd":"#ff7f0e"}
 PROJECTED_LAYER_PATTERNS=(".attn.key",".attn.query",".attn.value",".attn.proj",".mlp.0",".mlp.2")
 HASH_FIELDS=("seed","initialization_hash","data_hash","corpus_hash","tokenizer_hash","validation_probe_hash","training_probe_hash","realized_tokens")
@@ -549,6 +549,54 @@ def discover_canonical_runs(results_root: Path, include_legacy: bool = False) ->
     return rows
 
 def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:  # type: ignore[override]
+    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
+    rows: list[dict[str, Any]] = []
+    for c in pairs:
+        arms = ["adamw", "wwpgd"] if "wwpgd" in c.runs else list(CANONICAL_ARMS)
+        for arm in arms:
+            r = c.runs.get(arm)
+            if r:
+                rows.append({"pair_id": c.pair_id, "pair_dir": c.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": r.manifest.get("base_optimizer"), "extension": r.manifest.get("extension"), "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science})
+    return rows
+
+# Canonical trial discovery: schema-v3 publication runs are immutable trial_* directories
+# containing one trial_manifest.json and exactly six arm directories.  This path is
+# manifest-driven rather than newest-pair-driven.
+TRIAL_CANONICAL_ARMS = ("adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stable_adamw", "stable_adamw_wwpgd")
+TRIAL_CANONICAL_PAIRS = {"adamw": "adamw_wwpgd", "muon": "muon_wwpgd", "stable_adamw": "stable_adamw_wwpgd"}
+
+def discover_trial_manifests(results_root: Path) -> list[dict[str, Any]]:
+    root = resolve_experiment_root(results_root)
+    trials = [p for p in root.iterdir() if p.is_dir() and p.name.startswith("trial_")] if root.exists() else []
+    out: list[dict[str, Any]] = []
+    for trial in sorted(trials):
+        manifest = read_json_file(trial / "trial_manifest.json")
+        if not manifest:
+            continue
+        arms = [a.get("arm_name") for a in manifest.get("arms", [])]
+        pair_rows = manifest.get("pairs", [])
+        complete = (
+            tuple(arms) == TRIAL_CANONICAL_ARMS
+            and pair_rows == [{"baseline": b, "wwpgd": w} for b, w in TRIAL_CANONICAL_PAIRS.items()]
+            and len({str(trial / arm) for arm in TRIAL_CANONICAL_ARMS}) == 6
+        )
+        out.append({"trial_id": manifest.get("trial_id", trial.name), "trial_dir": trial, "manifest": manifest, "valid": complete, "exclusion_reason": "" if complete else "incomplete canonical trial manifest"})
+    return out
+
+def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:  # type: ignore[override]
+    trials = discover_trial_manifests(results_root)
+    if trials:
+        rows: list[dict[str, Any]] = []
+        for t in trials:
+            if not t["valid"]:
+                continue
+            man = t["manifest"]; shared = man.get("shared", {})
+            for arm in man.get("arms", []):
+                arm_name = arm["arm_name"]
+                runs = sorted((t["trial_dir"] / arm_name).glob("run_*"), key=lambda p: (_run_mtime(p), p.name), reverse=True)
+                run_dir = runs[0] if runs else (t["trial_dir"] / arm_name)
+                rows.append({"pair_id": man["trial_id"], "pair_dir": t["trial_dir"], "run_dir": run_dir, "seed": shared.get("seed"), "optimizer_raw": arm_name, "optimizer_family": arm_name, "optimizer_label": OPTIMIZER_LABELS.get(arm_name, arm_name), "base_optimizer": arm.get("base_optimizer"), "extension": arm.get("extension"), "manifest": {**shared, **arm, "trial_manifest": man}, "complete": (run_dir / "run_complete.json").exists(), "valid_for_science": t["valid"]})
+        return rows
     pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
     rows: list[dict[str, Any]] = []
     for c in pairs:

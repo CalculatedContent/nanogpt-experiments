@@ -223,9 +223,9 @@ def run_single(
     torch.manual_seed(seed)
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
-    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd"}:
+    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd", "stable_adamw_wwpgd"}:
         base_optimizer, extension_name = optimizer_name.removesuffix("_wwpgd"), "wwpgd"
-    elif optimizer_name in {"adamw", "muon", "stableadamw"}:
+    elif optimizer_name in {"adamw", "muon", "stableadamw", "stable_adamw"}:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
     else:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
@@ -460,9 +460,9 @@ def run_scientific_single(
 ) -> Path:
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
-    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd"}:
+    elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd", "stable_adamw_wwpgd"}:
         base_optimizer, extension_name = optimizer_name.removesuffix("_wwpgd"), "wwpgd"
-    elif optimizer_name in {"adamw", "muon", "stableadamw"}:
+    elif optimizer_name in {"adamw", "muon", "stableadamw", "stable_adamw"}:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
     else:
         base_optimizer, extension_name = optimizer_name, getattr(cfg.wwpgd, "extension", "none")
@@ -846,6 +846,48 @@ def run_scientific_single(
     )
     return run_dir
 
+
+CANONICAL_TRIAL_ARMS = ("adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stable_adamw", "stable_adamw_wwpgd")
+CANONICAL_TRIAL_PAIRS = {"adamw": "adamw_wwpgd", "muon": "muon_wwpgd", "stable_adamw": "stable_adamw_wwpgd"}
+CANONICAL_TRIAL_BASES = ("adamw", "muon", "stable_adamw")
+
+def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, cfg: ExperimentConfig, data, init_hash: str) -> dict:
+    cfgd = json.loads(json.dumps(asdict(cfg)))
+    shared = {
+        "trial_id": pair_id, "seed": seed, "level": level, "token_multiplier": token_multiplier,
+        "model_config": asdict(cfg.model), "model_configuration_hash": stable_hash(cfgd.get("model", {})),
+        "data_manifest": data.data_manifest, "data_hash": data.corpus_hash,
+        "tokenizer_manifest": data.tokenizer_manifest, "tokenizer_hash": data.tokenizer_manifest.get("tokenizer_hash"),
+        "initialization_hash": init_hash, "train": asdict(cfg.train), "token_budget": {"realized_tokens": data.data_manifest.get("realized_tokens"), "token_multiplier": token_multiplier},
+    }
+    arms = []
+    for base in CANONICAL_TRIAL_BASES:
+        for ext in ("none", "wwpgd"):
+            arm = make_arm_name(base, ext)
+            arms.append({"arm_name": arm, "base_optimizer": base, "extension": ext, "paired_with": CANONICAL_TRIAL_PAIRS.get(base) if ext == "none" else base, "learning_rate": cfg.train.learning_rate, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "weight_decay": cfg.train.weight_decay, "initialization_hash": init_hash, "batch_order_seed": resolved_stochastic_seeds(seed, level, token_multiplier, optimizer_identity=base)["train_reader_seed"], "token_budget": shared["token_budget"]})
+    return {"scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "immutable": True, "trial_id": pair_id, "shared": shared, "arms": arms, "pairs": [{"baseline": b, "wwpgd": w} for b, w in CANONICAL_TRIAL_PAIRS.items()]}
+
+def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False) -> Path:
+    from wwgpt.data import load_prepared_scientific_data
+    cfg = load_config(config_path, level)
+    data = load_prepared_scientific_data(data_root, level, token_multiplier)
+    exp_root = results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
+    exp_root.mkdir(parents=True, exist_ok=True)
+    for seed in (seeds or DEFAULT_SEEDS):
+        existing_trials = sorted(exp_root.glob(f"trial_{seed}*")) if resume else []
+        trial = existing_trials[0] if existing_trials else unique_dir(exp_root, f"trial_{seed}")
+        trial_id = trial.name
+        init_dir = trial / "initial_state"; init_dir.mkdir(parents=True, exist_ok=True)
+        if resume and (init_dir / "model.pt").exists():
+            init_state = torch.load(init_dir / "model.pt", map_location="cpu", weights_only=False); init_hash = (init_dir / "initialization_hash.txt").read_text().strip()
+        else:
+            torch.manual_seed(resolved_stochastic_seeds(seed, level, token_multiplier)["model_init_seed"]); init_model = GPT(cfg.model); init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}; init_hash = _state_hash(init_state); torch.save(init_state, init_dir / "model.pt"); (init_dir / "initialization_hash.txt").write_text(init_hash)
+        if not (resume and (trial / "trial_manifest.json").exists()): write_json(trial / "trial_manifest.json", _trial_manifest(trial_id, level, token_multiplier, seed, cfg, data, init_hash))
+        for base in CANONICAL_TRIAL_BASES:
+            for ext in ("none", "wwpgd"):
+                arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))
+                run_scientific_single(trial, make_arm_name(base, ext), seed, arm_cfg, data, trial_id, init_state, init_hash, level, token_multiplier, device, ww_interval, eval_interval, checkpoint_interval, spectral_interval, precision, resume, immediate_projection_spectral, allow_code_version_mismatch)
+    return exp_root
 
 def run_multiseed_scientific(
     level: int,
