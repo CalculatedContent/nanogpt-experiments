@@ -1038,7 +1038,7 @@ def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_
     data = load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
     exp_root.mkdir(parents=True, exist_ok=True)
-    for seed in (seeds or DEFAULT_SEEDS):
+    for seed in (seeds or cfg.seeds):
         existing_trials = sorted(exp_root.glob(f"trial_{seed}*")) if resume else []
         trial = existing_trials[0] if existing_trials else unique_dir(exp_root, f"trial_{seed}")
         trial_id = trial.name
@@ -1081,7 +1081,7 @@ def run_multiseed_scientific(
         results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
     )
     exp_root.mkdir(parents=True, exist_ok=True)
-    run_seeds = seeds or DEFAULT_SEEDS
+    run_seeds = seeds or cfg.seeds
     _log_train_progress(
         f"starting multiseed level={level} token_multiplier={token_multiplier} seeds={','.join(str(s) for s in run_seeds)} results={exp_root}"
     )
