@@ -91,16 +91,21 @@ class ExternalWWTailConfigSpec:
 WWTailConfig = ExternalWWTailConfigSpec
 
 
+STANDARD_WWPGD_BLEND_ETA = 0.5
+STANDARD_WWPGD_WARMUP_EVENTS = 0
+STANDARD_WWPGD_RAMP_EVENTS = 0
+
+
 def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSpec:
     return ExternalWWTailConfigSpec(
         enable_tail_pgd=True,
         q=float(getattr(cfg, "q")),
-        blend_eta=float(getattr(cfg, "blend_eta")),
+        blend_eta=STANDARD_WWPGD_BLEND_ETA,
         cayley_eta=float(getattr(cfg, "cayley_eta")),
         min_tail=int(getattr(cfg, "min_tail")),
         use_detx=bool(getattr(cfg, "use_detx")),
-        warmup_epochs=int(getattr(cfg, "warmup_events")),
-        ramp_epochs=int(getattr(cfg, "ramp_events")),
+        warmup_epochs=STANDARD_WWPGD_WARMUP_EVENTS,
+        ramp_epochs=STANDARD_WWPGD_RAMP_EVENTS,
         verbose=bool(getattr(cfg, "verbose", False)),
     )
 
@@ -241,7 +246,9 @@ def apply_external_wwpgd(
     return rows
 
 
-def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 1):
+def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 0):
+    if strength is not None:
+        raise ValueError("deprecated strength is not a documented external WW_PGD parameter; use standard WWPGD or a documented external parameter ablation")
     return apply_external_wwpgd(model, event_index=step, actual_step=step)
 
 COMPOSITE_SPECIFICATION_VERSION = "raw_and_composite_v1"

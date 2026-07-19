@@ -32,7 +32,7 @@ def test_cli_help():
     assert subprocess.run([sys.executable,'-m','wwgpt.cli','analyze-strength-scan','--help'],capture_output=True,text=True).returncode==0
 
 def test_tiny_strength_scan(tmp_path):
-    with pytest.raises(RuntimeError, match='never fall back to fixtures'):
+    with pytest.raises(ValueError, match='run-strength-scan is retired'):
         run_strength_scan(0,tmp_path/'data',tmp_path/'results',1,seeds=[1],strengths='0.02,0.1',device='cpu',eval_interval=1,spectral_interval=99,checkpoint_interval=99,resume=False)
 
 def test_notebooks_parse_strength():

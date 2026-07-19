@@ -96,6 +96,7 @@ def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_s
     return run
 
 def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multiplier:int, seeds=None, strengths=None, config:Path|None=None, device=None, eval_interval=None, spectral_interval=None, checkpoint_interval=None, immediate_projection_spectral=True, resume=False, continue_on_error=True, scan_name='strength_scan', instability_loss_threshold=20.0, include_adamw_control=True, optimizer: str = "adamw"):
+    raise ValueError('run-strength-scan is retired: repository strength did not map to a documented external WW_PGD parameter, so scanning it would repeat identical projector settings under different labels. Use standard WWPGD or add an explicit ablation over a documented external parameter such as q or blend_eta.')
     strengths=parse_strengths(strengths if isinstance(strengths,str) or strengths is None else ','.join(map(str,strengths))); seeds=seeds or [1337]
     cfg=load_config(config, level)
     try:

@@ -7,7 +7,7 @@ from wwgpt.checkpointing import save_checkpoint, complete_test_checkpoint_state
 
 
 class DummyCfg:
-    q=1.0; target_alpha=2.0; strength=0.1; min_tail=1; blend_eta=.5; cayley_eta=.25; use_detx=True; warmup_events=0; ramp_events=1
+    q=1.0; target_alpha=2.0; strength=0.1; min_tail=1; blend_eta=.5; cayley_eta=.25; use_detx=True; warmup_events=0; ramp_events=0
 
 
 def test_immediate_projection_pairing_uses_layer_specific_pre_rows(monkeypatch):
@@ -37,12 +37,11 @@ def test_wwpgd_extension_one_pre_call_and_fraction(monkeypatch):
         return [{"projection_event":event_index,"layer_name":"blocks.0.attn.key","scheduled_token_fraction":scheduled_token_fraction}]
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", fake_details)
     monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", fake_apply)
-    ext = WWPGDExtension(DummyCfg(), interval=2)
-    assert ext.after_optimizer_step(model=object(), optimizer_step=1, total_optimizer_steps=4, tokens_seen=999) == []
-    pre, rows1 = ext.after_optimizer_step(model=object(), optimizer_step=2, total_optimizer_steps=4, tokens_seen=999)
-    pre, rows2 = ext.after_optimizer_step(model=object(), optimizer_step=4, total_optimizer_steps=4, tokens_seen=999)
+    ext = WWPGDExtension(DummyCfg(), interval=1)
+    pre, rows1 = ext.after_optimizer_step(model=object(), optimizer_step=1, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
+    pre, rows2 = ext.after_optimizer_step(model=object(), optimizer_step=4, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
     assert calls["pre"] == 2
-    assert rows1[0]["scheduled_token_fraction"] == 0.5
+    assert rows1[0]["scheduled_token_fraction"] == 0.25
     assert rows2[0]["scheduled_token_fraction"] == 1.0
     assert 0 <= rows1[0]["scheduled_token_fraction"] <= 1
     assert 0 <= rows2[0]["scheduled_token_fraction"] <= 1

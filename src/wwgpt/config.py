@@ -94,7 +94,7 @@ class WWPGDConfig:
     q: float = 1.0
     projection_schedule: list[float] = field(default_factory=lambda: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92])
     warmup_steps: int = 0
-    ramp_steps: int = 10
+    ramp_steps: int = 0
     layer_scope: str = "blocks"
     include_embeddings: bool = False
     include_output: bool = False

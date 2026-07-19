@@ -74,19 +74,9 @@ def test_no_strength_multiplier_external_blend_eta(monkeypatch):
     assert all(row["blend_eta"] == 0.5 for row in rows)
 
 
-def test_projection_interval_and_due_steps(monkeypatch):
-    calls = []
-    install_fake_ww_pgd(monkeypatch, calls)
-    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=3)
-    m = tiny_model()
-    monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
-    assert ext.after_optimizer_step(model=m, optimizer_step=1, total_optimizer_steps=6, tokens_seen=8) == []
-    assert ext.after_optimizer_step(model=m, optimizer_step=2, total_optimizer_steps=6, tokens_seen=16) == []
-    assert len(calls) == 0
-    for step in (3, 6):
-        details, rows = ext.after_optimizer_step(model=m, optimizer_step=step, total_optimizer_steps=6, tokens_seen=step * 8)
-        assert rows
-    assert len(calls) == 2
+def test_projection_interval_must_be_standard_one():
+    with pytest.raises(ValueError, match="standard WW-PGD interval"):
+        WWPGDExtension(cfg=WWPGDConfig(), interval=3)
 
 
 def test_base_step_occurs_before_projection(monkeypatch):
@@ -117,10 +107,10 @@ def test_base_and_projected_arms_identical_before_first_projection(monkeypatch):
     projected = tiny_model()
     projected.load_state_dict(base.state_dict())
     assert all(torch.equal(base.state_dict()[k], projected.state_dict()[k]) for k in base.state_dict())
-    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=10)
+    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=1)
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
-    assert ext.after_optimizer_step(model=projected, optimizer_step=9, total_optimizer_steps=20, tokens_seen=72) == []
-    assert len(calls) == 0
+    ext.after_optimizer_step(model=projected, optimizer_step=1, total_optimizer_steps=20, tokens_seen=8)
+    assert len(calls) == 1
     assert all(torch.equal(base.state_dict()[k], projected.state_dict()[k]) for k in base.state_dict())
 
 
@@ -224,3 +214,24 @@ def test_real_extension_passes_resolved_experiment_config_to_installed_package(m
     assert external_cfg.warmup_epochs == 0
     assert external_cfg.ramp_epochs == 0
     assert all(row["blend_eta"] == 0.5 and row["q"] == 1.0 and row["ramp"] == 0 for row in rows)
+
+
+def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):
+    calls = []
+    install_fake_ww_pgd(monkeypatch, calls)
+    monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
+    model = tiny_model()
+    ext = WWPGDExtension(cfg=WWPGDConfig(blend_eta=0.9, warmup_events=3, ramp_events=7), interval=1)
+
+    for step in range(1, 6):
+        _pre, rows = ext.after_optimizer_step(
+            model=model,
+            optimizer_step=step,
+            total_optimizer_steps=5,
+            tokens_seen=step * 8,
+        )
+        external_cfg = calls[-1]["args"][1]
+        assert external_cfg.blend_eta == 0.5
+        assert external_cfg.warmup_epochs == 0
+        assert external_cfg.ramp_epochs == 0
+        assert all(row["blend_eta"] == 0.5 for row in rows)
