@@ -9,6 +9,22 @@ from torch import nn
 
 from wwgpt.config import TrainConfig
 
+MANUAL_LAYER_LR_MULTIPLIERS = {
+    "token_embedding": 0.35,
+    "position_embedding": 0.35,
+    "attention_key": 0.70,
+    "attention_query": 0.70,
+    "attention_value": 0.70,
+    "attention_projection": 0.80,
+    "mlp_input": 1.00,
+    "mlp_output": 1.10,
+    "block_layernorm": 1.20,
+    "final_layernorm": 1.20,
+    "lm_head": 1.35,
+    "other": 1.00,
+    "block_other": 1.00,
+}
+
 BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
 EXTENSIONS = {"none", "wwpgd"}
 ARM_DISPLAY = {
@@ -68,7 +84,8 @@ class Muon(torch.optim.Optimizer):
             x = (a * x) + (b * xx + c * (xx @ xx)) @ x
         if transposed:
             x = x.T
-        scale = math.sqrt(max(1.0, g.size(0) / max(1, g.size(1)))) if g.size(0) >= g.size(1) else math.sqrt(max(1.0, g.size(1) / max(1, g.size(0))))
+        rows, columns = g.size(0), max(1, g.size(1))
+        scale = max(1.0, rows / columns) ** 0.5
         return (x * scale).to(g.dtype)
 
     @torch.no_grad()
@@ -127,7 +144,14 @@ def build_param_groups(model: nn.Module, base_lr: float, weight_decay: float, cf
     multipliers = cfg.matrix_lr_multipliers or {}
     for n, p in named:
         role, depth = parameter_role_depth(n, model)
-        layer_mult = 1.0 if cfg.layer_lr == "flat" else gamma ** (max_depth - depth)
+        if cfg.layer_lr == "flat":
+            layer_mult = 1.0
+        elif cfg.layer_lr == "llrd":
+            layer_mult = gamma ** (max_depth - depth)
+        elif cfg.layer_lr == "manual":
+            layer_mult = MANUAL_LAYER_LR_MULTIPLIERS.get(role, MANUAL_LAYER_LR_MULTIPLIERS["other"])
+        else:
+            raise ValueError(f"unknown layer_lr {cfg.layer_lr}")
         matrix_mult = float(multipliers.get(role, 1.0))
         peak_lr = base_lr * layer_mult * matrix_mult
         groups.append({"params": [p], "lr": peak_lr, "initial_lr": peak_lr, "peak_lr": peak_lr, "minimum_lr": peak_lr * cfg.min_lr_ratio, "weight_decay": weight_decay if _decay_for(n, p) else 0.0, "group_name": n, "parameter_name": n, "role": role, "depth": depth, "layer_lr_multiplier": layer_mult, "matrix_specific_multiplier": matrix_mult, "parameter_count": p.numel()})
@@ -135,13 +159,21 @@ def build_param_groups(model: nn.Module, base_lr: float, weight_decay: float, cf
 
 
 def muon_parameter_names(model: nn.Module) -> set[str]:
+    hidden_matrix_roles = {
+        "attention_key",
+        "attention_query",
+        "attention_value",
+        "attention_projection",
+        "mlp_input",
+        "mlp_output",
+    }
     out = set()
     for n, p in model.named_parameters():
-        if not p.requires_grad or p.ndim != 2: continue
+        if not p.requires_grad or p.ndim != 2:
+            continue
         role, _ = parameter_role_depth(n, model)
-        if role in {"token_embedding", "position_embedding", "lm_head"}: continue
-        if n.endswith(".bias") or "ln_" in n or n.startswith("ln_f."): continue
-        out.add(n)
+        if role in hidden_matrix_roles:
+            out.add(n)
     return out
 
 
@@ -186,6 +218,28 @@ def schedule_factor(step0: int, total: int, warmup: int, schedule: str, min_lr_r
     if schedule == "warmup_cosine":
         return min_lr_ratio + 0.5 * (1 + math.cos(math.pi * progress)) * (1 - min_lr_ratio)
     raise ValueError(f"unknown lr_schedule {schedule}")
+
+
+def optimizer_group_signature(bundle: OptimizerBundle) -> tuple[dict[str, Any], ...]:
+    signature = []
+    for opt_name, opt in bundle.scheduled_optimizers:
+        for group in opt.param_groups:
+            betas = group.get("betas")
+            if betas is None and "beta1" in group and "beta2" in group:
+                betas = (group["beta1"], group["beta2"])
+            if betas is not None:
+                betas = tuple(float(x) for x in betas)
+            epsilon = group.get("eps", group.get("epsilon"))
+            signature.append({
+                "parameter_name": group.get("parameter_name", group.get("group_name", "")),
+                "optimizer_name": opt_name,
+                "role": group.get("role", ""),
+                "peak_lr": float(group.get("peak_lr", group.get("initial_lr", group.get("lr", 0.0)))),
+                "weight_decay": float(group.get("weight_decay", 0.0)),
+                "betas": betas,
+                "epsilon": None if epsilon is None else float(epsilon),
+            })
+    return tuple(signature)
 
 
 def apply_lr_schedule(bundle: OptimizerBundle, step0: int, total: int, warmup: int, cfg: TrainConfig) -> list[dict[str, Any]]:
