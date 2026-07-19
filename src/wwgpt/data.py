@@ -371,6 +371,12 @@ class NonRepeatingTokenReader:
         chunk = self.tokens[self.pos:self.pos + need]; self.pos += batch_size * self.block_size
         return np.array(chunk[:-1], dtype=np.int64).reshape(batch_size, self.block_size), np.array(chunk[1:], dtype=np.int64).reshape(batch_size, self.block_size)
 
+    def state_dict(self) -> dict[str, object]:
+        return {"pos": int(self.pos)}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        self.pos = int(state["pos"])
+
 
 class RandomWindowTokenReader:
     def __init__(self, tokens: Sequence[int] | np.ndarray, block_size: int, seed: int):
