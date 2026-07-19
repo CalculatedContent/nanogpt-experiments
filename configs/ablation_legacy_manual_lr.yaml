@@ -20,10 +20,12 @@ train:
   eval_batches: 20
   training_sampling: random_window
   lr_schedule: warmup_cosine
-  layer_lr: flat
-  warmup_ratio: 0.01
-  min_lr_ratio: 0.1
+  layer_lr: manual
+  warmup_ratio: 0.03
+  min_lr_ratio: 0.25
   warmup_steps: null
   lr_decay_steps: null
 data_mode: tiny_shakespeare_char_reproduction
 composite_spectral_analysis_enabled: false
+description: Historical manual layer-LR ablation retained for deliberate legacy reruns;
+  not a default or reproduction profile.

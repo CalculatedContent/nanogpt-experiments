@@ -2,7 +2,9 @@ scientific_schema_version: 3
 model_architecture_version: separate_qkv_bias_free_untied_head_v1
 parameter_count_convention: total
 base_optimizer: adamw
-extensions: [none, wwpgd]
+extensions:
+- none
+- wwpgd
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
 data_mode: fineweb_custom_bpe_scaling
@@ -22,8 +24,10 @@ train:
   batch_size: 16
   gradient_accumulation: 1
   learning_rate: 0.0003
-  betas: [0.9, 0.95]
-  epsilon: 1.0e-8
+  betas:
+  - 0.9
+  - 0.95
+  epsilon: 1.0e-08
   weight_decay: 0.01
   grad_clip: 0.0
   eval_interval: 10
@@ -32,17 +36,19 @@ train:
   eval_batches: 20
   training_sampling: random_window
   lr_schedule: warmup_cosine
-  warmup_ratio: 0.05
-  min_lr_ratio: 0.10
-  layer_lr: llrd
-  llrd_min_multiplier: 0.50
+  warmup_ratio: 0.01
+  min_lr_ratio: 0.1
+  layer_lr: flat
+  llrd_min_multiplier: 0.5
   evaluation_sampling: random_per_eval
   wwpgd_interval: null
+  warmup_steps: null
+  lr_decay_steps: null
 wwpgd:
   enabled: true
   extension: wwpgd
   target_alpha: 2.0
-  strength: 1.0  # deprecated compatibility field; do not use for new scientific runs
+  strength: 1.0
   q: 1.0
   blend_eta: 0.5
   cayley_eta: 0.25

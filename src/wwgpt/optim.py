@@ -200,23 +200,52 @@ def build_optimizer_bundle(model: nn.Module, cfg: TrainConfig, base_optimizer: s
     raise ValueError(f"unknown optimizer {base_optimizer}")
 
 
-def resolve_warmup_steps(total: int, warmup_ratio: float, warmup_steps: int | None) -> int:
-    if warmup_steps is not None:
-        return int(warmup_steps)
-    if total <= 1:
-        return 0
-    return min(total - 1, max(1, round(warmup_ratio * total)))
+SCHEDULER_IMPLEMENTATION = "nanogpt_linear_warmup_cosine_v1"
+
+
+def resolve_lr_decay_steps(total_optimizer_steps: int, lr_decay_steps: int | None) -> int:
+    return int(lr_decay_steps) if lr_decay_steps is not None else int(total_optimizer_steps)
+
+
+def resolve_warmup_steps(total: int, warmup_ratio: float, warmup_steps: int | None, lr_decay_steps: int | None = None) -> int:
+    decay = resolve_lr_decay_steps(total, lr_decay_steps)
+    warmup = int(warmup_steps) if warmup_steps is not None else round(warmup_ratio * decay)
+    warmup = 0 if decay <= 1 else min(decay - 1, max(0, warmup))
+    if not warmup < decay:
+        raise ValueError("resolved_warmup_steps must be less than resolved_lr_decay_steps")
+    return warmup
+
+
+def nanogpt_cosine_lr(step0: int, *, peak_lr: float, warmup_steps: int, lr_decay_steps: int, min_lr_ratio: float) -> float:
+    min_lr = peak_lr * min_lr_ratio
+    if lr_decay_steps <= 1:
+        return peak_lr
+    if warmup_steps > 0 and step0 < warmup_steps:
+        return peak_lr * (step0 + 1) / (warmup_steps + 1)
+    decay_end_step0 = lr_decay_steps - 1
+    if step0 >= decay_end_step0:
+        return min_lr
+    decay_ratio = (step0 - warmup_steps) / (decay_end_step0 - warmup_steps)
+    decay_ratio = min(1.0, max(0.0, decay_ratio))
+    coefficient = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+    return min_lr + coefficient * (peak_lr - min_lr)
 
 
 def schedule_factor(step0: int, total: int, warmup: int, schedule: str, min_lr_ratio: float) -> float:
-    if schedule == "constant": return 1.0
-    if warmup > 0 and step0 < warmup:
-        return (step0 + 1) / warmup
-    progress = max(0.0, min(1.0, (step0 - warmup) / max(1, total - warmup - 1)))
-    if schedule == "warmup_linear": return min_lr_ratio + (1 - progress) * (1 - min_lr_ratio)
-    if schedule == "stlr": return max(min_lr_ratio, 1.0 - progress)
+    if schedule == "constant":
+        return 1.0
+    if schedule == "warmup_linear":
+        if total <= 1:
+            return 1.0
+        if warmup > 0 and step0 < warmup:
+            return (step0 + 1) / (warmup + 1)
+        end = total - 1
+        if step0 >= end:
+            return min_lr_ratio
+        progress = max(0.0, min(1.0, (step0 - warmup) / max(1, end - warmup)))
+        return min_lr_ratio + (1 - progress) * (1 - min_lr_ratio)
     if schedule == "warmup_cosine":
-        return min_lr_ratio + 0.5 * (1 + math.cos(math.pi * progress)) * (1 - min_lr_ratio)
+        return nanogpt_cosine_lr(step0, peak_lr=1.0, warmup_steps=warmup, lr_decay_steps=total, min_lr_ratio=min_lr_ratio)
     raise ValueError(f"unknown lr_schedule {schedule}")
 
 
@@ -243,11 +272,12 @@ def optimizer_group_signature(bundle: OptimizerBundle) -> tuple[dict[str, Any], 
 
 
 def apply_lr_schedule(bundle: OptimizerBundle, step0: int, total: int, warmup: int, cfg: TrainConfig) -> list[dict[str, Any]]:
-    factor = schedule_factor(step0, total, warmup, cfg.lr_schedule, cfg.min_lr_ratio)
+    resolved_decay = resolve_lr_decay_steps(total, cfg.lr_decay_steps)
+    factor = schedule_factor(step0, resolved_decay, warmup, cfg.lr_schedule, cfg.min_lr_ratio)
     rows=[]
     for opt_name,opt in bundle.scheduled_optimizers:
         for i,g in enumerate(opt.param_groups):
             peak=float(g.get("peak_lr", g.get("initial_lr", g["lr"])))
             lr=peak*factor; g["lr"]=lr
-            rows.append({"optimizer_step": step0+1, "optimizer_name": opt_name, "group_index": i, "group_name": g.get("group_name", str(i)), "parameter_name": g.get("parameter_name", ""), "role": g.get("role", ""), "depth": g.get("depth", -1), "current_lr": lr, "peak_lr": peak, "minimum_lr": peak*cfg.min_lr_ratio, "layer_lr_multiplier": g.get("layer_lr_multiplier", 1.0), "matrix_specific_multiplier": g.get("matrix_specific_multiplier", 1.0), "time_schedule_factor": factor, "weight_decay": g.get("weight_decay", 0.0), "parameter_count": g.get("parameter_count", 0)})
+            rows.append({"optimizer_step": step0+1, "optimizer_name": opt_name, "group_index": i, "group_name": g.get("group_name", str(i)), "parameter_name": g.get("parameter_name", ""), "role": g.get("role", ""), "depth": g.get("depth", -1), "current_lr": lr, "peak_lr": peak, "minimum_lr": peak*cfg.min_lr_ratio, "layer_lr_multiplier": g.get("layer_lr_multiplier", 1.0), "matrix_specific_multiplier": g.get("matrix_specific_multiplier", 1.0), "normalized_time_factor": factor, "time_schedule_factor": factor, "weight_decay": g.get("weight_decay", 0.0), "parameter_count": g.get("parameter_count", 0), "resolved_warmup_steps": warmup, "resolved_lr_decay_steps": resolved_decay, "min_lr_ratio": cfg.min_lr_ratio, "scheduler_implementation": SCHEDULER_IMPLEMENTATION})
     return rows

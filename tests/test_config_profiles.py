@@ -44,7 +44,7 @@ def test_reproduction_tiny_historical_hyperparameters():
     assert cfg.model.linear_bias is False
     assert cfg.train.max_steps == 100000
     assert cfg.train.eval_interval == 50
-    assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "manual", 0.03, 0.25)
+    assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "flat", 0.01, 0.10)
 
 
 def test_reproduction_fineweb_historical_hyperparameters():
@@ -62,7 +62,7 @@ def test_reproduction_fineweb_historical_hyperparameters():
     assert cfg.model.linear_bias is False
     assert cfg.train.max_steps == 130000
     assert cfg.train.eval_interval == 1000
-    assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "manual", 0.03, 0.25)
+    assert _historical_train_tuple(cfg) == (16, 1, 0.001, 0.005, 0.0, 20, "warmup_cosine", "flat", 0.01, 0.10)
 
 
 def test_resolved_wwpgd_defaults_are_exact():

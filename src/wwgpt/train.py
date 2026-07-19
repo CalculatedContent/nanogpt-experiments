@@ -20,7 +20,7 @@ from wwgpt.config import (
     WWPGDConfig,
     load_config,
 )
-from wwgpt.optim import ARM_DISPLAY, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, resolve_warmup_steps
+from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, resolve_lr_decay_steps, resolve_warmup_steps
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
@@ -438,7 +438,8 @@ def run_scientific_single(
     else:
         target_tokens = parameter_count_used * token_multiplier; steps = max(1, math.ceil(target_tokens / tokens_per_step)); budget_source = "token_multiplier"
     realized_tokens = steps * tokens_per_step
-    resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps)
+    resolved_lr_decay_steps = resolve_lr_decay_steps(steps, cfg.train.lr_decay_steps)
+    resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
     wwpgd_interval = int(ww_interval or cfg.train.wwpgd_interval or eval_interval or cfg.train.eval_interval)
     extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
     reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, stable_seed(seed, pair_id, "train_reader_v1")) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
@@ -485,8 +486,14 @@ def run_scientific_single(
         "evaluation_sampling": cfg.train.evaluation_sampling,
         "evaluation_schedule_version": "random_per_eval_v1",
         "lr_schedule": cfg.train.lr_schedule,
-        "resolved_warmup_steps": resolved_warmup_steps,
+        "scheduler_implementation": SCHEDULER_IMPLEMENTATION,
         "layer_lr": cfg.train.layer_lr,
+        "warmup_steps_requested": cfg.train.warmup_steps,
+        "warmup_ratio": cfg.train.warmup_ratio,
+        "resolved_warmup_steps": resolved_warmup_steps,
+        "lr_decay_steps_requested": cfg.train.lr_decay_steps,
+        "resolved_lr_decay_steps": resolved_lr_decay_steps,
+        "min_lr_ratio": cfg.train.min_lr_ratio,
         "resolved_llrd_gamma": resolved_llrd_gamma,
         "llrd_min_multiplier": cfg.train.llrd_min_multiplier,
         "weight_decay": cfg.train.weight_decay,
@@ -743,6 +750,7 @@ def run_scientific_single(
                 "initialization_hash": init_hash,
                 "compatibility": compatibility,
                 "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION,
+                "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio,
                 "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir),
             }
             save_checkpoint(run_dir, state)
@@ -750,7 +758,7 @@ def run_scientific_single(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _write_csv(run_dir / "metrics.csv", metric_rows, overwrite=resume)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)

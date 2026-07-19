@@ -40,6 +40,7 @@ class TrainConfig:
     epsilon: float = 1e-8
     weight_decay: float = 0.01
     warmup_steps: int | None = None
+    lr_decay_steps: int | None = None
     max_steps: int | None = None
     grad_clip: float = 0.0
     eval_interval: int = 10
@@ -47,9 +48,9 @@ class TrainConfig:
     spectral_interval: int = 10
     eval_batches: int = 20
     lr_schedule: str = "warmup_cosine"
-    warmup_ratio: float = 0.05
+    warmup_ratio: float = 0.01
     min_lr_ratio: float = 0.10
-    layer_lr: str = "llrd"
+    layer_lr: str = "flat"
     llrd_gamma: float | None = None
     llrd_min_multiplier: float = 0.50
     matrix_lr_multipliers: dict[str, float] = field(default_factory=dict)
@@ -64,6 +65,20 @@ class TrainConfig:
     evaluation_sampling: str = "random_per_eval"
     training_sampling: str = "random_window"
     wwpgd_interval: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:
+            raise ValueError(f"unknown lr_schedule {self.lr_schedule}")
+        if self.layer_lr not in {"flat", "llrd", "manual"}:
+            raise ValueError(f"unknown layer_lr {self.layer_lr}")
+        if not 0.0 <= self.warmup_ratio < 1.0:
+            raise ValueError("warmup_ratio must satisfy 0.0 <= warmup_ratio < 1.0")
+        if not 0.0 <= self.min_lr_ratio <= 1.0:
+            raise ValueError("min_lr_ratio must satisfy 0.0 <= min_lr_ratio <= 1.0")
+        if self.warmup_steps is not None and self.warmup_steps < 0:
+            raise ValueError("warmup_steps must be >= 0 when supplied")
+        if self.lr_decay_steps is not None and self.lr_decay_steps < 1:
+            raise ValueError("lr_decay_steps must be >= 1 when supplied")
 
 
 @dataclass(frozen=True)
@@ -133,6 +148,21 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ValueError("schema-v3 requires attention head dimension 64")
 
 
+def validate_train_config(cfg: TrainConfig) -> None:
+    if cfg.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:  # stlr is intentionally retired.
+        raise ValueError(f"unknown lr_schedule {cfg.lr_schedule}")
+    if cfg.layer_lr not in {"flat", "llrd", "manual"}:
+        raise ValueError(f"unknown layer_lr {cfg.layer_lr}")
+    if not 0.0 <= cfg.warmup_ratio < 1.0:
+        raise ValueError("warmup_ratio must satisfy 0.0 <= warmup_ratio < 1.0")
+    if not 0.0 <= cfg.min_lr_ratio <= 1.0:
+        raise ValueError("min_lr_ratio must satisfy 0.0 <= min_lr_ratio <= 1.0")
+    if cfg.warmup_steps is not None and cfg.warmup_steps < 0:
+        raise ValueError("warmup_steps must be >= 0 when supplied")
+    if cfg.lr_decay_steps is not None and cfg.lr_decay_steps < 1:
+        raise ValueError("lr_decay_steps must be >= 1 when supplied")
+
+
 def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     cfg = ExperimentConfig(model=level_model_config(level))
     if path is None:
@@ -146,4 +176,5 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     train = TrainConfig(**{**asdict(cfg.train), **{k: v for k, v in data.get("train", {}).items() if k in train_keys}})
     wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **{k: v for k, v in data.get("wwpgd", {}).items() if k in wwpgd_keys}})
     rest: dict[str, Any] = {k: v for k, v in data.items() if k in experiment_keys}
+    validate_train_config(train)
     return ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)

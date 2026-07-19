@@ -25,7 +25,9 @@ train:
   eval_batches: 20
   training_sampling: random_window
   lr_schedule: warmup_cosine
-  layer_lr: manual
-  warmup_ratio: 0.03
-  min_lr_ratio: 0.25
+  layer_lr: flat
+  warmup_ratio: 0.01
+  min_lr_ratio: 0.1
+  warmup_steps: null
+  lr_decay_steps: null
 composite_spectral_analysis_enabled: false

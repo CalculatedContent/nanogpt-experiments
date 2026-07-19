@@ -21,3 +21,9 @@ The corrected WW-PGD arm is named `adamw_wwpgd_reference` and is pinned to `Calc
 Eligible projected layers are only transformer matrices named `blocks.*.attn.c_attn`, `blocks.*.attn.c_proj`, `blocks.*.mlp.0`, and `blocks.*.mlp.2`. Token embeddings, position embeddings, tied output weights, LayerNorm parameters, and biases are excluded.
 
 Evaluation uses fixed held-out validation and fixed training probes, identified by hashes in metrics and manifests. Validation readers never concatenate training tokens.
+
+## Learning-rate methodology
+
+The nanoGPT-compatible baseline uses one global normalized learning-rate schedule across all layers. The default schedule is linear warmup followed by cosine decay, with the minimum learning rate equal to 10% of each optimizer group's peak learning rate. Unless `lr_decay_steps` is supplied explicitly, decay spans the full resolved optimizer-step horizon; the project default derives warmup as 1% of that horizon. Official nanoGPT configurations may use different explicit warmup lengths, so this 1% value is a configurable project default rather than a fixed nanoGPT constant.
+
+Flat layer learning rates are the default nanoGPT-compatible layer policy. LLRD remains available only as an explicit research ablation, and the prior hard-coded manual layer multipliers are retained only for historical ablation reruns. Paired WW-PGD comparisons always use identical optimizer parameter groups, peak learning rates, per-step learning-rate rows, betas, epsilon, and weight-decay signatures; WW-PGD only adds the external projection at its scheduled projection steps.
