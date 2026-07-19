@@ -226,3 +226,65 @@ def test_diagnostics_do_not_change_later_training_batches():
     torch.manual_seed(5); m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=20))
     fallback_spectral_summary(m)
     assert all((a == b).all() for a, b in zip(ref.next_batch(4), diag.next_batch(4), strict=True))
+
+
+def _tiny_scientific_fixture():
+    from wwgpt.config import ExperimentConfig, TrainConfig, WWPGDConfig
+    from wwgpt.data import TokenData
+    from wwgpt.train import _state_hash, resolved_stochastic_seeds
+
+    model_cfg = ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=32, dropout=0.25)
+    train_cfg = TrainConfig(batch_size=2, gradient_accumulation=1, max_steps=1, eval_interval=1, checkpoint_interval=99, spectral_interval=99, eval_batches=1, training_sampling="random_window", evaluation_sampling="random_per_eval", weight_decay=0.123)
+    cfg = ExperimentConfig(model=model_cfg, train=train_cfg, wwpgd=WWPGDConfig(extension="none", enabled=False), composite_spectral_analysis_enabled=False)
+    data = TokenData(
+        train=[i % 32 for i in range(400)],
+        val=[i % 32 for i in range(100, 260)],
+        vocab_size=32,
+        corpus_hash="fixture-corpus",
+        data_manifest={"dataset_name":"fixture","dataset_config":"fixture","dataset_revision":"fixture","realized_tokens":8},
+        tokenizer_manifest={"tokenizer_hash":"fixture-tokenizer"},
+    )
+    seed = resolved_stochastic_seeds(1234, 0, 20)["model_init_seed"]
+    torch.manual_seed(seed)
+    init_model = GPT(model_cfg)
+    init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
+    return cfg, data, init_state, _state_hash(init_state)
+
+
+def test_fresh_scientific_runs_ignore_storage_ids_for_initial_state_batches_and_losses(tmp_path: Path, monkeypatch):
+    from wwgpt.train import run_scientific_single
+
+    monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
+    cfg, data, init_state, init_hash = _tiny_scientific_fixture()
+    run_a = run_scientific_single(tmp_path / "pair_a", "adamw", 1234, cfg, data, "pair_a", init_state, init_hash, 0, 20, device="cpu")
+    run_b = run_scientific_single(tmp_path / "pair_b", "adamw", 1234, cfg, data, "pair_b", init_state, init_hash, 0, 20, device="cpu")
+
+    man_a = json.loads((run_a / "manifest.json").read_text())
+    man_b = json.loads((run_b / "manifest.json").read_text())
+    metrics_a = pd.read_csv(run_a / "metrics.csv")
+    metrics_b = pd.read_csv(run_b / "metrics.csv")
+    assert run_a != run_b and man_a["pair_id"] != man_b["pair_id"]
+    assert man_a["initialization_hash"] == man_b["initialization_hash"]
+    assert man_a["initial_minibatch_indices"] == man_b["initial_minibatch_indices"]
+    assert man_a["resolved_stochastic_seeds"] == man_b["resolved_stochastic_seeds"]
+    assert metrics_a.loc[0, "train_minibatch_loss"] == pytest.approx(metrics_b.loc[0, "train_minibatch_loss"])
+    assert metrics_a.loc[0, "train_loss"] == pytest.approx(metrics_b.loc[0, "train_loss"])
+    assert metrics_a.loc[0, "val_loss"] == pytest.approx(metrics_b.loc[0, "val_loss"])
+
+
+def test_paired_arms_share_initialization_reader_dropout_and_weight_decay(tmp_path: Path, monkeypatch):
+    from dataclasses import replace
+    from wwgpt.train import run_scientific_single
+
+    monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
+    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kwargs: [])
+    cfg, data, init_state, init_hash = _tiny_scientific_fixture()
+    adamw = run_scientific_single(tmp_path / "pair", "adamw", 1234, replace(cfg, wwpgd=replace(cfg.wwpgd, extension="none", enabled=False)), data, "pair", init_state, init_hash, 0, 20, device="cpu")
+    wwpgd = run_scientific_single(tmp_path / "pair", "adamw", 1234, replace(cfg, wwpgd=replace(cfg.wwpgd, extension="wwpgd", enabled=True)), data, "pair", init_state, init_hash, 0, 20, device="cpu")
+
+    man_a = json.loads((adamw / "manifest.json").read_text())
+    man_w = json.loads((wwpgd / "manifest.json").read_text())
+    assert man_a["initialization_hash"] == man_w["initialization_hash"]
+    assert man_a["initial_minibatch_indices"] == man_w["initial_minibatch_indices"]
+    assert man_a["resolved_stochastic_seeds"]["dropout_seed"] == man_w["resolved_stochastic_seeds"]["dropout_seed"]
+    assert man_a["weight_decay"] == man_w["weight_decay"] == pytest.approx(0.123)
