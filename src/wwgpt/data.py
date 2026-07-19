@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 from tokenizers import Tokenizer
@@ -42,13 +42,14 @@ def _source_identifiers(cfg: ExperimentConfig, documents: list[str] | None = Non
 
 @dataclass(frozen=True)
 class TokenData:
-    train: list[int]
-    val: list[int]
+    train: Sequence[int] | np.ndarray
+    val: Sequence[int] | np.ndarray
     vocab_size: int
     corpus_hash: str
     root: Path | None = None
     data_manifest: dict[str, object] | None = None
     tokenizer_manifest: dict[str, object] | None = None
+    test: Sequence[int] | np.ndarray | None = None
 
 
 TINY_SHAKESPEARE_URL = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
@@ -176,6 +177,66 @@ def _train_bpe(train_docs: list[str], vocab_size: int) -> Tokenizer:
 def _hash_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
+def token_dtype_for_vocab(vocab_size: int) -> np.dtype:
+    return np.dtype(np.uint16 if vocab_size <= np.iinfo(np.uint16).max + 1 else np.uint32)
+
+
+def split_for_doc3(text: str, val_fraction: float = 0.1, test_fraction: float = 0.1) -> str:
+    norm = " ".join(text.split())
+    h = int(sha256_bytes(norm.encode()), 16)
+    bucket = h % 10_000
+    test_cut = int(test_fraction * 10_000)
+    val_cut = test_cut + int(val_fraction * 10_000)
+    if bucket < test_cut:
+        return "test"
+    if bucket < val_cut:
+        return "val"
+    return "train"
+
+
+class IncrementalTokenFileWriter:
+    def __init__(self, path: Path, dtype: np.dtype):
+        self.path = path
+        self.dtype = np.dtype(dtype)
+        self.count = 0
+        self._fh = path.open("wb")
+
+    def append(self, ids: Sequence[int]) -> None:
+        if not ids:
+            return
+        arr = np.asarray(ids, dtype=self.dtype)
+        arr.tofile(self._fh)
+        self.count += int(arr.size)
+
+    def close(self) -> None:
+        self._fh.close()
+
+    def manifest(self) -> dict[str, object]:
+        return {"path": self.path.name, "tokens": self.count, "shape": [self.count], "sha256": _hash_file(self.path)}
+
+
+def _open_token_memmap(path: Path, dtype_name: str, count: int) -> np.memmap:
+    return np.memmap(path, dtype=np.dtype(dtype_name), mode="r", shape=(count,))
+
+
+def _validate_memmap_manifest(prep: Path, dm: dict[str, object]) -> None:
+    if dm.get("storage_format") != "raw_memmap_v1":
+        raise RuntimeError(f"obsolete prepared-data format in {prep}: expected storage_format=raw_memmap_v1 with train/validation/test .bin token files; rebuild with `wwgpt prepare-data`")
+    if "dtype" not in dm or "splits" not in dm:
+        raise RuntimeError(f"invalid prepared-data manifest in {prep}: missing dtype/splits; rebuild with `wwgpt prepare-data`")
+    for split in ("train", "val", "test"):
+        info = dm["splits"].get(split)
+        if not info:
+            raise RuntimeError(f"invalid prepared-data manifest in {prep}: missing {split} split")
+        path = prep / str(info["path"])
+        if not path.exists():
+            raise RuntimeError(f"invalid prepared-data manifest in {prep}: missing token file {path.name}")
+        expected_bytes = int(info["tokens"]) * np.dtype(str(dm["dtype"])).itemsize
+        if path.stat().st_size != expected_bytes:
+            raise RuntimeError(f"invalid prepared-data manifest in {prep}: {path.name} size does not match token count/dtype")
+        if _hash_file(path) != info.get("sha256"):
+            raise RuntimeError(f"invalid prepared-data manifest in {prep}: sha256 mismatch for {path.name}")
+
 
 def _log_prepare_progress(message: str) -> None:
     print(f"[wwgpt prepare-data] {message}", file=sys.stderr, flush=True)
@@ -193,66 +254,110 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     needed_train = realized + 1
     prep = unique_dir(data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}", "prepared")
     _log_prepare_progress(f"starting level={level} token_multiplier={token_multiplier} requested_tokens={requested} realized_tokens={realized} output={prep}")
-    train_docs: list[str] = []; val_docs: list[str] = []
-    corpus = []
+    dtype = token_dtype_for_vocab(cfg.model.vocab_size)
     source = docs if docs is not None else _iter_fineweb(cfg)
-    tok: Tokenizer | None = None; train_tokens: list[int] = []; val_tokens: list[int] = []
+    train_docs: list[str] = []
+    pending: list[tuple[str, str, str]] = []
+    tok: Tokenizer | None = None
+    writers: dict[str, IncrementalTokenFileWriter] | None = None
+    doc_counts = {"train": 0, "val": 0, "test": 0}
+    doc_hashes = {"train": [], "val": [], "test": []}
+    corpus_hashes: list[str] = []
     start_time = time.monotonic(); last_log_time = start_time; last_log_docs = 0
+
+    def emit(split: str, norm: str) -> None:
+        assert tok is not None and writers is not None
+        ids = tok.encode(norm).ids
+        eos = tok.token_to_id("<eos>")
+        if eos is not None:
+            ids = ids + [int(eos)]
+        if split == "train" and writers["train"].count >= needed_train:
+            return
+        if split == "train" and writers["train"].count + len(ids) > needed_train:
+            ids = ids[: needed_train - writers["train"].count]
+        writers[split].append(ids)
+
     for text in source:
-        norm = " ".join(text.split())
-        corpus.append(norm)
-        if split_for_doc(norm) == "val": val_docs.append(norm)
-        else: train_docs.append(norm)
-        if tok is None and len(train_docs) >= 128:
-            _log_prepare_progress(f"training BPE tokenizer after {len(train_docs)} train docs and {len(val_docs)} validation docs")
-            tok = _train_bpe(train_docs, cfg.model.vocab_size)
-            _log_prepare_progress(f"BPE tokenizer ready vocab_size={cfg.model.vocab_size}; collecting tokens")
-        if tok is not None and not train_tokens:
-            train_tokens = [i for d in train_docs for i in tok.encode(d).ids]
-            val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
-        elif tok is not None and len(train_tokens) < realized:
-            # Tokenize each whole document at most once; never wrap.
-            if split_for_doc(norm) == "train": train_tokens.extend(tok.encode(norm).ids)
-            elif len(val_tokens) < min_validation_tokens: val_tokens.extend(tok.encode(norm).ids)
-        now = time.monotonic()
-        docs_seen = len(train_docs) + len(val_docs)
-        if now - last_log_time >= 30 or docs_seen - last_log_docs >= 10_000:
+        norm = " ".join(str(text).split())
+        if not norm:
+            continue
+        dh = sha256_bytes(norm.encode())
+        split = split_for_doc3(norm)
+        corpus_hashes.append(dh); doc_hashes[split].append(dh); doc_counts[split] += 1
+        if tok is None:
+            pending.append((split, norm, dh))
+            if split == "train":
+                train_docs.append(norm)
+            if len(train_docs) >= 128:
+                _log_prepare_progress(f"training BPE tokenizer after {doc_counts['train']} train docs and {doc_counts['val']} validation docs and {doc_counts['test']} test docs")
+                tok = _train_bpe(train_docs, cfg.model.vocab_size)
+                writers = {sp: IncrementalTokenFileWriter(prep / f"{sp}_tokens.bin", dtype) for sp in ("train", "val", "test")}
+                _log_prepare_progress(f"BPE tokenizer ready vocab_size={cfg.model.vocab_size}; streaming tokens to memmap files")
+                for ps, pn, _ in pending:
+                    emit(ps, pn)
+                pending.clear()
+        else:
+            emit(split, norm)
+        now = time.monotonic(); docs_seen = sum(doc_counts.values())
+        if writers and (now - last_log_time >= 30 or docs_seen - last_log_docs >= 10_000):
             elapsed = max(now - start_time, 1e-9)
-            _log_prepare_progress(f"progress docs={docs_seen} train_docs={len(train_docs)} val_docs={len(val_docs)} train_tokens={len(train_tokens)}/{needed_train} val_tokens={len(val_tokens)}/{min_validation_tokens} elapsed_s={elapsed:.1f} docs_per_s={docs_seen / elapsed:.1f}")
+            _log_prepare_progress(f"progress docs={docs_seen} train_docs={doc_counts['train']} val_docs={doc_counts['val']} test_docs={doc_counts['test']} train_tokens={writers['train'].count}/{needed_train} val_tokens={writers['val'].count}/{min_validation_tokens} elapsed_s={elapsed:.1f} docs_per_s={docs_seen / elapsed:.1f}")
             last_log_time = now; last_log_docs = docs_seen
-        if len(train_tokens) >= realized and len(val_tokens) >= min_validation_tokens:
-            _log_prepare_progress(f"collected enough tokens after docs={docs_seen}: train_tokens={len(train_tokens)} val_tokens={len(val_tokens)}")
+        if writers and writers["train"].count >= needed_train and writers["val"].count >= min_validation_tokens and writers["test"].count > 0:
+            _log_prepare_progress(f"collected enough tokens after docs={docs_seen}: train_tokens={writers['train'].count} val_tokens={writers['val'].count} test_tokens={writers['test'].count}")
             break
     if tok is None:
         if not train_docs:
             raise ValueError("insufficient unique training documents to train BPE tokenizer")
         tok = _train_bpe(train_docs, cfg.model.vocab_size)
-        train_tokens = [i for d in train_docs for i in tok.encode(d).ids]
-        val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
-    _log_prepare_progress(f"finished streaming docs={len(train_docs) + len(val_docs)} train_docs={len(train_docs)} val_docs={len(val_docs)} train_tokens={len(train_tokens)} val_tokens={len(val_tokens)}")
-    if not val_tokens and val_docs:
-        val_tokens = [i for d in val_docs for i in tok.encode(d).ids]
-    if len(train_tokens) < needed_train:
-        raise ValueError(f"insufficient unique training tokens: {len(train_tokens)} < {needed_train}; refusing to wrap or repeat")
-    if not val_tokens:
+        writers = {sp: IncrementalTokenFileWriter(prep / f"{sp}_tokens.bin", dtype) for sp in ("train", "val", "test")}
+        for ps, pn, _ in pending:
+            emit(ps, pn)
+        pending.clear()
+    assert writers is not None
+    for w in writers.values():
+        w.close()
+    if writers["train"].count < needed_train:
+        raise ValueError(f"insufficient unique training tokens: {writers['train'].count} < {needed_train}; refusing to wrap or repeat")
+    if writers["val"].count < 1:
         raise ValueError("insufficient validation tokens")
-    train_tokens = train_tokens[:needed_train]
-    np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
+    if writers["test"].count < 1:
+        raise ValueError("insufficient test tokens")
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
-    corpus_hash = sha256_bytes("\n".join(corpus).encode())
-    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, corpus), "preparation_code_git_commit": _preparation_git_commit(), "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
-    tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "tokenizer_name": "tokenizers.ByteLevelBPE-trained-from-configured-training-split", "tokenizer_revision": "prepared-locally", "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "vocabulary_hash": tokenizer_hash, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_split": cfg.dataset_split, "dataset_revision": cfg.dataset_revision, "preparation_code_git_commit": _preparation_git_commit()}
+    corpus_hash = sha256_bytes("\n".join(corpus_hashes).encode())
+    splits_manifest = {sp: writers[sp].manifest() | {"documents": doc_counts[sp], "document_sha256": doc_hashes[sp]} for sp in ("train", "val", "test")}
+    data_manifest = {"scientific_schema_version": 4, "storage_format": "raw_memmap_v1", "dtype": dtype.name, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, None), "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-3way", "eot_between_documents": tok.token_to_id("<eos>"), "train_document_count": doc_counts["train"], "validation_document_count": doc_counts["val"], "test_document_count": doc_counts["test"], "unique_train_tokens": writers["train"].count, "validation_tokens": writers["val"].count, "test_tokens": writers["test"].count, "token_counts": {sp: writers[sp].count for sp in writers}, "shapes": {sp: [writers[sp].count] for sp in writers}, "splits": splits_manifest, "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "tokenizer_name": "tokenizers.ByteLevelBPE-trained-from-configured-training-split", "tokenizer_revision": "prepared-locally", "tokenizer_identity": {"type": "tokenizers", "model": "BPE", "pre_tokenizer": "ByteLevel", "hash": tokenizer_hash}, "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "vocabulary_hash": tokenizer_hash, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_split": cfg.dataset_split, "dataset_revision": cfg.dataset_revision, "preparation_code_git_commit": _preparation_git_commit()}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
-    _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
-    return TokenData(train_tokens, val_tokens, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest)
-
+    _validate_memmap_manifest(prep, data_manifest)
+    _log_prepare_progress(f"wrote train_tokens.bin, val_tokens.bin, test_tokens.bin, tokenizer.json, and manifests under {prep}")
+    train = _open_token_memmap(prep / "train_tokens.bin", dtype.name, writers["train"].count)
+    val = _open_token_memmap(prep / "val_tokens.bin", dtype.name, writers["val"].count)
+    test = _open_token_memmap(prep / "test_tokens.bin", dtype.name, writers["test"].count)
+    return TokenData(train, val, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest, test)
 
 def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier: int) -> TokenData:
     roots = sorted((data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}").glob("prepared_*"))
+    obsolete: list[Path] = []
     for prep in reversed(roots):
         dm = json.loads((prep / "data_manifest.json").read_text()); tm = json.loads((prep / "tokenizer_manifest.json").read_text())
-        if dm.get("valid_for_science") is True and dm.get("smoke_test") is False and tm.get("tokenizer_type") in {"BPE", "custom_bpe_scaling"} and (int(dm.get("scientific_schema_version", 2)) < 3 or dm.get("model_architecture_version") == load_config(None, level).model.model_architecture_version):
-            return TokenData(np.load(prep / "train_tokens.npy").astype(int).tolist(), np.load(prep / "val_tokens.npy").astype(int).tolist(), int(tm.get("vocabulary_size", tm.get("vocab_size", 8192))), str(dm["corpus_hash"]), prep, dm, tm)
+        if dm.get("valid_for_science") is not True or dm.get("smoke_test") is not False:
+            continue
+        if tm.get("tokenizer_type") not in {"BPE", "custom_bpe_scaling"}:
+            continue
+        if int(dm.get("scientific_schema_version", 2)) >= 3 and dm.get("model_architecture_version") != load_config(None, level).model.model_architecture_version:
+            continue
+        if dm.get("storage_format") != "raw_memmap_v1":
+            obsolete.append(prep)
+            continue
+        _validate_memmap_manifest(prep, dm)
+        dtype = str(dm["dtype"]); splits = dm["splits"]
+        train = _open_token_memmap(prep / splits["train"]["path"], dtype, int(splits["train"]["tokens"]))
+        val = _open_token_memmap(prep / splits["val"]["path"], dtype, int(splits["val"]["tokens"]))
+        test = _open_token_memmap(prep / splits["test"]["path"], dtype, int(splits["test"]["tokens"]))
+        return TokenData(train, val, int(tm.get("vocabulary_size", tm.get("vocab_size", 8192))), str(dm["corpus_hash"]), prep, dm, tm, test)
+    if obsolete:
+        raise RuntimeError(f"obsolete prepared-data format found at {obsolete[-1]}: legacy .npy/list token storage cannot be used by memmap training; rebuild with `wwgpt prepare-data`")
     raise FileNotFoundError("no compatible scientific prepared data found; run scripts/download_data.sh first")
 
 
@@ -268,7 +373,7 @@ class NonRepeatingTokenReader:
 
 
 class RandomWindowTokenReader:
-    def __init__(self, tokens: list[int], block_size: int, seed: int):
+    def __init__(self, tokens: Sequence[int] | np.ndarray, block_size: int, seed: int):
         self.tokens = tokens
         self.block_size = block_size
         self.rng = np.random.default_rng(seed)
@@ -276,7 +381,7 @@ class RandomWindowTokenReader:
     def next_batch(self, batch_size: int) -> tuple[np.ndarray, np.ndarray]:
         if len(self.tokens) < self.block_size + 1:
             raise ValueError("insufficient tokens for random windows")
-        starts = self.rng.integers(0, len(self.tokens) - self.block_size - 1, size=batch_size)
+        starts = self.rng.integers(0, len(self.tokens) - self.block_size, size=batch_size)
         x = np.empty((batch_size, self.block_size), dtype=np.int64)
         y = np.empty((batch_size, self.block_size), dtype=np.int64)
         for i, st in enumerate(starts):
@@ -301,7 +406,7 @@ class RandomWindowTokenReader:
             raise ValueError("RandomWindowTokenReader has no sequential position")
 
 
-def fixed_probe(tokens: list[int], block_size: int, batch_size: int, eval_batches: int) -> tuple[np.ndarray, np.ndarray, str]:
+def fixed_probe(tokens: Sequence[int] | np.ndarray, block_size: int, batch_size: int, eval_batches: int) -> tuple[np.ndarray, np.ndarray, str]:
     need = batch_size * block_size * eval_batches + 1
     if len(tokens) < need:
         raise ValueError(f"insufficient probe tokens: {len(tokens)} < {need}")
@@ -315,12 +420,12 @@ def stable_seed(*parts: object) -> int:
     return int(sha256_bytes("|".join(map(str, parts)).encode())[:16], 16) % (2**63 - 1)
 
 
-def random_probe(tokens: list[int], block_size: int, batch_size: int, eval_batches: int, seed: int) -> tuple[np.ndarray, np.ndarray, str]:
+def random_probe(tokens: Sequence[int] | np.ndarray, block_size: int, batch_size: int, eval_batches: int, seed: int) -> tuple[np.ndarray, np.ndarray, str]:
     need = block_size + 1
     if len(tokens) < need:
         raise ValueError(f"insufficient probe tokens: {len(tokens)} < {need}")
     rng = np.random.default_rng(seed)
-    starts = rng.integers(0, len(tokens) - block_size - 1, size=batch_size * eval_batches)
+    starts = rng.integers(0, len(tokens) - block_size, size=batch_size * eval_batches)
     x = np.empty((eval_batches, batch_size, block_size), dtype=np.int64)
     y = np.empty((eval_batches, batch_size, block_size), dtype=np.int64)
     used = bytearray()

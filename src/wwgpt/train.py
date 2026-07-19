@@ -64,10 +64,10 @@ def resolved_stochastic_seeds(user_seed: int, level: int, token_multiplier: int,
     return seeds
 
 
-def _initial_minibatch_indices(tokens: list[int], block_size: int, batch_size: int, sampling: str, reader_seed: int) -> list[int]:
+def _initial_minibatch_indices(tokens, block_size: int, batch_size: int, sampling: str, reader_seed: int) -> list[int]:
     if sampling == "random_window":
         rng = np.random.default_rng(reader_seed)
-        return [int(x) for x in rng.integers(0, len(tokens) - block_size - 1, size=batch_size)]
+        return [int(x) for x in rng.integers(0, len(tokens) - block_size, size=batch_size)]
     return list(range(0, batch_size * block_size, block_size))
 
 def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
@@ -495,7 +495,8 @@ def run_scientific_single(
     initial_minibatch_indices = _initial_minibatch_indices(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.training_sampling, resolved_seeds["train_reader_seed"])
     validation_probe_hash = ""
     training_probe_hash = ""
-    assert not np.shares_memory(np.array(data.val), np.array(data.train))
+    if data.data_manifest and data.data_manifest.get("storage_format") not in (None, "raw_memmap_v1"):
+        raise RuntimeError("obsolete prepared-data format: rebuild with `wwgpt prepare-data` to create memmap token files")
     man = {
         "smoke_test": False,
         "valid_for_science": True,
