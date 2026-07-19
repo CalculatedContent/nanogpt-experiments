@@ -18,6 +18,16 @@ from wwgpt.train import run_scientific_single
 from wwgpt.utils import sha256_bytes
 
 
+def _fake_tiktoken(monkeypatch):
+    mod = types.ModuleType("tiktoken")
+    class Encoding:
+        n_vocab = 50257
+        def encode_ordinary(self, text):
+            return [(i % 255) for i, _ in enumerate(text, start=1)]
+    mod.get_encoding = lambda name: Encoding()
+    monkeypatch.setitem(sys.modules, "tiktoken", mod)
+
+
 def _fake_ww_pgd(monkeypatch, calls):
     mod = types.ModuleType("ww_pgd")
     class WWTailConfig:
@@ -31,7 +41,8 @@ def _fake_ww_pgd(monkeypatch, calls):
     monkeypatch.setitem(sys.modules, "ww_pgd", mod)
 
 
-def test_three_data_modes_and_custom_bpe_keeps_tokenizer_training_docs(tmp_path):
+def test_three_data_modes_and_custom_bpe_keeps_tokenizer_training_docs(tmp_path, monkeypatch):
+    _fake_tiktoken(monkeypatch)
     tiny = prepare_tiny_shakespeare_char_reproduction(tmp_path, text="abcdefghij" * 10)
     assert tiny.data_manifest["data_mode"] == "tiny_shakespeare_char_reproduction"
     assert len(tiny.train) == 90 and len(tiny.val) == 10

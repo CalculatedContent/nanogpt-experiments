@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -17,6 +18,26 @@ from wwgpt.config import ExperimentConfig, load_config
 from wwgpt.model import GPT
 from wwgpt.scaling import plan_budget
 from wwgpt.utils import sha256_bytes, unique_dir, write_json
+
+
+def _preparation_git_commit() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parents[2], text=True).strip()
+    except Exception:
+        return "unknown"
+
+
+def _source_identifiers(cfg: ExperimentConfig, documents: list[str] | None = None) -> dict[str, object]:
+    ids: dict[str, object] = {
+        "dataset_name": cfg.dataset_name,
+        "dataset_subset": cfg.dataset_subset or cfg.dataset_config,
+        "dataset_config": cfg.dataset_config,
+        "dataset_split": cfg.dataset_split,
+        "dataset_revision": cfg.dataset_revision,
+    }
+    if documents is not None:
+        ids["document_sha256"] = [sha256_bytes(d.encode()) for d in documents]
+    return ids
 
 
 @dataclass(frozen=True)
@@ -57,15 +78,21 @@ def prepare_tiny_shakespeare_char_reproduction(data_root: Path, text: str | None
 
 
 def prepare_fineweb_gpt2_reproduction(data_root: Path, cfg: ExperimentConfig, docs: Iterable[str] | None = None) -> TokenData:
-    import tiktoken
     try:
-        enc = tiktoken.get_encoding("gpt2")
+        import tiktoken
+        tokenizer_name = cfg.tokenizer or "gpt2"
+        if tokenizer_name != "gpt2":
+            raise ValueError(f"fineweb_gpt2_reproduction requires tokenizer=gpt2, got {tokenizer_name!r}")
+        enc = tiktoken.get_encoding(tokenizer_name)
         encode = enc.encode_ordinary
         n_vocab = enc.n_vocab
-    except Exception:
-        # Offline fallback for tests when tiktoken cannot download its GPT-2 merge files.
-        encode = lambda text: [ord(ch) % 256 for ch in text]
-        n_vocab = 50257
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load configured tokenizer {cfg.tokenizer or 'gpt2'!r} "
+            f"(revision={cfg.tokenizer_revision or 'builtin-tiktoken-gpt2'!r}). "
+            "Install tiktoken data/cache for this tokenizer or choose a loadable tokenizer in the experiment config; "
+            "refusing to change tokenization silently."
+        ) from exc
     prep = unique_dir(data_root / "fineweb_gpt2_reproduction", "prepared")
     source = docs if docs is not None else _iter_fineweb(cfg)
     train_tokens: list[int] = []; val_tokens: list[int] = []; corpus: list[str] = []
@@ -85,8 +112,8 @@ def prepare_fineweb_gpt2_reproduction(data_root: Path, cfg: ExperimentConfig, do
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
     tok_hash = sha256_bytes(b"tiktoken:gpt2:eot:50256")
-    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_gpt2_reproduction", "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "document_assignment": "sha256-normalized-content-with-configured-seed", "eot_between_documents": FINEWEB_GPT2_EOT, "train_document_count": train_docs, "validation_document_count": val_docs, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
-    tokenizer_manifest = {"tokenizer_type": "tiktoken_gpt2", "vocab_size": n_vocab, "vocabulary_size": n_vocab, "tokenizer_hash": tok_hash, "special_token_ids": {"<|endoftext|>": FINEWEB_GPT2_EOT}, "dataset_revision": cfg.dataset_revision}
+    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_gpt2_reproduction", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, corpus), "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-with-configured-seed", "eot_between_documents": FINEWEB_GPT2_EOT, "train_document_count": train_docs, "validation_document_count": val_docs, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
+    tokenizer_manifest = {"tokenizer_type": "tiktoken_gpt2", "tokenizer_name": cfg.tokenizer or "gpt2", "tokenizer_revision": cfg.tokenizer_revision or "builtin-tiktoken-gpt2", "vocab_size": n_vocab, "vocabulary_size": n_vocab, "vocabulary_hash": tok_hash, "tokenizer_hash": tok_hash, "special_token_ids": {"<|endoftext|>": FINEWEB_GPT2_EOT}, "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     return TokenData(train_tokens, val_tokens, n_vocab, corpus_hash, prep, data_manifest, tokenizer_manifest)
 
@@ -125,7 +152,14 @@ def prepare_local_text(data_root: Path, texts: list[str], min_train_tokens: int 
 
 def _iter_fineweb(cfg: ExperimentConfig) -> Iterable[str]:
     from datasets import load_dataset
-    ds = load_dataset(cfg.dataset_name, cfg.dataset_config, split="train", revision=cfg.dataset_revision, streaming=True)
+    try:
+        ds = load_dataset(cfg.dataset_name, cfg.dataset_subset or cfg.dataset_config, split=cfg.dataset_split, revision=cfg.dataset_revision, streaming=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to resolve dataset revision {cfg.dataset_revision!r} for "
+            f"{cfg.dataset_name!r} subset={cfg.dataset_subset or cfg.dataset_config!r} split={cfg.dataset_split!r}; "
+            "refusing to fall back to main. Check the pinned revision in the experiment config."
+        ) from exc
     for row in ds:
         text = " ".join(str(row.get("text", "")).split())
         if text:
@@ -206,8 +240,8 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
-    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": "train", "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
-    tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_revision": cfg.dataset_revision}
+    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, corpus), "preparation_code_git_commit": _preparation_git_commit(), "train_document_count": len(train_docs), "validation_document_count": len(val_docs), "unique_train_tokens": len(train_tokens), "validation_tokens": len(val_tokens), "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "tokenizer_name": "tokenizers.ByteLevelBPE-trained-from-configured-training-split", "tokenizer_revision": "prepared-locally", "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "vocabulary_hash": tokenizer_hash, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_split": cfg.dataset_split, "dataset_revision": cfg.dataset_revision, "preparation_code_git_commit": _preparation_git_commit()}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _log_prepare_progress(f"wrote train_tokens.npy, val_tokens.npy, tokenizer.json, and manifests under {prep}")
     return TokenData(train_tokens, val_tokens, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest)
