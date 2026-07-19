@@ -105,7 +105,7 @@ class WWPGDConfig:
     cayley_eta: float = 0.25
     use_detx: bool = True
     warmup_events: int = 0
-    ramp_events: int = 5
+    ramp_events: int = 0
 
 
 @dataclass(frozen=True)

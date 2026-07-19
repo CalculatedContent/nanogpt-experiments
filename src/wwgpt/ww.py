@@ -84,18 +84,34 @@ class ExternalWWTailConfigSpec:
     min_tail: int = 5
     use_detx: bool = True
     warmup_epochs: int = 0
-    ramp_epochs: int = 5
+    ramp_epochs: int = 0
     verbose: bool = False
 
 
 WWTailConfig = ExternalWWTailConfigSpec
 
 
+def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSpec:
+    return ExternalWWTailConfigSpec(
+        enable_tail_pgd=True,
+        q=float(getattr(cfg, "q")),
+        blend_eta=float(getattr(cfg, "blend_eta")),
+        cayley_eta=float(getattr(cfg, "cayley_eta")),
+        min_tail=int(getattr(cfg, "min_tail")),
+        use_detx=bool(getattr(cfg, "use_detx")),
+        warmup_epochs=int(getattr(cfg, "warmup_events")),
+        ramp_epochs=int(getattr(cfg, "ramp_events")),
+        verbose=bool(getattr(cfg, "verbose", False)),
+    )
+
+
 def resolved_external_wwpgd_config() -> ExternalWWTailConfigSpec:
+    # Deprecated compatibility shim. New code should pass the resolved experiment
+    # WWPGDConfig through external_wwpgd_config_from_experiment().
     return ExternalWWTailConfigSpec()
 
 
-def external_wwpgd_manifest_fields(enabled: bool = True) -> dict[str, object]:
+def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object | None = None) -> dict[str, object]:
     if not enabled:
         return {
             "wwpgd_package": "",
@@ -103,7 +119,9 @@ def external_wwpgd_manifest_fields(enabled: bool = True) -> dict[str, object]:
             "wwpgd_commit": "",
             "wwpgd_implementation": "none",
         }
-    cfg = resolved_external_wwpgd_config()
+    cfg = external_wwpgd_config_from_experiment(requested_cfg) if requested_cfg is not None else resolved_external_wwpgd_config()
+    requested = dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
+    resolved = dict(vars(cfg))
     return {
         "wwpgd_package": "ww_pgd",
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
@@ -116,6 +134,8 @@ def external_wwpgd_manifest_fields(enabled: bool = True) -> dict[str, object]:
         "warmup": cfg.warmup_epochs,
         "ramp": cfg.ramp_epochs,
         "use_detx": cfg.use_detx,
+        "requested_external_wwpgd_config": requested,
+        "resolved_external_wwpgd_config": resolved,
     }
 
 
