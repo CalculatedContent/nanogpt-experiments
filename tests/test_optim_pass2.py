@@ -50,8 +50,8 @@ def test_exact_manual_multipliers():
 
 def test_warmup_peak_midpoint_and_final_cosine_lr():
     min_ratio = 0.25
-    assert schedule_factor(0, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(1 / 3)
-    assert schedule_factor(2, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(1.0)
+    assert schedule_factor(0, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(1 / 4)
+    assert schedule_factor(3, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(1.0)
     assert schedule_factor(52, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(0.625)
     assert schedule_factor(101, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(min_ratio)
 
@@ -64,7 +64,7 @@ def test_schedule_updates_all_muon_and_auxiliary_adamw_groups():
     assert len(rows) == sum(len(opt.param_groups) for _, opt in bundle.scheduled_optimizers)
     for _, opt in bundle.scheduled_optimizers:
         for group in opt.param_groups:
-            assert group["lr"] == pytest.approx(group["peak_lr"] * 0.5)
+            assert group["lr"] == pytest.approx(group["peak_lr"] / 3)
 
 
 def _update_norm_for_shape(shape):
@@ -115,7 +115,7 @@ def _signature_for_arm(base, extension):
     # Optimizer construction is keyed only by the paired base optimizer; the
     # extension is represented in the arm name and must not mutate groups.
     assert arm_name(base, extension) in {base, f"{base}_wwpgd"}
-    return optimizer_group_signature(build_optimizer_bundle(tiny_model(), TrainConfig(layer_lr="manual"), base)[0])
+    return optimizer_group_signature(build_optimizer_bundle(tiny_model(), TrainConfig(layer_lr="flat"), base)[0])
 
 
 @pytest.mark.parametrize("base", ["adamw", "muon", "stableadamw"])
