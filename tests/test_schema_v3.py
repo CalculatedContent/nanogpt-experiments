@@ -2,8 +2,8 @@ from dataclasses import replace
 
 import torch
 
-from wwgpt.config import TrainConfig, ladder
-from wwgpt.data import NonRepeatingTokenReader, random_probe, stable_seed
+from wwgpt.config import TrainConfig, ladder, level_model_config, historical_level0_model_config, scaling_level0_model_config
+from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.optim import build_optimizer_bundle, muon_parameter_names, apply_lr_schedule, resolve_warmup_steps
 from wwgpt.train import NoExtension, WWPGDExtension
@@ -19,6 +19,7 @@ def test_schema_v3_architecture_defaults_and_report():
     b = m.blocks[0]
     for mod in [b.attn.key, b.attn.query, b.attn.value, b.attn.proj, b.mlp[0], b.mlp[2], m.lm_head]:
         assert mod.bias is None
+    assert b.ln_1.bias is not None and b.ln_2.bias is not None and m.ln_f.bias is not None
     assert m.lm_head.weight.data_ptr() != m.wte.weight.data_ptr()
     rep = m.parameter_report()
     assert rep.output_head_parameters == m.lm_head.weight.numel()
@@ -77,3 +78,38 @@ def test_composite_formulas_and_rng_isolation():
     assert torch.allclose(comps["L0000_MLP_IO"][0], wo2 @ wi)
     ov = sum(comps[f"L0000_H{h:03d}_OV"][0] for h in range(b.attn.n_head))
     assert torch.allclose(comps["L0000_OV"][0], ov)
+
+
+def test_level0_profiles_are_explicit():
+    scaling = scaling_level0_model_config()
+    assert level_model_config(0) == scaling
+    hist = historical_level0_model_config()
+    assert (hist.n_layer, hist.n_head, hist.n_embd, hist.block_size) == (1, 1, 64, 64)
+    assert hist.init_mode == "pytorch_default"
+    assert (scaling.n_layer, scaling.n_head, scaling.n_embd, scaling.block_size) == (1, 1, 64, 256)
+    assert scaling.init_mode == "nanogpt_normal_0p02"
+
+
+def test_random_window_reader_state_and_pair_sharing():
+    tokens = list(range(1000))
+    a = RandomWindowTokenReader(tokens, 8, stable_seed(7, "pair", "train_reader_v1"))
+    b = RandomWindowTokenReader(tokens, 8, stable_seed(7, "pair", "train_reader_v1"))
+    ax, ay = a.next_batch(4); bx, by = b.next_batch(4)
+    assert (ax == bx).all() and (ay == by).all()
+    state = a.state_dict()
+    nxt = a.next_batch(4)
+    c = RandomWindowTokenReader(tokens, 8, 123)
+    c.load_state_dict(state)
+    cx, cy = c.next_batch(4)
+    assert (nxt[0] == cx).all() and (nxt[1] == cy).all()
+
+
+def test_eval_hashes_change_and_pair_agree_without_reader_rng_change():
+    tokens = list(range(1000))
+    reader = RandomWindowTokenReader(tokens, 8, 99)
+    state = reader.state_dict()
+    h0 = random_probe(tokens, 8, 2, 2, stable_seed(1, "val", 0, "random_per_eval_v1"))[2]
+    h0b = random_probe(tokens, 8, 2, 2, stable_seed(1, "val", 0, "random_per_eval_v1"))[2]
+    h1 = random_probe(tokens, 8, 2, 2, stable_seed(1, "val", 1, "random_per_eval_v1"))[2]
+    assert h0 == h0b and h0 != h1
+    assert reader.state_dict() == state

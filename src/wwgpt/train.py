@@ -21,7 +21,7 @@ from wwgpt.config import (
     load_config,
 )
 from wwgpt.optim import ARM_DISPLAY, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, resolve_warmup_steps
-from wwgpt.data import NonRepeatingTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
+from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
@@ -135,21 +135,32 @@ def _metrics(loss: float, logits: torch.Tensor, y: torch.Tensor) -> dict[str, fl
 def _evaluate_probe_batches(
     model: GPT, probe_x: np.ndarray, probe_y: np.ndarray, device: torch.device
 ) -> tuple[dict[str, float], float]:
-    losses: list[float] = []
-    logits_batches: list[torch.Tensor] = []
-    target_batches: list[torch.Tensor] = []
+    loss_sum = 0.0
+    token_count = 0
+    top1_correct = 0
+    top5_correct = 0
     for batch_x, batch_y in zip(probe_x, probe_y, strict=True):
         x = torch.tensor(batch_x, device=device)
         y = torch.tensor(batch_y, device=device)
         logits, loss = model(x, y)
         assert loss is not None
-        losses.append(float(loss.detach().cpu()))
-        logits_batches.append(logits.detach().cpu())
-        target_batches.append(y.detach().cpu())
-    mean_loss = float(np.mean(losses))
-    logits_all = torch.cat(logits_batches, dim=0)
-    targets_all = torch.cat(target_batches, dim=0)
-    return _metrics(mean_loss, logits_all, targets_all), mean_loss
+        tokens = int(y.numel())
+        loss_sum += float(loss.detach().cpu()) * tokens
+        token_count += tokens
+        pred = torch.topk(logits, k=min(5, logits.size(-1)), dim=-1).indices
+        top1_correct += int((pred[..., 0] == y).sum().detach().cpu())
+        top5_correct += int((pred == y.unsqueeze(-1)).any(dim=-1).sum().detach().cpu())
+    mean_loss = loss_sum / max(token_count, 1)
+    top1 = top1_correct / max(token_count, 1)
+    top5 = top5_correct / max(token_count, 1)
+    return {
+        "loss": mean_loss,
+        "perplexity": float(math.exp(min(mean_loss, 20))),
+        "bits_per_token": mean_loss / math.log(2),
+        "top1_accuracy": top1,
+        "top5_accuracy": top5,
+        "token_error": 1 - top1,
+    }, mean_loss
 
 
 def run_single(
@@ -426,7 +437,7 @@ def run_scientific_single(
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps)
     wwpgd_interval = int(ww_interval or cfg.train.wwpgd_interval or eval_interval or cfg.train.eval_interval)
     extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
-    reader = NonRepeatingTokenReader(data.train, cfg.model.block_size)
+    reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, stable_seed(seed, pair_id, "train_reader_v1")) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
     validation_probe_hash = ""
     training_probe_hash = ""
     assert not np.shares_memory(np.array(data.val), np.array(data.train))
@@ -465,7 +476,8 @@ def run_scientific_single(
         "model_config_hash": sha256_bytes(json.dumps(asdict(cfg.model), sort_keys=True).encode()),
         "optimizer_hyperparameters": asdict(cfg.train),
         "extension_hyperparameters": asdict(cfg.wwpgd),
-        "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "steps": steps, "batch": cfg.train.batch_size}, sort_keys=True).encode()),
+        "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "steps": steps, "batch": cfg.train.batch_size, "training_sampling": cfg.train.training_sampling}, sort_keys=True).encode()),
+        "training_sampling": cfg.train.training_sampling,
         "evaluation_sampling": cfg.train.evaluation_sampling,
         "evaluation_schedule_version": "random_per_eval_v1",
         "lr_schedule": cfg.train.lr_schedule,
@@ -556,7 +568,10 @@ def run_scientific_single(
         assert_checkpoint_compatible(loaded, compatibility)
         model.load_state_dict(loaded["model_state_dict"])
         bundle.load_state_dict(loaded["optimizer_state_dict"])
-        reader.pos = int(loaded["training_reader_position"])
+        if "training_reader_state" in loaded and hasattr(reader, "load_state_dict"):
+            reader.load_state_dict(loaded["training_reader_state"])
+        else:
+            reader.pos = int(loaded["training_reader_position"])
         metric_rows = list(loaded.get("metrics_rows", []))
         spectral_rows = list(loaded.get("periodic_weightwatcher_rows", []))
         proj_rows = list(loaded.get("wwpgd_projection_rows", []))
@@ -699,6 +714,7 @@ def run_scientific_single(
                 "tokens_processed": step * tokens_per_step,
                 "training_reader_position": reader.pos,
                 "reader_position": reader.pos,
+                "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos},
                 "seed": seed,
                 **rng_state(),
                 "device_type": selected_device.type,
@@ -725,7 +741,7 @@ def run_scientific_single(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _write_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows)

@@ -21,6 +21,10 @@ class ModelConfig:
     vocab_size: int = 8192
     dropout: float = 0.0
     bias: bool = False
+    linear_bias: bool = False
+    layernorm_bias: bool = True
+    init_mode: str = "nanogpt_normal_0p02"
+    profile_name: str = "scaling_level0"
     activation: str = "gelu"
     tie_weights: bool = False
     mlp_mult: int = 4
@@ -58,6 +62,7 @@ class TrainConfig:
     stable_triton: bool = False
     max_train_tokens: int | None = None
     evaluation_sampling: str = "random_per_eval"
+    training_sampling: str = "random_window"
     wwpgd_interval: int | None = None
 
 
@@ -102,9 +107,17 @@ class ExperimentConfig:
     composite_spectral_analysis_enabled: bool = False
 
 
+def historical_level0_model_config() -> ModelConfig:
+    return ModelConfig(n_layer=1, n_head=1, n_embd=64, block_size=64, dropout=0.0, mlp_mult=4, init_mode="pytorch_default", profile_name="historical_reproduction_level0")
+
+
+def scaling_level0_model_config() -> ModelConfig:
+    return ModelConfig(n_layer=1, n_head=1, n_embd=64, block_size=256, dropout=0.0, mlp_mult=4, init_mode="nanogpt_normal_0p02", profile_name="scaling_level0")
+
+
 def level_model_config(level: int) -> ModelConfig:
     if level == 0:
-        return ModelConfig(n_layer=1, n_head=1, n_embd=64, block_size=256, dropout=0.0, mlp_mult=4)
+        return scaling_level0_model_config()
     return ModelConfig(n_layer=2 * level, n_head=level + 1, n_embd=64 * (level + 1), block_size=256)
 
 

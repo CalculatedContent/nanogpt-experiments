@@ -180,3 +180,49 @@ def test_scientific_evaluation_uses_all_probe_batches():
     assert "val_x[0]" not in source
     assert "train_x[0]" not in source
     assert source.count("_evaluate_probe_batches(") == 2
+
+
+def test_streaming_metrics_match_full_logit_reference():
+    from wwgpt.train import _evaluate_probe_batches, _metrics
+    cfg = ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=11)
+    torch.manual_seed(123)
+    m = GPT(cfg)
+    x = np.array([[[0,1,2,3],[4,5,6,7]], [[1,2,3,4],[5,6,7,8]]], dtype=np.int64)
+    y = (x + 1) % cfg.vocab_size
+    with torch.no_grad():
+        streamed, sloss = _evaluate_probe_batches(m, x, y, torch.device("cpu"))
+        logits = []
+        targets = []
+        losses = []
+        for bx, by in zip(x, y, strict=True):
+            lg, loss = m(torch.tensor(bx), torch.tensor(by))
+            losses.append(float(loss) * by.size)
+            logits.append(lg)
+            targets.append(torch.tensor(by))
+        ref_loss = sum(losses) / y.size
+        ref = _metrics(ref_loss, torch.cat(logits, dim=0), torch.cat(targets, dim=0))
+    assert sloss == pytest.approx(ref_loss)
+    for k in ["loss", "perplexity", "top1_accuracy", "top5_accuracy", "token_error"]:
+        assert streamed[k] == pytest.approx(ref[k])
+
+
+def test_evaluation_does_not_retain_full_logit_lists():
+    import inspect
+    import wwgpt.train
+    source = inspect.getsource(wwgpt.train._evaluate_probe_batches)
+    assert "logits_batches" not in source
+    assert "target_batches" not in source
+    assert "torch.cat" not in source
+
+
+def test_diagnostics_do_not_change_later_training_batches():
+    from wwgpt.data import RandomWindowTokenReader, stable_seed
+    from wwgpt.ww import fallback_spectral_summary
+    seed = stable_seed(3, "pair", "train_reader_v1")
+    tokens = list(range(500))
+    ref = RandomWindowTokenReader(tokens, 8, seed)
+    diag = RandomWindowTokenReader(tokens, 8, seed)
+    first = ref.next_batch(4); diag.next_batch(4)
+    torch.manual_seed(5); m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=20))
+    fallback_spectral_summary(m)
+    assert all((a == b).all() for a, b in zip(ref.next_batch(4), diag.next_batch(4), strict=True))
