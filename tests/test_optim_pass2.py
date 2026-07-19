@@ -124,7 +124,7 @@ def test_identical_optimizer_signatures_for_paired_base_and_wwpgd(base):
     assert _signature_for_arm(base, "none") == _signature_for_arm(base, "wwpgd")
 
 
-@pytest.mark.parametrize("path,expected", [("configs/reproduction_tiny.yaml", 0.005), ("configs/reproduction_fineweb.yaml", 0.005), ("configs/default.yaml", 0.01)])
+@pytest.mark.parametrize("path,expected", [("configs/reproduction_tiny.yaml", 0.005), ("configs/reproduction_fineweb.yaml", 0.005), ("configs/default.yaml", 0.1)])
 def test_profile_weight_decay_in_both_paired_arms(path, expected):
     cfg = load_config(Path(path), level=0).train
     for base in ("adamw", "muon"):

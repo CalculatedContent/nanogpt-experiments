@@ -143,6 +143,45 @@ class WWPGDExtension(TrainingExtension):
         return details, rows
 
 
+def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_steps: int | None = None, resolved_lr_decay_steps: int | None = None, resolved_llrd_gamma: float | None = None) -> dict[str, object]:
+    """Return the fully resolved nanoGPT baseline settings recorded in run metadata."""
+    model = cfg.model
+    train = cfg.train
+    out: dict[str, object] = {
+        "learning_rate": train.learning_rate,
+        "weight_decay": train.weight_decay,
+        "grad_clip": train.grad_clip,
+        "adamw_betas": tuple(train.betas),
+        "adamw_epsilon": train.epsilon,
+        "lr_schedule": train.lr_schedule,
+        "warmup_steps_requested": train.warmup_steps,
+        "warmup_ratio": train.warmup_ratio,
+        "lr_decay_steps_requested": train.lr_decay_steps,
+        "min_lr_ratio": train.min_lr_ratio,
+        "layer_lr": train.layer_lr,
+        "llrd_gamma": resolved_llrd_gamma,
+        "matrix_lr_multipliers": dict(train.matrix_lr_multipliers),
+        "tie_weights": model.tie_weights,
+        "init_mode": model.init_mode,
+        "residual_projection_init_std": 0.02 / (2 * model.n_layer) ** 0.5,
+        "causal_attention": True,
+        "attention_implementation": "torch_scaled_dot_product_attention_is_causal",
+        "attention_dropout": model.dropout,
+        "residual_dropout": model.dropout,
+        "embedding_dropout": model.dropout,
+        "separate_qkv_projections": True,
+        "linear_bias": model.linear_bias,
+        "layernorm_bias": model.layernorm_bias,
+        "model_architecture_version": model.model_architecture_version,
+        "scheduler_implementation": SCHEDULER_IMPLEMENTATION,
+    }
+    if resolved_warmup_steps is not None:
+        out["resolved_warmup_steps"] = resolved_warmup_steps
+    if resolved_lr_decay_steps is not None:
+        out["resolved_lr_decay_steps"] = resolved_lr_decay_steps
+    return out
+
+
 def _gradient_norm(parameters) -> torch.Tensor:
     norms = [p.grad.detach().norm(2) for p in parameters if p.grad is not None]
     if not norms:
@@ -271,6 +310,7 @@ def run_single(
             "smoke_test": True,
             "valid_for_science": False,
             "parameter_report": model.report_dict(),
+            "resolved_baseline_hyperparameters": resolved_baseline_hyperparameters(cfg),
         },
     )
     write_json(
@@ -532,6 +572,12 @@ def run_scientific_single(
         "model_config_hash": sha256_bytes(json.dumps(asdict(cfg.model), sort_keys=True).encode()),
         "optimizer_hyperparameters": asdict(cfg.train),
         "extension_hyperparameters": asdict(cfg.wwpgd),
+        "resolved_baseline_hyperparameters": resolved_baseline_hyperparameters(
+            cfg,
+            resolved_warmup_steps=resolved_warmup_steps,
+            resolved_lr_decay_steps=resolved_lr_decay_steps,
+            resolved_llrd_gamma=resolved_llrd_gamma,
+        ),
         "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "level": level, "token_multiplier": token_multiplier, "steps": steps, "batch": cfg.train.batch_size, "training_sampling": cfg.train.training_sampling}, sort_keys=True).encode()),
         "resolved_stochastic_seeds": resolved_seeds,
         "initial_minibatch_indices": initial_minibatch_indices,
@@ -682,6 +728,7 @@ def run_scientific_single(
             grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
         else:
             grad = _gradient_norm(model.parameters())
+        lr_rows.extend(apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train))
         bundle.step()
         optimizer_step_count = step
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
@@ -700,7 +747,6 @@ def run_scientific_single(
                 post = measured_projection_spectral_rows(pre_details, model, step=step, tokens_seen=step * tokens_per_step, optimizer=optimizer_name, seed=seed, pair_id=pair_id, projection_event=event_idx, projection_rows=new_proj, target_alpha=cfg.wwpgd.target_alpha, phase="post")
                 immediate_spectral_rows.extend(post)
         proj_time = time.perf_counter() - ps if new_proj else 0.0
-        lr_rows.extend(apply_lr_schedule(bundle, step, steps, resolved_warmup_steps, cfg.train))
         bundle.zero_grad()
         if step % (eval_interval or cfg.train.eval_interval) == 0 or step == steps:
             eval_index = len(metric_rows)
