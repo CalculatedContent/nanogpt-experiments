@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from wwgpt.config import load_config, WWPGDConfig
-from wwgpt.train import run_scientific_single, _state_hash
+from wwgpt.train import resolved_stochastic_seeds, run_scientific_single, _state_hash
 from wwgpt.data import load_prepared_scientific_data
 from wwgpt.model import GPT
 from wwgpt.utils import unique_dir, write_json, environment
@@ -112,10 +112,10 @@ def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multip
     status={'scan_id':scan_id,'arms':{}}
     for seed in seeds:
         sd=scan_root/'seeds'/f'seed_{seed}'; (sd/'initial_state').mkdir(parents=True,exist_ok=True)
-        torch.manual_seed(seed); model=GPT(cfg.model); init={k:v.detach().clone() for k,v in model.state_dict().items()}; ih=_state_hash(init)
+        torch.manual_seed(resolved_stochastic_seeds(seed, level, token_multiplier)["model_init_seed"]); model=GPT(cfg.model); init={k:v.detach().clone() for k,v in model.state_dict().items()}; ih=_state_hash(init)
         if not (sd/'initial_state'/'model.pt').exists(): torch.save(init, sd/'initial_state'/'model.pt')
         (sd/'initial_state'/'initialization_hash.txt').write_text(ih)
-        if not (sd/'seed_manifest.json').exists(): write_json(sd/'seed_manifest.json',{'seed':seed,'initialization_hash':ih})
+        if not (sd/'seed_manifest.json').exists(): write_json(sd/'seed_manifest.json',{'seed':seed,'initialization_hash':ih,'resolved_stochastic_seeds':resolved_stochastic_seeds(seed, level, token_multiplier)})
         adamw=find_or_run_base_control(sd,seed,cfg,data,init,ih,level,token_multiplier,optimizer,device,eval_interval,checkpoint_interval,spectral_interval,resume)
         _append_scan_fields(adamw, scan_id=scan_id, scan_name=scan_name, scan_strength=None, strength_arm_id='adamw_control', scientific_schema_version=SCIENTIFIC_SCHEMA_VERSION)
         for st in strengths:

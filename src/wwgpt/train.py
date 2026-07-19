@@ -43,6 +43,33 @@ from wwgpt.ww import (
 
 
 
+
+def resolved_stochastic_seeds(user_seed: int, level: int, token_multiplier: int, *, split: str = "train", optimizer_identity: str | None = None) -> dict[str, int]:
+    """Resolve stochastic seeds from stable scientific identity only.
+
+    Storage identifiers such as run IDs, pair IDs, paths, timestamps, and UUIDs must
+    never enter this derivation. Optimizer identity is included only for the explicit
+    optimizer-scoped stream.
+    """
+    base = ("wwgpt_scientific_seed_v1", int(user_seed), int(level), int(token_multiplier))
+    seeds = {
+        "model_init_seed": stable_seed(*base, "model_init"),
+        "dropout_seed": stable_seed(*base, split, "dropout"),
+        "train_reader_seed": stable_seed(*base, "train", "reader"),
+        "train_eval_probe_seed_base": stable_seed(*base, "train", "eval_probe"),
+        "val_eval_probe_seed_base": stable_seed(*base, "val", "eval_probe"),
+    }
+    if optimizer_identity is not None:
+        seeds["optimizer_seed"] = stable_seed(*base, "optimizer", optimizer_identity)
+    return seeds
+
+
+def _initial_minibatch_indices(tokens: list[int], block_size: int, batch_size: int, sampling: str, reader_seed: int) -> list[int]:
+    if sampling == "random_window":
+        rng = np.random.default_rng(reader_seed)
+        return [int(x) for x in rng.integers(0, len(tokens) - block_size - 1, size=batch_size)]
+    return list(range(0, batch_size * block_size, block_size))
+
 def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
     if not arm_dir.exists():
         raise FileNotFoundError(f"no runs exist for resume arm directory: {arm_dir}")
@@ -431,7 +458,6 @@ def run_scientific_single(
     immediate_projection_spectral: bool = False,
     allow_code_version_mismatch: bool = False,
 ) -> Path:
-    torch.manual_seed(seed)
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
     elif optimizer_name in {"muon_wwpgd", "stableadamw_wwpgd"}:
@@ -443,9 +469,13 @@ def run_scientific_single(
     optimizer_name = make_arm_name(base_optimizer, extension_name)
     run_dir = None
     ckpt = None
+    resolved_seeds = resolved_stochastic_seeds(seed, level, token_multiplier, split="train", optimizer_identity=base_optimizer)
     selected_device = select_device(device)
     model = GPT(cfg.model).to(selected_device)
     model.load_state_dict(init_state)
+    torch.manual_seed(resolved_seeds["dropout_seed"])
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(resolved_seeds["dropout_seed"])
     bundle, resolved_llrd_gamma = build_optimizer_bundle(model, cfg.train, base_optimizer)
     report = model.parameter_report()
     parameter_count_used = report.total_parameters if cfg.parameter_count_convention == "total" else report.non_embedding_parameters
@@ -461,7 +491,8 @@ def run_scientific_single(
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
     wwpgd_interval = 1 if extension_name == "wwpgd" else int(cfg.train.wwpgd_interval or 1)
     extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
-    reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, stable_seed(seed, pair_id, "train_reader_v1")) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
+    reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, resolved_seeds["train_reader_seed"]) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
+    initial_minibatch_indices = _initial_minibatch_indices(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.training_sampling, resolved_seeds["train_reader_seed"])
     validation_probe_hash = ""
     training_probe_hash = ""
     assert not np.shares_memory(np.array(data.val), np.array(data.train))
@@ -500,7 +531,9 @@ def run_scientific_single(
         "model_config_hash": sha256_bytes(json.dumps(asdict(cfg.model), sort_keys=True).encode()),
         "optimizer_hyperparameters": asdict(cfg.train),
         "extension_hyperparameters": asdict(cfg.wwpgd),
-        "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "steps": steps, "batch": cfg.train.batch_size, "training_sampling": cfg.train.training_sampling}, sort_keys=True).encode()),
+        "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "level": level, "token_multiplier": token_multiplier, "steps": steps, "batch": cfg.train.batch_size, "training_sampling": cfg.train.training_sampling}, sort_keys=True).encode()),
+        "resolved_stochastic_seeds": resolved_seeds,
+        "initial_minibatch_indices": initial_minibatch_indices,
         "training_sampling": cfg.train.training_sampling,
         "evaluation_sampling": cfg.train.evaluation_sampling,
         "evaluation_schedule_version": "random_per_eval_v1",
@@ -676,8 +709,8 @@ def run_scientific_single(
                 train_x, train_y, training_probe_hash = fixed_probe(data.train[cfg.train.batch_size * cfg.model.block_size * 2:], cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
                 val_x, val_y, validation_probe_hash = fixed_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
             else:
-                train_x, train_y, training_probe_hash = random_probe(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(seed, "train", eval_index, "random_per_eval_v1"))
-                val_x, val_y, validation_probe_hash = random_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(seed, "val", eval_index, "random_per_eval_v1"))
+                train_x, train_y, training_probe_hash = random_probe(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(resolved_seeds["train_eval_probe_seed_base"], eval_index, "random_per_eval_v1"))
+                val_x, val_y, validation_probe_hash = random_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches, stable_seed(resolved_seeds["val_eval_probe_seed_base"], eval_index, "random_per_eval_v1"))
             with torch.no_grad():
                 tm, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)
                 vm, validation_probe_loss = _evaluate_probe_batches(model, val_x, val_y, selected_device)
@@ -784,6 +817,7 @@ def run_scientific_single(
                 "composite_spectral_rows": composite_rows,
                 "elapsed_training_time": elapsed_prior + time.perf_counter() - start,
                 "initialization_hash": init_hash,
+                "resolved_stochastic_seeds": resolved_seeds,
                 "compatibility": compatibility,
                 "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION,
                 "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio,
@@ -794,7 +828,7 @@ def run_scientific_single(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _write_csv(run_dir / "metrics.csv", metric_rows, overwrite=resume)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
@@ -860,7 +894,8 @@ def run_multiseed_scientific(
             init_state = torch.load(init_dir / "model.pt", map_location="cpu", weights_only=False)
             init_hash = (init_dir / "initialization_hash.txt").read_text().strip()
         else:
-            torch.manual_seed(seed)
+            init_seed = resolved_stochastic_seeds(seed, level, token_multiplier)["model_init_seed"]
+            torch.manual_seed(init_seed)
             init_model = GPT(cfg.model)
             init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}
             init_hash = _state_hash(init_state)
@@ -881,6 +916,7 @@ def run_multiseed_scientific(
                 "level": level,
                 "token_multiplier": token_multiplier,
                 "initialization_hash": init_hash,
+                "resolved_stochastic_seeds": resolved_stochastic_seeds(seed, level, token_multiplier),
                 "base_optimizer": optimizer,
                 "extensions": extensions or ["none", "wwpgd"],
                 "arms": [make_arm_name(optimizer, e) for e in (extensions or ["none", "wwpgd"])],
