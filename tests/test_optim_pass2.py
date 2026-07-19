@@ -7,13 +7,16 @@ import torch
 from wwgpt.config import TrainConfig, load_config
 from wwgpt.model import GPT
 from wwgpt.optim import (
+    ADAMW_IMPLEMENTATION,
     MANUAL_LAYER_LR_MULTIPLIERS,
+    MUON_IMPLEMENTATION_VERSION,
     Muon,
     apply_lr_schedule,
     arm_name,
     build_optimizer_bundle,
     build_param_groups,
     muon_parameter_names,
+    optimizer_fingerprint,
     optimizer_group_signature,
     schedule_factor,
 )
@@ -48,6 +51,18 @@ def test_exact_manual_multipliers():
         assert by_name[name]["peak_lr"] == pytest.approx(mult)
 
 
+def test_adamw_uses_pytorch_adamw_with_documented_groups():
+    bundle, _ = build_optimizer_bundle(tiny_model(), TrainConfig(), "adamw")
+    assert isinstance(bundle.optimizers[0], torch.optim.AdamW)
+    assert bundle.implementation_versions["adamw"].startswith(f"{ADAMW_IMPLEMENTATION}:")
+    for group in bundle.optimizers[0].param_groups:
+        assert group["parameter_name"] == group["group_name"]
+        assert "role" in group
+        assert "peak_lr" in group
+        assert "weight_decay" in group
+        assert len(group["params"]) == 1
+
+
 def test_warmup_peak_midpoint_and_final_cosine_lr():
     min_ratio = 0.25
     assert schedule_factor(0, 102, 3, "warmup_cosine", min_ratio) == pytest.approx(1 / 4)
@@ -75,6 +90,12 @@ def test_muon_tall_square_and_wide_matrix_scaling():
     assert _update_norm_for_shape((8, 2)) == pytest.approx(2.0)
     assert _update_norm_for_shape((4, 4)) == pytest.approx(1.0)
     assert _update_norm_for_shape((2, 8)) == pytest.approx(1.0)
+
+
+def test_muon_records_authoritative_source_version():
+    bundle, _ = build_optimizer_bundle(tiny_model(), TrainConfig(), "muon")
+    assert bundle.implementation_versions["muon"] == MUON_IMPLEMENTATION_VERSION
+    assert "KellerJordan/modded-nanogpt" in bundle.implementation_versions["muon"]
 
 
 def test_complete_and_disjoint_muon_parameter_partitioning():
@@ -111,6 +132,21 @@ def test_no_double_weight_decay_in_stableadamw():
     assert max(decays) == pytest.approx(0.005)
 
 
+def test_stableadamw_missing_dependency_fails_clearly(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fail_optimi_import(name, *args, **kwargs):
+        if name == "optimi":
+            raise ModuleNotFoundError("No module named 'optimi'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_optimi_import)
+    with pytest.raises(RuntimeError, match="cannot construct requested optimizer stableadamw"):
+        build_optimizer_bundle(tiny_model(), TrainConfig(), "stableadamw")
+
+
 def _signature_for_arm(base, extension):
     # Optimizer construction is keyed only by the paired base optimizer; the
     # extension is represented in the arm name and must not mutate groups.
@@ -122,6 +158,35 @@ def _signature_for_arm(base, extension):
 def test_identical_optimizer_signatures_for_paired_base_and_wwpgd(base):
     pytest.importorskip("optimi") if base == "stableadamw" else None
     assert _signature_for_arm(base, "none") == _signature_for_arm(base, "wwpgd")
+
+
+@pytest.mark.parametrize("base", ["adamw", "muon", "stableadamw"])
+def test_normalized_optimizer_fingerprints_match_within_pairs(base):
+    pytest.importorskip("optimi") if base == "stableadamw" else None
+    cfg = TrainConfig(layer_lr="flat")
+    baseline, _ = build_optimizer_bundle(tiny_model(), cfg, base)
+    wwpgd, _ = build_optimizer_bundle(tiny_model(), cfg, base)
+    assert optimizer_fingerprint(baseline) == optimizer_fingerprint(wwpgd)
+
+
+@pytest.mark.parametrize("base", ["adamw", "muon", "stableadamw"])
+def test_only_extension_metadata_differs_within_optimizer_pairs(base):
+    pytest.importorskip("optimi") if base == "stableadamw" else None
+    cfg = TrainConfig(layer_lr="flat")
+    baseline, _ = build_optimizer_bundle(tiny_model(), cfg, base)
+    wwpgd, _ = build_optimizer_bundle(tiny_model(), cfg, base)
+    base_manifest = {
+        "base_optimizer": base,
+        "extension": "none",
+        "optimizer_fingerprint": optimizer_fingerprint(baseline),
+    }
+    wwpgd_manifest = {
+        "base_optimizer": base,
+        "extension": "wwpgd",
+        "optimizer_fingerprint": optimizer_fingerprint(wwpgd),
+    }
+    differing_keys = {k for k in base_manifest if base_manifest[k] != wwpgd_manifest[k]}
+    assert differing_keys == {"extension"}
 
 
 @pytest.mark.parametrize("path,expected", [("configs/reproduction_tiny.yaml", 0.005), ("configs/reproduction_fineweb.yaml", 0.005), ("configs/default.yaml", 0.1)])
