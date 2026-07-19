@@ -190,7 +190,8 @@ def test_manifest_records_requested_and_resolved_external_config():
 
 
 def test_real_extension_passes_resolved_experiment_config_to_installed_package(monkeypatch):
-    import ww_pgd
+    calls = []
+    ww_pgd = install_fake_ww_pgd(monkeypatch, calls)
 
     captured = {}
 
@@ -235,3 +236,46 @@ def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):
         assert external_cfg.warmup_epochs == 0
         assert external_cfg.ramp_epochs == 0
         assert all(row["blend_eta"] == 0.5 for row in rows)
+
+
+def test_standard_wwpgd_smoke_path_does_not_use_repository_visible_svd(monkeypatch, tmp_path):
+    from wwgpt.train import smoke
+
+    calls = []
+    install_fake_ww_pgd(monkeypatch, calls)
+
+    def fail_svd(*args, **kwargs):
+        raise AssertionError("repository WWPGD path must not call torch.linalg.svd")
+
+    def fail_svdvals(*args, **kwargs):
+        raise AssertionError("repository WWPGD path must not call torch.linalg.svdvals")
+
+    monkeypatch.setattr(torch.linalg, "svd", fail_svd)
+    monkeypatch.setattr(torch.linalg, "svdvals", fail_svdvals)
+
+    root = smoke(tmp_path, steps=1, seeds=[123])
+    projection_files = list(root.glob("**/adamw_wwpgd/run_*/wwpgd_projection.csv"))
+    assert projection_files
+    rows = pd.read_csv(projection_files[0])
+    assert len(rows) == len(external_projected_layer_names(tiny_model()))
+    assert calls
+
+
+def test_standard_wwpgd_generates_no_composite_projection_targets(monkeypatch):
+    calls = []
+    install_fake_ww_pgd(monkeypatch, calls)
+    rows = apply_external_wwpgd(tiny_model(), actual_step=1, actual_tokens_seen=8)
+
+    composite_markers = ("KQ", "QK", "OV", "VO", "cross", "SPD", "surrogate")
+    layer_names = [str(row.get("layer_name", "")) for row in rows]
+    assert layer_names == external_projected_layer_names(tiny_model())
+    assert all(not any(marker in name for marker in composite_markers) for name in layer_names)
+
+    call = calls[0]
+    assert "layer_names" not in call["kwargs"]
+    selector = call["kwargs"].get("layer_selector")
+    assert selector is not None
+    assert selector(tiny_model(), "blocks.0.attn.key") is not None
+    assert selector(tiny_model(), "L0000_KQ") is None
+    assert selector(tiny_model(), "blocks.0.attn.query") is not None
+    assert selector(tiny_model(), "blocks.0.attn.value") is not None
