@@ -10,6 +10,9 @@ DEFAULT_SEEDS = [1337, 2027, 4099, 7919, 104729]
 TOKEN_MULTIPLIERS = [20, 40, 80, 160]
 SCIENTIFIC_SCHEMA_VERSION = 3
 MODEL_ARCHITECTURE_VERSION = "separate_qkv_bias_free_untied_head_v1"
+VALID_BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
+VALID_EXTENSIONS = {"none", "wwpgd"}
+
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,8 @@ class WWPGDConfig:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
+    scientific_schema_version: int = SCIENTIFIC_SCHEMA_VERSION
+    model_architecture_version: str = MODEL_ARCHITECTURE_VERSION
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     wwpgd: WWPGDConfig = field(default_factory=WWPGDConfig)
@@ -142,6 +147,20 @@ def ladder() -> dict[int, ModelConfig]:
 
 
 def validate_model_config(cfg: ModelConfig) -> None:
+    if cfg.n_layer < 1:
+        raise ValueError("model.n_layer must be >= 1")
+    if cfg.n_head < 1:
+        raise ValueError("model.n_head must be >= 1")
+    if cfg.n_embd < 1:
+        raise ValueError("model.n_embd must be >= 1")
+    if cfg.block_size < 1:
+        raise ValueError("model.block_size must be >= 1")
+    if cfg.vocab_size < 1:
+        raise ValueError("model.vocab_size must be >= 1")
+    if cfg.mlp_mult < 1:
+        raise ValueError("model.mlp_mult must be >= 1")
+    if not 0.0 <= cfg.dropout <= 1.0:
+        raise ValueError("model.dropout must satisfy 0.0 <= dropout <= 1.0")
     if cfg.n_embd % cfg.n_head != 0:
         raise ValueError("n_embd must be divisible by n_head")
     if cfg.n_embd // cfg.n_head != 64:
@@ -149,6 +168,16 @@ def validate_model_config(cfg: ModelConfig) -> None:
 
 
 def validate_train_config(cfg: TrainConfig) -> None:
+    if cfg.batch_size < 1:
+        raise ValueError("train.batch_size must be >= 1")
+    if cfg.gradient_accumulation < 1:
+        raise ValueError("train.gradient_accumulation must be >= 1")
+    if cfg.learning_rate <= 0.0:
+        raise ValueError("train.learning_rate must be > 0")
+    if cfg.weight_decay < 0.0:
+        raise ValueError("train.weight_decay must be >= 0")
+    if cfg.wwpgd_interval is not None and cfg.wwpgd_interval < 1:
+        raise ValueError("train.wwpgd_interval must be >= 1 when supplied")
     if cfg.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:  # stlr is intentionally retired.
         raise ValueError(f"unknown lr_schedule {cfg.lr_schedule}")
     if cfg.layer_lr not in {"flat", "llrd", "manual"}:
@@ -161,20 +190,71 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError("warmup_steps must be >= 0 when supplied")
     if cfg.lr_decay_steps is not None and cfg.lr_decay_steps < 1:
         raise ValueError("lr_decay_steps must be >= 1 when supplied")
+    if cfg.lr_schedule == "warmup_cosine" and cfg.warmup_steps is not None and cfg.lr_decay_steps is not None and cfg.lr_decay_steps <= cfg.warmup_steps:
+        raise ValueError("train.lr_decay_steps must be greater than train.warmup_steps when warmup_cosine is enabled")
+
+
+def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
+    if not 0.0 <= cfg.blend_eta <= 1.0:
+        raise ValueError("wwpgd.blend_eta must satisfy 0.0 <= blend_eta <= 1.0")
+    if cfg.warmup_steps < 0:
+        raise ValueError("wwpgd.warmup_steps must be >= 0")
+    if cfg.ramp_steps < 0:
+        raise ValueError("wwpgd.ramp_steps must be >= 0")
+    if cfg.warmup_events < 0:
+        raise ValueError("wwpgd.warmup_events must be >= 0")
+    if cfg.ramp_events < 0:
+        raise ValueError("wwpgd.ramp_events must be >= 0")
+    if cfg.min_tail < 1:
+        raise ValueError("wwpgd.min_tail must be >= 1")
+    if cfg.extension not in VALID_EXTENSIONS:
+        raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
+
+
+def validate_experiment_config(cfg: ExperimentConfig) -> None:
+    validate_model_config(cfg.model)
+    validate_train_config(cfg.train)
+    validate_wwpgd_config(cfg.wwpgd)
+    if len(cfg.seeds) < 1:
+        raise ValueError("seeds must contain at least one seed")
+    if cfg.base_optimizer not in VALID_BASE_OPTIMIZERS:
+        raise ValueError(f"unknown base_optimizer {cfg.base_optimizer}")
+    invalid_extensions = [ext for ext in cfg.extensions if ext not in VALID_EXTENSIONS]
+    if invalid_extensions:
+        raise ValueError(f"unknown extension(s): {', '.join(invalid_extensions)}")
+
+
+def _reject_unknown_keys(section: str, data: dict[str, Any], allowed: set[str]) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        prefix = f"{section}." if section else ""
+        keys = ", ".join(f"{prefix}{key}" for key in unknown)
+        raise ValueError(f"unknown configuration key(s): {keys}")
 
 
 def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     cfg = ExperimentConfig(model=level_model_config(level))
     if path is None:
+        validate_experiment_config(cfg)
         return cfg
     data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError("configuration root must be a mapping")
     model_keys = set(ModelConfig.__dataclass_fields__)
     train_keys = set(TrainConfig.__dataclass_fields__)
     wwpgd_keys = set(WWPGDConfig.__dataclass_fields__)
     experiment_keys = set(ExperimentConfig.__dataclass_fields__) - {"model", "train", "wwpgd"}
-    model = ModelConfig(**{**asdict(cfg.model), **{k: v for k, v in data.get("model", {}).items() if k in model_keys}})
-    train = TrainConfig(**{**asdict(cfg.train), **{k: v for k, v in data.get("train", {}).items() if k in train_keys}})
-    wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **{k: v for k, v in data.get("wwpgd", {}).items() if k in wwpgd_keys}})
+    _reject_unknown_keys("", data, experiment_keys | {"model", "train", "wwpgd"})
+    for section in ("model", "train", "wwpgd"):
+        if section in data and not isinstance(data[section], dict):
+            raise ValueError(f"configuration section {section} must be a mapping")
+    _reject_unknown_keys("model", data.get("model", {}), model_keys)
+    _reject_unknown_keys("train", data.get("train", {}), train_keys)
+    _reject_unknown_keys("wwpgd", data.get("wwpgd", {}), wwpgd_keys)
+    model = ModelConfig(**{**asdict(cfg.model), **data.get("model", {})})
+    train = TrainConfig(**{**asdict(cfg.train), **data.get("train", {})})
+    wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **data.get("wwpgd", {})})
     rest: dict[str, Any] = {k: v for k, v in data.items() if k in experiment_keys}
-    validate_train_config(train)
-    return ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)
+    loaded = ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)
+    validate_experiment_config(loaded)
+    return loaded
