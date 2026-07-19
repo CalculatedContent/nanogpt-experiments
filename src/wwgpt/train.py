@@ -24,6 +24,7 @@ from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
+from wwgpt.device import autocast_context, device_summary, memory_stats, optimizer_step, precision_policy, synchronize_device
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
 from wwgpt.ww import (
     apply_external_wwpgd,
@@ -546,6 +547,9 @@ def run_scientific_single(
     ckpt = None
     resolved_seeds = resolved_stochastic_seeds(seed, level, token_multiplier, split="train", optimizer_identity=base_optimizer)
     selected_device = select_device(device)
+    selected_device_summary = device_summary(device or "auto")
+    _log_train_progress(f"device selection: {selected_device_summary['selection_reason']}; single_device_only={selected_device_summary['single_device_only']}")
+    precision_info = precision_policy(selected_device, precision)
     model = GPT(cfg.model).to(selected_device)
     model.load_state_dict(init_state)
     torch.manual_seed(resolved_seeds["dropout_seed"])
@@ -639,6 +643,9 @@ def run_scientific_single(
         "projection_schedule_type": "optimizer_step_interval",
         "total_projection_events": steps if extension_name == "wwpgd" else 0,
         "optimizer_step_count": 0,
+        "device": selected_device_summary,
+        "device_support": {"single_device_only": True, "distributed_training": False, "multi_gpu_or_tpu": "not claimed; no executable distributed smoke path is implemented"},
+        "precision_policy": {k: v for k, v in precision_info.items() if k != "torch_dtype"},
         "wwpgd_call_count": 0,
         "projected_matrix_count": 0,
         "WeightWatcher version": "",
@@ -760,7 +767,8 @@ def run_scientific_single(
             xb, yb = reader.next_batch(cfg.train.batch_size)
             x = torch.tensor(xb, device=selected_device)
             y = torch.tensor(yb, device=selected_device)
-            _, loss = model(x, y)
+            with autocast_context(selected_device, precision):
+                _, loss = model(x, y)
             assert loss is not None
             (loss / cfg.train.gradient_accumulation).backward()
             train_loss_value += float(loss.detach().cpu())
@@ -774,7 +782,9 @@ def run_scientific_single(
         lr_update_rows = apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train)
         lr_rows.extend(lr_update_rows)
         logged_lr = float(lr_update_rows[0]["current_lr"]) if lr_update_rows else cfg.train.learning_rate
-        bundle.step()
+        for _opt in bundle.optimizers:
+            optimizer_step(_opt, selected_device)
+        synchronize_device(selected_device)
         optimizer_step_count = step
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
@@ -879,7 +889,7 @@ def run_scientific_single(
                     "weightwatcher_overhead": ww_over,
                     "projection_overhead": proj_time,
                     "peak_memory": float(
-                        torch.cuda.max_memory_allocated() if torch.cuda.is_available() else 0.0
+                        memory_stats(selected_device).get("max_allocated", 0.0)
                     ),
                 }
             )
