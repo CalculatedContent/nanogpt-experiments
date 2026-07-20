@@ -43,7 +43,7 @@ train:
   layer_lr: flat
   llrd_min_multiplier: 0.5
   evaluation_sampling: random_per_eval
-  wwpgd_interval: null
+  wwpgd_interval: 1
   warmup_steps: null
   lr_decay_steps: null
 wwpgd:
