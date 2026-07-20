@@ -74,3 +74,23 @@ def test_source_data_keeps_individual_seeds_and_aggregates_only_matching_tokens(
     # No smoothing or interpolation across incompatible budgets: aggregates exist only at plotted x values.
     assert set(aggregate["x_value"]).issubset(set(source["x_value"]))
     assert aggregate.groupby(["optimizer_family", "x_value"])["seed_count"].max().min() == 2
+
+
+def test_spectral_exports_include_seed_rows_and_aggregate_bands(tmp_path: Path):
+    out = tmp_path / "figures"
+    outputs = build_all_publication_figures(_runs(tmp_path / "runs"), out, PublicationPlotConfig(band="mean_std"))
+    alpha_data = pd.read_csv(outputs["alpha_trajectories"]["data"])
+    assert {"seed", "row_type", "band_low", "band_high", "band_definition"}.issubset(alpha_data.columns)
+    assert {"seed", "aggregate"}.issubset(set(alpha_data["row_type"].dropna()))
+    aggregates = alpha_data[alpha_data["row_type"].eq("aggregate")]
+    assert aggregates["band_definition"].eq(BAND_DEFINITIONS["mean_std"]).all()
+    assert aggregates.groupby(["optimizer_family", "tokens_seen"])["seed_count"].max().min() == 2
+
+
+def test_paired_effect_exports_all_available_base_optimizers_without_notebook_hardcoding(tmp_path: Path):
+    out = tmp_path / "figures"
+    outputs = build_all_publication_figures(_runs(tmp_path / "runs"), out, PublicationPlotConfig())
+    paired = pd.read_csv(outputs["paired_wwpgd_effects"]["data"])
+    plotted = paired[paired["row_type"].eq("plotted_effect")]
+    assert set(plotted["base_optimizer"].dropna()) == {"adamw", "muon", "stableadamw"}
+    assert set(plotted["metric"].dropna()).issuperset({"validation_loss", "test_loss", "val_perplexity", "generalization_gap"})
