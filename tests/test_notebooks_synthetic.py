@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import nbformat
+import pytest
 from nbclient import NotebookClient
 
 
+@pytest.mark.notebook
 def test_synthetic_notebook_executes_offline(tmp_path: Path):
     """Execute a tiny notebook that exercises repo imports without network or large data."""
     nb = nbformat.v4.new_notebook(

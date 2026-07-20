@@ -84,6 +84,19 @@ def test_ci_workflow_contains_acceptance_commands():
     for cmd in ["python -m compileall -q src tests", "ruff check src tests", "pytest -q -m \"not slow\""]:
         assert cmd in ci
 
+
+def test_ci_has_required_fixture_backed_analysis_notebook_job():
+    ci = Path(".github/workflows/ci.yml").read_text()
+    assert "analysis-notebooks:" in ci
+    assert "continue-on-error" not in ci
+    assert "|| true" not in ci
+    assert "pytest -q -m \"notebook\" tests/test_schema_v2_analysis.py::test_notebooks_parse_and_execute_fixture" in ci
+    assert "test_notebooks_synthetic.py" not in ci
+    assert "actions/upload-artifact" in ci
+    assert "if: failure()" in ci
+    for env_name in ["WWGPT_RESULTS_ROOT", "WWGPT_SCALING_ROOT", "WWGPT_STRENGTH_SCAN_ROOT", "MPLBACKEND"]:
+        assert env_name in ci
+
 def test_clean_install_imports_required_packages():
     import importlib
 

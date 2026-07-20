@@ -1,6 +1,9 @@
 
 from pathlib import Path
+import os
+
 import nbformat
+import pytest
 import pandas as pd
 from nbclient import NotebookClient
 from wwgpt.analysis import *
@@ -47,11 +50,31 @@ def test_spectral_terminal_alignment_t_summary_scaling():
     inv=discover_scaling_runs(FIX.parents[3]); design=scaling_design_points(inv); ready=scaling_readiness(design)
     assert not bool(ready['ready'].iloc[0])
 
+@pytest.mark.notebook
+@pytest.mark.slow(reason="executes the full fixture-backed analysis notebook set; run in the dedicated notebook CI job")
 def test_notebooks_parse_and_execute_fixture(tmp_path, monkeypatch):
-    monkeypatch.setenv('WWGPT_RESULTS_ROOT', str(FIX)); monkeypatch.setenv('WWGPT_SCALING_ROOT', str(FIX.parents[3])); monkeypatch.setenv('WWGPT_STRENGTH_SCAN_ROOT', str(Path('tests/fixtures/strength_scan').resolve()))
-    for nbp in sorted(p for p in Path('notebooks').glob('0*.ipynb') if p.name != '09_experiment_reproducibility_report.ipynb'):
+    monkeypatch.setenv('MPLBACKEND', 'Agg')
+    monkeypatch.setenv('WWGPT_RESULTS_ROOT', str(FIX))
+    monkeypatch.setenv('WWGPT_SCALING_ROOT', str(FIX.parents[3]))
+    monkeypatch.setenv('WWGPT_STRENGTH_SCAN_ROOT', str(Path('tests/fixtures/strength_scan').resolve()))
+    output_dir = Path(os.environ.get('WWGPT_NOTEBOOK_OUTPUT_DIR', tmp_path / 'executed_notebooks'))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    notebooks = [
+        Path('notebooks/01_validate_repository.ipynb'),
+        Path('notebooks/02_compare_single_level.ipynb'),
+        Path('notebooks/03_weightwatcher_analysis.ipynb'),
+        Path('notebooks/04_scaling_laws.ipynb'),
+        Path('notebooks/05_overfitting_and_generalization.ipynb'),
+        Path('notebooks/06_summary_report.ipynb'),
+        Path('notebooks/07_strength_scan_overview.ipynb'),
+        Path('notebooks/08_strength_scan_weightwatcher.ipynb'),
+    ]
+    for nbp in notebooks:
         nb=nbformat.read(nbp, as_version=4)
-        NotebookClient(nb, timeout=120, kernel_name='python3').execute(cwd=str(Path.cwd()))
+        try:
+            NotebookClient(nb, timeout=120, kernel_name='python3').execute(cwd=str(Path.cwd()))
+        finally:
+            nbformat.write(nb, output_dir / f"{nbp.stem}_executed.ipynb")
 
 def test_broader_results_root_env_resolves_to_multiplier_fixture(monkeypatch):
     run_root = FIX.parents[2]

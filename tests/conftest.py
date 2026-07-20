@@ -20,9 +20,7 @@ def pytest_collection_modifyitems(config, items):
         "test_schema_v2_analysis.py", "test_strength_scan.py", "test_wwpgd_training_cadence.py",
     }
     accelerator_files = {"test_accelerator_device.py"}
-    notebook_files = {"test_notebooks_synthetic.py"}
     slow_tests = {
-        "tests/test_schema_v2_analysis.py::test_notebooks_parse_and_execute_fixture",
         "tests/test_core.py::test_notebooks_parse",
         "tests/test_strength_scan.py::test_notebooks_parse_strength",
     }
@@ -32,8 +30,6 @@ def pytest_collection_modifyitems(config, items):
         nodeid = item.nodeid
         if name in accelerator_files:
             item.add_marker(pytest.mark.accelerator)
-        elif name in notebook_files or "notebook" in item.name or "notebooks" in item.name:
-            item.add_marker(pytest.mark.notebook)
         elif name in integration_files:
             item.add_marker(pytest.mark.integration)
         elif name in unit_files:
