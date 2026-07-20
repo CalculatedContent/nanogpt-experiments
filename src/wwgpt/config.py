@@ -120,7 +120,7 @@ class ExperimentConfig:
     wwpgd: WWPGDConfig = field(default_factory=WWPGDConfig)
     seeds: list[int] = field(default_factory=lambda: DEFAULT_SEEDS.copy())
     token_multipliers: list[int] = field(default_factory=lambda: TOKEN_MULTIPLIERS.copy())
-    parameter_count_convention: str = "total"
+    parameter_count_convention: str = "transformer_body"
     base_optimizer: str = "adamw"
     extensions: list[str] = field(default_factory=lambda: ["none", "wwpgd"])
     dataset_name: str = "HuggingFaceFW/fineweb-edu"
@@ -234,6 +234,9 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("dataset_revision must be configured; refusing unpinned dataset revision")
     if not cfg.dataset_split:
         raise ValueError("dataset_split must be configured")
+    from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS
+    if cfg.parameter_count_convention not in PARAMETER_COUNT_CONVENTIONS:
+        raise ValueError(f"unknown parameter_count_convention {cfg.parameter_count_convention}")
 
 
 def _reject_unknown_keys(section: str, data: dict[str, Any], allowed: set[str]) -> None:

@@ -558,7 +558,8 @@ def run_scientific_single(
         torch.cuda.manual_seed_all(resolved_seeds["dropout_seed"])
     bundle, resolved_llrd_gamma = build_optimizer_bundle(model, cfg.train, base_optimizer)
     report = model.parameter_report()
-    parameter_count_used = report.total_parameters if cfg.parameter_count_convention == "total" else report.non_embedding_parameters
+    from wwgpt.scaling import selected_parameter_count
+    parameter_count_used = selected_parameter_count(report, cfg.parameter_count_convention)
     tokens_per_step = cfg.train.batch_size * cfg.model.block_size * cfg.train.gradient_accumulation
     if cfg.train.max_steps is not None:
         steps = cfg.train.max_steps; target_tokens = steps * tokens_per_step; budget_source = "max_steps"
@@ -599,6 +600,9 @@ def run_scientific_single(
         "budget_source": budget_source,
         "parameter_count_convention": cfg.parameter_count_convention,
         "parameter_count_used": parameter_count_used,
+        "selected_parameter_count": parameter_count_used,
+        "realized_tokens_per_selected_parameter": realized_tokens / max(parameter_count_used, 1),
+        "sequence_count": realized_tokens // cfg.model.block_size,
         "dataset_name": data.data_manifest["dataset_name"],
         "dataset_config": data.data_manifest["dataset_config"],
         "dataset_revision": data.data_manifest["dataset_revision"],

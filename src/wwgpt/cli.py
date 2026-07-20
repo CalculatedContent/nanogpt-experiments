@@ -10,7 +10,7 @@ import yaml
 from wwgpt.analysis import analyze_results
 from wwgpt.config import DEFAULT_SEEDS
 from wwgpt.data import prepare_scientific_data
-from wwgpt.scaling import plan_budget
+from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count
 from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
 from wwgpt.strength_scan import run_strength_scan, parse_strengths
 from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_strength_scan_cmd
@@ -46,20 +46,59 @@ def _resolved_config(args):
 
 def _budget_summary(cfg, token_multiplier: int) -> dict[str, int]:
     from wwgpt.model import GPT
-    from wwgpt.scaling import plan_budget
+    from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count
 
     report = GPT(cfg.model).parameter_report()
-    param_count = getattr(report, f"{cfg.parameter_count_convention}_parameters", report.total_parameters)
+    param_count = selected_parameter_count(report, cfg.parameter_count_convention)
+    old_total_count = selected_parameter_count(report, "total")
     budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
+    old_budget = plan_budget(old_total_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
     return {
+        "parameter_count_convention": cfg.parameter_count_convention,
+        "parameter_count_convention_definition": PARAMETER_COUNT_CONVENTIONS[cfg.parameter_count_convention],
         "parameter_count": int(param_count),
+        "selected_parameter_count": int(param_count),
+        "old_total_parameter_count": int(old_total_count),
+        "old_total_requested_tokens": int(old_budget.requested_tokens),
+        "old_total_realized_tokens": int(old_budget.realized_tokens),
+        "old_vs_selected_realized_token_delta": int(budget.realized_tokens - old_budget.realized_tokens),
         "token_multiplier": int(token_multiplier),
         "requested_tokens": int(budget.requested_tokens),
         "realized_tokens": int(budget.realized_tokens),
         "tokens_per_step": int(budget.tokens_per_step),
         "estimated_optimizer_steps": int(budget.steps),
+        "sequence_count": int(budget.sequence_count),
+        "optimizer_step_count": int(budget.optimizer_step_count),
+        "realized_tokens_per_selected_parameter": float(budget.tokens_per_selected_parameter),
+        "parameter_report": report.__dict__,
     }
 
+
+
+def _level_multiplier_table(cfg, requested_level: int, requested_multiplier: int) -> list[dict[str, object]]:
+    from dataclasses import replace
+    from wwgpt.config import ladder
+    from wwgpt.model import GPT
+
+    rows = []
+    for level, model_cfg in ladder().items():
+        resolved_model = replace(model_cfg, vocab_size=cfg.model.vocab_size)
+        report = GPT(resolved_model).parameter_report()
+        for multiplier in cfg.token_multipliers:
+            budget = plan_budget(selected_parameter_count(report, cfg.parameter_count_convention), multiplier, cfg.train.batch_size, resolved_model.block_size, cfg.train.gradient_accumulation, 10**18)
+            rows.append({
+                "level": level,
+                "token_multiplier": multiplier,
+                "is_requested_level_multiplier": level == requested_level and multiplier == requested_multiplier,
+                "requested_tokens": budget.requested_tokens,
+                "realized_tokens": budget.realized_tokens,
+                "selected_parameter_count": budget.selected_parameter_count,
+                "realized_tokens_per_selected_parameter": budget.tokens_per_selected_parameter,
+                "sequence_count": budget.sequence_count,
+                "optimizer_step_count": budget.optimizer_step_count,
+                "parameter_report": report.__dict__,
+            })
+    return rows
 
 def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials: int, output_dirs: list[Path], dry_run: bool = False) -> None:
     import json
@@ -79,6 +118,8 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
         "levels": [args.level],
         "seeds": seeds,
         "token_budgets": budget,
+        "scaling_law_accounting": {"selected_convention": budget["parameter_count_convention"], "definition": budget["parameter_count_convention_definition"], "comparison_old_total_vs_selected": {"old_total_parameter_count": budget["old_total_parameter_count"], "old_total_requested_tokens": budget["old_total_requested_tokens"], "old_total_realized_tokens": budget["old_total_realized_tokens"], "selected_parameter_count": budget["selected_parameter_count"], "selected_requested_tokens": budget["requested_tokens"], "selected_realized_tokens": budget["realized_tokens"]}},
+        "level_multiplier_table": _level_multiplier_table(cfg, args.level, args.token_multiplier),
         "estimated_optimizer_steps": budget["estimated_optimizer_steps"],
         "output_directories": [str(p) for p in output_dirs],
         "dataset_revision": cfg.dataset_revision,

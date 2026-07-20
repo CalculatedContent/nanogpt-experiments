@@ -32,6 +32,13 @@ def test_prepare_data_profile_dry_run_loads_profile(tmp_path):
     assert payload["config_path"] == "configs/reproduction_tiny.yaml"
     assert payload["resolved_config"]["data_mode"] == "tiny_shakespeare_char_reproduction"
     assert payload["resolved_config"]["model"]["block_size"] == 64
+    assert payload["token_budgets"]["parameter_count_convention"] in {"total", "transformer_body"}
+    assert payload["level_multiplier_table"]
+    first = payload["level_multiplier_table"][0]
+    for key in ["requested_tokens", "realized_tokens", "selected_parameter_count", "realized_tokens_per_selected_parameter", "sequence_count", "optimizer_step_count"]:
+        assert key in first
+    for key in ["total_unique_trainable_parameters", "non_position_parameters", "transformer_body_parameters", "token_embedding_parameters", "position_embedding_parameters", "output_head_parameters", "tied_weight_accounting"]:
+        assert key in first["parameter_report"]
 
 
 def test_run_multiseed_dry_run_is_canonical_six_arm(tmp_path):
