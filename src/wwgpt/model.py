@@ -28,15 +28,7 @@ class CausalSelfAttention(nn.Module):
         q = self.query(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         k = self.key(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         v = self.value(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            is_causal=True,
-            scale=self.head_dim ** -0.5,
-        )
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.attn_dropout.p if self.training else 0.0, is_causal=True, scale=self.head_dim ** -0.5)
         return self.resid_dropout(self.proj(y.transpose(1, 2).contiguous().view(b, t, c)))
 
 
@@ -47,10 +39,7 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(cfg)
         self.ln_2 = nn.LayerNorm(cfg.n_embd, bias=cfg.layernorm_bias)
         act: nn.Module = nn.GELU() if cfg.activation == "gelu" else nn.ReLU()
-        self.mlp = nn.Sequential(
-            nn.Linear(cfg.n_embd, cfg.mlp_mult * cfg.n_embd, bias=cfg.linear_bias), act,
-            nn.Linear(cfg.mlp_mult * cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias), nn.Dropout(cfg.dropout)
-        )
+        self.mlp = nn.Sequential(nn.Linear(cfg.n_embd, cfg.mlp_mult * cfg.n_embd, bias=cfg.linear_bias), act, nn.Linear(cfg.mlp_mult * cfg.n_embd, cfg.n_embd, bias=cfg.linear_bias), nn.Dropout(cfg.dropout))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.ln_1(x))
@@ -61,11 +50,16 @@ class Block(nn.Module):
 class ParameterReport:
     total_parameters: int
     trainable_parameters: int
+    total_unique_trainable_parameters: int
+    non_position_parameters: int
+    transformer_body_parameters: int
     token_embedding_parameters: int
     position_embedding_parameters: int
     output_head_parameters: int
     embedding_parameters: int
     non_embedding_parameters: int
+    tied_embedding_head: bool
+    tied_weight_accounting: str
     attention_heads: int
     transformer_blocks: int
     context_length: int
@@ -115,13 +109,18 @@ class GPT(nn.Module):
         return logits, loss
 
     def parameter_report(self) -> ParameterReport:
-        total = sum(p.numel() for p in self.parameters())
-        train = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        unique_params = list(self.parameters())
+        total = sum(p.numel() for p in unique_params)
+        train = sum(p.numel() for p in unique_params if p.requires_grad)
         tok = self.wte.weight.numel()
         pos = self.wpe.weight.numel()
         head = self.lm_head.weight.numel()
-        emb = tok + pos
-        return ParameterReport(total, train, tok, pos, head, emb, total - emb, self.cfg.n_head, self.cfg.n_layer, self.cfg.block_size, self.cfg.vocab_size)
+        tied = self.lm_head.weight is self.wte.weight
+        transformer_body = sum(p.numel() for p in self.blocks.parameters() if p.requires_grad) + sum(p.numel() for p in self.ln_f.parameters() if p.requires_grad)
+        non_position = train - pos
+        non_embedding = train - tok - pos if tied else train - tok - pos - head
+        accounting = "lm_head.weight is tied to wte.weight; output_head_parameters is logical and excluded from total unique trainable parameters" if tied else "lm_head.weight is untied and included separately in total unique trainable parameters"
+        return ParameterReport(total, train, train, non_position, transformer_body, tok, pos, head, tok + pos, non_embedding, tied, accounting, self.cfg.n_head, self.cfg.n_layer, self.cfg.block_size, self.cfg.vocab_size)
 
-    def report_dict(self) -> dict[str, int]:
+    def report_dict(self) -> dict[str, int | bool | str]:
         return asdict(self.parameter_report())

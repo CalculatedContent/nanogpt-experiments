@@ -1,6 +1,6 @@
 scientific_schema_version: 3
 model_architecture_version: nanogpt_separate_qkv_tied_head_v2
-parameter_count_convention: total
+parameter_count_convention: transformer_body
 base_optimizer: adamw
 extensions:
 - none
