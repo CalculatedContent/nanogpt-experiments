@@ -354,6 +354,41 @@ def analyze_results(results_root: Path) -> Path:
     (out / "analysis_manifest.json").write_text(json.dumps({"source": str(results_root), "completed_runs": len(runs)}))
     return out
 
+
+def audit_spectral_validity(spectral: pd.DataFrame) -> pd.DataFrame:
+    """Return a machine-readable row-level validity audit for WeightWatcher science rows."""
+    rows: list[dict[str, Any]] = []
+    required = ["step", "tokens_seen", "alpha", "spectral_estimator", "valid_weightwatcher", "valid_for_science", "scientific_schema_version"]
+    finite_fields = ["step", "tokens_seen", "alpha"]
+    optional_finite_fields = ["D", "num_evals", "spectral_norm", "stable_rank"]
+    schemas = set(pd.to_numeric(spectral.get("scientific_schema_version", pd.Series(dtype=float)), errors="coerce").dropna().astype(int).unique()) if not spectral.empty else set()
+    incompatible_schema_pool = len(schemas) > 1
+    for i, row in spectral.reset_index(drop=True).iterrows():
+        reasons: list[str] = []
+        for col in required:
+            if col not in spectral.columns or pd.isna(row.get(col)):
+                reasons.append(f"missing_{col}")
+        estimator = str(row.get("spectral_estimator", "")).lower()
+        if estimator != "weightwatcher":
+            reasons.append("spectral_estimator_not_weightwatcher")
+        valid_weightwatcher = str(row.get("valid_weightwatcher", False)).lower() in {"true", "1"}
+        valid_for_science = str(row.get("valid_for_science", False)).lower() in {"true", "1"}
+        if not valid_weightwatcher:
+            reasons.append("valid_weightwatcher_false")
+        if not valid_for_science:
+            reasons.append("valid_for_science_false")
+        schema = pd.to_numeric(pd.Series([row.get("scientific_schema_version")]), errors="coerce").iloc[0] if "scientific_schema_version" in spectral.columns else np.nan
+        if not np.isfinite(schema) or schema < 2:
+            reasons.append("unsupported_scientific_schema_version")
+        if incompatible_schema_pool:
+            reasons.append("incompatible_schema_pool")
+        for col in finite_fields + [c for c in optional_finite_fields if c in spectral.columns]:
+            val = pd.to_numeric(pd.Series([row.get(col)]), errors="coerce").iloc[0]
+            if not np.isfinite(val):
+                reasons.append(f"nonfinite_{col}")
+        rows.append({"row_index": i, "seed": row.get("seed"), "pair_id": row.get("pair_id"), "optimizer_family": row.get("optimizer_family"), "step": row.get("step"), "tokens_seen": row.get("tokens_seen"), "layer_name": row.get("layer_name"), "spectral_estimator": row.get("spectral_estimator"), "scientific_schema_version": row.get("scientific_schema_version"), "valid_for_science": row.get("valid_for_science"), "valid_weightwatcher": row.get("valid_weightwatcher"), "valid_for_weightwatcher_science": not reasons, "invalid_reasons": ";".join(dict.fromkeys(reasons))})
+    return pd.DataFrame(rows)
+
 # compatibility helpers
 def discover_pair_directories(results_root: Path) -> list[Path]:
     return sorted([p for p in Path(results_root).iterdir() if p.is_dir() and p.name.startswith("pair_")]) if Path(results_root).exists() else []
