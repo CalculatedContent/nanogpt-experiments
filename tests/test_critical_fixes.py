@@ -1,7 +1,14 @@
+import math
+
+import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from wwgpt.train import WWPGDExtension
+from wwgpt.config import ExperimentConfig, ModelConfig, TrainConfig, WWPGDConfig
+from wwgpt.data import TokenData
+from wwgpt.train import WWPGDExtension, _perplexity_from_cross_entropy, run_scientific_single
+from wwgpt.utils import sha256_bytes
 from wwgpt.ww import measured_projection_spectral_rows
 from wwgpt.checkpointing import save_checkpoint, complete_test_checkpoint_state
 
@@ -67,14 +74,6 @@ def test_immediate_projection_post_call_count(monkeypatch):
     rows = measured_projection_spectral_rows(pre, object(), projection_rows=proj, target_alpha=2.0, step=1, tokens_seen=1, optimizer="adamw_wwpgd", seed=0, pair_id="p", projection_event=0)
     assert calls["post"] == 1
     assert rows[0]["alpha_before"] == 1.0 and rows[0]["alpha_after"] == 1.5
-
-import math
-import numpy as np
-import torch
-from wwgpt.config import ExperimentConfig, ModelConfig, TrainConfig, WWPGDConfig
-from wwgpt.data import TokenData
-from wwgpt.train import _perplexity_from_cross_entropy, run_scientific_single
-from wwgpt.utils import sha256_bytes
 
 
 def test_metric_formulas_do_not_clip_perplexity_and_gap_semantics():

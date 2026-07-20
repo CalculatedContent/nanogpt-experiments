@@ -20,7 +20,7 @@ def test_schema_v3_architecture_defaults_and_report():
     for mod in [b.attn.key, b.attn.query, b.attn.value, b.attn.proj, b.mlp[0], b.mlp[2], m.lm_head]:
         assert mod.bias is None
     assert b.ln_1.bias is not None and b.ln_2.bias is not None and m.ln_f.bias is not None
-    assert m.lm_head.weight.data_ptr() != m.wte.weight.data_ptr()
+    assert m.lm_head.weight.data_ptr() == m.wte.weight.data_ptr()
     rep = m.parameter_report()
     assert rep.output_head_parameters == m.lm_head.weight.numel()
     assert rep.embedding_parameters == m.wte.weight.numel() + m.wpe.weight.numel()

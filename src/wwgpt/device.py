@@ -151,7 +151,7 @@ def run_device_preflight(output: Path | None = None, requested: str | None = "au
     from dataclasses import asdict
     from wwgpt.model import GPT
     from wwgpt.config import ModelConfig
-    from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, rng_state, restore_rng_state
+    from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, rng_state, restore_rng_state, complete_test_checkpoint_state
     from wwgpt.ww import measured_projection_spectral_rows, weightwatcher_details, apply_external_wwpgd
     outdir = Path(output or "."); outdir.mkdir(parents=True, exist_ok=True)
     report = {"requested_device": requested or "auto", "valid_for_science": False, "timings": {}, "warnings": [], "failures": []}
@@ -167,7 +167,7 @@ def run_device_preflight(output: Path | None = None, requested: str | None = "au
     rows=apply_external_wwpgd(model, event_index=0, actual_step=1, actual_tokens_seen=8); report["wwpgd_success"]=True; report["wwpgd_rows"]=len(rows)
     assert all(torch.isfinite(p).all() for p in model.parameters())
     reader_state={"pos": 8}; before_rng=rng_state()
-    ck=save_checkpoint(outdir, {"model_state_dict":model.state_dict(),"optimizer_state_dict":{"optimizers":[opt.state_dict()]},"scheduler_state_dict":None,"gradient_scaler_state_dict":None,"current_step":1,"next_step":2,"tokens_processed":8,"training_reader_position":reader_state["pos"],"reader_position":reader_state["pos"],"seed":0,**before_rng,"device_type":getattr(dev,'type',str(dev)),"precision_policy":"torch_default","gradient_accumulation_position":0,"metrics_rows":[],"periodic_weightwatcher_rows":[],"wwpgd_projection_rows":rows,"immediate_projection_weightwatcher_rows":[],"scientific_schema_version":0,"compatibility":{}})
+    ck=save_checkpoint(outdir, complete_test_checkpoint_state(model_state_dict=model.state_dict(), optimizer_state_dict={"optimizers":[opt.state_dict()]}, base_optimizer_state_dict=opt.state_dict(), current_step=1, next_step=2, tokens_processed=8, training_reader_position=reader_state["pos"], reader_position=reader_state["pos"], seed=0, **before_rng, device_type=getattr(dev,'type',str(dev)), wwpgd_projection_rows=rows, resolved_config={"device_preflight": True}, optimizer_fingerprint="device-preflight", data_hash="device-preflight", tokenizer_hash="device-preflight"))
     loaded=load_latest_checkpoint(outdir); model.load_state_dict(loaded["model_state_dict"]); opt.load_state_dict(loaded["optimizer_state_dict"]["optimizers"][0]); restore_rng_state(loaded); report["checkpoint_success"]=True
     logits2, loss2=model(x,y); loss2.backward(); optimizer_step(opt, dev); synchronize_device(dev); report["resume_success"]=True
     report["timings"]["total_seconds"]=time.perf_counter()-t0

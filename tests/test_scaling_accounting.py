@@ -15,7 +15,7 @@ def _manual_counts(model: GPT):
 
 
 def test_parameter_counting_every_level_default_tied_weights():
-    for level, cfg in ladder().items():
+    for _level, cfg in ladder().items():
         model = GPT(cfg)
         rep = model.parameter_report()
         unique, token, pos, head, body = _manual_counts(model)
