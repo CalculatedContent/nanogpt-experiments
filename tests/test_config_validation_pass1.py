@@ -79,3 +79,14 @@ def test_invalid_seed_and_optimizer_names_are_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="unknown extension"):
         load_config(_write_config(tmp_path, {"extensions": ["none", "invalid_extension"]}), level=0)
+
+
+def test_train_max_steps_loads_null_and_positive(tmp_path):
+    assert load_config(_write_config(tmp_path, {"train": {"max_steps": None}}), level=0).train.max_steps is None
+    assert load_config(_write_config(tmp_path, {"train": {"max_steps": 3}}), level=0).train.max_steps == 3
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_train_max_steps_rejects_non_positive(tmp_path, value):
+    with pytest.raises(ValueError, match="train.max_steps"):
+        load_config(_write_config(tmp_path, {"train": {"max_steps": value}}), level=0)
