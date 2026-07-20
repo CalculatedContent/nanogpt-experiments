@@ -82,6 +82,8 @@ def save_publication_figure(fig, source_df: pd.DataFrame, analysis_dir: Path, fi
         source_df.to_csv(data, index=False)
     md = {**metadata, "band": config.band, "band_definition": BAND_DEFINITIONS[config.band], "png_dpi": config.dpi, "vector_format": "pdf", "generated_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "git_commit": _commit(), "figure_generation_code_version": "publication_plots_v2", "source_data": str(data)}
     meta.write_text(json.dumps(md, indent=2, sort_keys=True) + "\n")
+    import matplotlib.pyplot as plt
+    plt.close(fig)
     return {"png": png, "pdf": pdf, "data": data, "csv": data if config.file_format == "csv" else None, "metadata": meta}
 
 def student_t_ci_by_seed(df: pd.DataFrame, metric: str, group_cols: list[str]):
@@ -177,22 +179,61 @@ def _spectral_source(runs: list[dict[str, Any]]) -> pd.DataFrame:
             rows.append({**row.to_dict(), "seed": r.get("seed"), "pair_id": r.get("pair_id"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension")})
     return pd.DataFrame(rows)
 
+
+def _aggregate_numeric_source(source: pd.DataFrame, value_col: str, group_cols: list[str], config: PublicationPlotConfig) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if source.empty:
+        return pd.DataFrame(columns=group_cols + ["mean", "band_low", "band_high", "seed_count", "band_definition"])
+    seed_level = source.groupby(group_cols + ["seed"], dropna=False)[value_col].mean().reset_index()
+    for keys, g in seed_level.groupby(group_cols, dropna=False):
+        vals = pd.to_numeric(g[value_col], errors="coerce").dropna()
+        if vals.empty:
+            continue
+        mean = float(vals.mean())
+        sd = float(vals.std(ddof=1)) if len(vals) > 1 else 0.0
+        if config.band == "mean_ci95" and len(vals) > 1:
+            from scipy import stats
+            half = float(stats.t.ppf(0.975, len(vals) - 1) * sd / np.sqrt(len(vals)))
+        else:
+            half = sd if config.band == "mean_std" else 0.0
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        rows.append({**dict(zip(group_cols, keys)), "mean": mean, "band_low": mean - half, "band_high": mean + half, "seed_count": int(len(vals)), "band_definition": BAND_DEFINITIONS[config.band]})
+    return pd.DataFrame(rows)
+
 def _plot_spectral_families(runs, out_dir, config):
     import matplotlib.pyplot as plt
-    src=_spectral_source(runs); outs={}
-    specs={"per_layer_alpha": ("layer_name", "alpha", "Layer", "Alpha"), "alpha_trajectories": ("tokens_seen", "alpha", "Tokens seen", "Alpha"), "correlation_trap_metrics": ("tokens_seen", "detX_num", "Tokens seen", "detX count")}
-    for name,(x,y,xlab,ylab) in specs.items():
-        fig, ax=plt.subplots(figsize=(7,4)); plot=src.dropna(subset=[c for c in [x,y] if c in src.columns]) if not src.empty and {x,y}.issubset(src.columns) else pd.DataFrame(columns=[x,y])
+    src = _spectral_source(runs)
+    outs = {}
+    specs = {
+        "per_layer_alpha": ("layer_name", "alpha", "Layer", "Alpha"),
+        "alpha_trajectories": ("tokens_seen", "alpha", "Tokens seen", "Alpha"),
+        "correlation_trap_metrics": ("tokens_seen", "detX_num", "Tokens seen", "detX count"),
+    }
+    for name, (x, y, xlab, ylab) in specs.items():
+        fig, ax = plt.subplots(figsize=(7, 4))
+        plot = src.dropna(subset=[x, y]).copy() if not src.empty and {x, y}.issubset(src.columns) else pd.DataFrame(columns=[x, y, "optimizer_family", "seed"])
+        agg = pd.DataFrame()
         if not plot.empty:
+            group_cols = ["optimizer_family", "base_optimizer", "extension", x]
+            agg = _aggregate_numeric_source(plot, y, group_cols, config)
             for fam in optimizer_order(plot):
-                g=plot[plot["optimizer_family"]==fam]
-                if x == "layer_name":
-                    a=g.groupby(x)[y].mean().reset_index(); ax.plot(a[x].astype(str), a[y], marker="o", lw=2.5, label=optimizer_label(fam))
-                else:
-                    for _, s in g.groupby("seed", dropna=False): ax.plot(s.sort_values(x)[x], s.sort_values(x)[y], alpha=.22, lw=1)
-                    a=g.groupby(x)[y].mean().reset_index(); ax.plot(a[x], a[y], lw=2.8, label=optimizer_label(fam))
-        ax.set_xlabel(xlab); ax.set_ylabel(ylab); ax.tick_params(axis='x', labelrotation=45); ax.legend(); ax.grid(alpha=.2)
-        outs[name]=save_publication_figure(fig, plot, out_dir, name, {"figure": name, "band_definition": BAND_DEFINITIONS[config.band]}, config)
+                g = plot[plot["optimizer_family"] == fam]
+                fam_label = optimizer_label(fam, g["base_optimizer"].dropna().iloc[0] if g["base_optimizer"].notna().any() else None, g["extension"].dropna().iloc[0] if g["extension"].notna().any() else None)
+                for _, seed_g in g.groupby("seed", dropna=False):
+                    seed_series = seed_g.groupby(x, dropna=False)[y].mean().reset_index().sort_values(x)
+                    ax.plot(seed_series[x].astype(str) if x == "layer_name" else seed_series[x], seed_series[y], alpha=0.22, lw=1)
+                a = agg[agg["optimizer_family"] == fam].sort_values(x)
+                if not a.empty:
+                    xx = np.arange(len(a)) if x == "layer_name" else a[x].to_numpy(float)
+                    ax.plot(xx if x == "layer_name" else a[x], a["mean"], marker="o" if x == "layer_name" else None, lw=2.8, label=fam_label)
+                    if x == "layer_name":
+                        ax.set_xticks(xx, a[x].astype(str), rotation=45, ha="right")
+                    else:
+                        ax.fill_between(a[x].to_numpy(float), a["band_low"].to_numpy(float), a["band_high"].to_numpy(float), alpha=0.14)
+        ax.set_xlabel(xlab); ax.set_ylabel(ylab); ax.legend(); ax.grid(alpha=.2)
+        combined = pd.concat([plot.assign(row_type="seed"), agg.assign(row_type="aggregate")], ignore_index=True, sort=False)
+        outs[name] = save_publication_figure(fig, combined, out_dir, name, {"figure": name, "individual_seeds": "light lines", "aggregate_trends": "prominent mean lines", "band_definition": BAND_DEFINITIONS[config.band]}, config)
     return outs
 
 def _plot_paired_effects(runs, out_dir, config):
@@ -207,6 +248,7 @@ def _plot_paired_effects(runs, out_dir, config):
     data=pd.concat(finals, ignore_index=True, sort=False) if finals else pd.DataFrame()
     fig, ax=plt.subplots(figsize=(7,4))
     effects=[]
+    e = pd.DataFrame()
     if not data.empty:
         for metric,g in data.groupby("metric"):
             est=paired_effect_estimates(g, metric)
@@ -216,4 +258,5 @@ def _plot_paired_effects(runs, out_dir, config):
             labels=[f"{optimizer_label(b)}\n{m}" for b,m in zip(e["base_optimizer"], e["metric"])]
             ax.bar(range(len(e)), e["paired_effect_mean"]); ax.axhline(0,color="black",lw=1); ax.set_xticks(range(len(e)), labels, rotation=45, ha="right")
     ax.set_ylabel("WW-PGD minus baseline (paired final metric)"); ax.grid(axis="y", alpha=.2)
-    return save_publication_figure(fig, data if not data.empty else pd.DataFrame(), out_dir, "paired_wwpgd_effects", {"figure":"paired_wwpgd_effects", "paired_by":"seed and base_optimizer"}, config)
+    combined = pd.concat([data.assign(row_type="paired_seed_difference"), e.assign(row_type="plotted_effect")], ignore_index=True, sort=False) if not data.empty or not e.empty else pd.DataFrame()
+    return save_publication_figure(fig, combined, out_dir, "paired_wwpgd_effects", {"figure":"paired_wwpgd_effects", "paired_by":"seed and base_optimizer", "plotted_effect":"mean WW-PGD minus baseline paired final metric"}, config)
