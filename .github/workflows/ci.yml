@@ -5,7 +5,8 @@ on:
   pull_request:
 
 jobs:
-  test:
+  quality:
+    name: quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,9 +17,59 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e . ruff pytest
-      - name: Compile
+      - name: Compile source and tests
         run: python -m compileall -q src tests
       - name: Ruff
         run: ruff check src tests
-      - name: Pytest
+
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+      - name: Run non-slow test suite
         run: pytest -q -m "not slow"
+
+  analysis-notebooks:
+    name: analysis-notebooks
+    runs-on: ubuntu-latest
+    env:
+      MPLBACKEND: Agg
+      WWGPT_RESULTS_ROOT: tests/fixtures/schema_v2_results/experiments/level_00/multiplier_20
+      WWGPT_SCALING_ROOT: tests/fixtures/schema_v2_results
+      WWGPT_STRENGTH_SCAN_ROOT: tests/fixtures/strength_scan
+      WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/analysis-notebooks/executed
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and notebook tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest nbclient nbformat ipykernel
+      - name: Execute fixture-backed analysis notebooks
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/analysis-notebooks/logs "$WWGPT_NOTEBOOK_OUTPUT_DIR"
+          pytest -q -m "notebook" tests/test_schema_v2_analysis.py::test_notebooks_parse_and_execute_fixture 2>&1 | tee artifacts/analysis-notebooks/logs/pytest-notebooks.log
+      - name: Upload notebook failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analysis-notebooks-failure-artifacts
+          path: |
+            artifacts/analysis-notebooks/**
+            tests/fixtures/schema_v2_results/**/analysis/**
+            tests/fixtures/schema_v2_results/**/figures/**
+            tests/fixtures/strength_scan/**/analysis/**
+            tests/fixtures/strength_scan/**/figures/**
+          if-no-files-found: warn

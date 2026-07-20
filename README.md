@@ -86,3 +86,7 @@ Open notebooks after setting `WWGPT_STRENGTH_SCAN_ROOT` to either a scan directo
 ```bash
 WWGPT_STRENGTH_SCAN_ROOT=/tmp/wwpgd_strength_scan jupyter lab notebooks/07_strength_scan_overview.ipynb notebooks/08_strength_scan_weightwatcher.ipynb
 ```
+
+## CI branch protection
+
+Pull requests should require the separate `quality`, `tests`, and `analysis-notebooks` workflow jobs before merge. The notebook job executes the fixture-backed analysis notebook regression independently of the normal `pytest -m "not slow"` suite, so green fast tests cannot mask broken analysis notebooks.
