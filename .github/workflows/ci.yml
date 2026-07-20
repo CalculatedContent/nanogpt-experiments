@@ -21,4 +21,4 @@ jobs:
       - name: Ruff
         run: ruff check src tests
       - name: Pytest
-        run: pytest -q
+        run: pytest -q -m "not slow"

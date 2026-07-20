@@ -62,8 +62,8 @@ def test_tied_weight_wwpgd_and_stability():
     m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10, tie_weights=True))
     names = [n for n, _ in matrix_modules(m)]
     assert len(names) == len(set(names))
-    rows = apply_wwpgd(m, 2.0, 0.01, 1)
-    assert rows and all(row["relative_frobenius_weight_change"] >= 0 for row in rows)
+    with pytest.raises(ValueError, match="deprecated strength"):
+        apply_wwpgd(m, 2.0, 0.01, 1)
 
 
 def test_append_only_result_dirs(tmp_path: Path):
@@ -179,7 +179,9 @@ def test_scientific_evaluation_uses_all_probe_batches():
     source = inspect.getsource(wwgpt.train.run_scientific_single)
     assert "val_x[0]" not in source
     assert "train_x[0]" not in source
-    assert source.count("_evaluate_probe_batches(") == 2
+    assert "tm, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)" in source
+    assert "vm, validation_probe_loss = _evaluate_probe_batches(model, val_x, val_y, selected_device)" in source
+    assert "test_metrics, test_loss = _evaluate_probe_batches(model, test_x, test_y, selected_device)" in source
 
 
 def test_streaming_metrics_match_full_logit_reference():

@@ -83,8 +83,7 @@ def audit_arm(run: Path, required_arm: str | None = None) -> dict:
         if int(complete.get("wwpgd_call_count", man.get("wwpgd_call_count", 0)) or 0) <= 0: reasons.append("missing_wwpgd_call_count")
         if int(complete.get("projected_matrix_count", man.get("projected_matrix_count", 0)) or 0) <= 0: reasons.append("missing_projected_matrix_count")
         proj, perr = _read_csv(run / "wwpgd_projection.csv") if (run / "wwpgd_projection.csv").exists() else (pd.DataFrame(), None)
-        if perr: reasons.append("missing_projection_records")
-        elif proj.empty: reasons.append("missing_projection_records")
+        if perr or proj.empty: reasons.append("missing_projection_records")
     ok, msg = _selected_checkpoint_ok(run, man, metrics, complete)
     if not ok and msg: reasons.append(msg)
     return {"arm_name": arm, "base_optimizer": base, "extension": ext, "run_dir": str(run), "passed": not reasons, "reasons": reasons, "identity": {k: man.get(k) for k in ("data_hash", "tokenizer_hash", "model_configuration_hash", "model_config_hash", "realized_tokens", "requested_tokens", "target_train_tokens", "initialization_hash", "training_schedule_hash", "resolved_stochastic_seeds", "optimizer_fingerprint", "weight_decay")}}

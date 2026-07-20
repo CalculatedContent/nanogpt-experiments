@@ -30,6 +30,11 @@ ignore = ["E501", "E701", "E702", "E703", "F401", "I001", "E401", "E731", "F841"
 pythonpath = ["src"]
 norecursedirs = ["backups"]
 markers = [
+    "unit: fast isolated tests for pure functions and local objects",
+    "integration: tests crossing module, CLI, optimizer, data, or artifact boundaries",
+    "accelerator: tests for accelerator selection or optional hardware behavior",
+    "notebook: notebook parsing or execution tests",
+    "slow: long-running/full-notebook tests excluded from normal CI",
     "hardware: smoke tests requiring optional accelerator hardware",
     "cuda: tests requiring CUDA hardware",
     "mps: tests requiring Apple MPS hardware",

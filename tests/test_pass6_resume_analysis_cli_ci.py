@@ -81,7 +81,7 @@ def test_cli_help_lists_profiles_and_commands():
 
 def test_ci_workflow_contains_acceptance_commands():
     ci = Path(".github/workflows/ci.yml").read_text()
-    for cmd in ["python -m compileall -q src tests", "ruff check src tests", "pytest -q"]:
+    for cmd in ["python -m compileall -q src tests", "ruff check src tests", "pytest -q -m \"not slow\""]:
         assert cmd in ci
 
 def test_clean_install_imports_required_packages():
