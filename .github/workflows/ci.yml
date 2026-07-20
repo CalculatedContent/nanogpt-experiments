@@ -20,5 +20,7 @@ jobs:
         run: python -m compileall -q src tests
       - name: Ruff
         run: ruff check src tests
-      - name: Pytest
+      - name: Fast and integration tests
         run: pytest -q -m "not slow"
+      - name: Full notebook regression
+        run: pytest -q -m "slow"
