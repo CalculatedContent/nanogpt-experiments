@@ -10,7 +10,7 @@ import yaml
 from wwgpt.analysis import analyze_results
 from wwgpt.config import DEFAULT_SEEDS
 from wwgpt.data import prepare_scientific_data
-from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count
+from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
 from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
 from wwgpt.strength_scan import run_strength_scan, parse_strengths
 from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_strength_scan_cmd
@@ -46,13 +46,16 @@ def _resolved_config(args):
 
 def _budget_summary(cfg, token_multiplier: int) -> dict[str, int]:
     from wwgpt.model import GPT
-    from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count
+    from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
 
     report = GPT(cfg.model).parameter_report()
     param_count = selected_parameter_count(report, cfg.parameter_count_convention)
     old_total_count = selected_parameter_count(report, "total")
     budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
     old_budget = plan_budget(old_total_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
+    budget_steps = int(budget.steps)
+    resolved_steps = resolve_optimizer_steps(budget_steps, cfg.train.max_steps)
+    resolved_train_tokens = resolved_steps * int(budget.tokens_per_step)
     return {
         "parameter_count_convention": cfg.parameter_count_convention,
         "parameter_count_convention_definition": PARAMETER_COUNT_CONVENTIONS[cfg.parameter_count_convention],
@@ -65,8 +68,13 @@ def _budget_summary(cfg, token_multiplier: int) -> dict[str, int]:
         "token_multiplier": int(token_multiplier),
         "requested_tokens": int(budget.requested_tokens),
         "realized_tokens": int(budget.realized_tokens),
+        "budget_derived_optimizer_steps": budget_steps,
+        "configured_max_steps": cfg.train.max_steps,
+        "resolved_optimizer_steps": resolved_steps,
+        "optimizer_step_limit_source": "configured_max_steps" if cfg.train.max_steps is not None and resolved_steps < budget_steps else "token_multiplier",
+        "resolved_train_tokens": resolved_train_tokens,
         "tokens_per_step": int(budget.tokens_per_step),
-        "estimated_optimizer_steps": int(budget.steps),
+        "estimated_optimizer_steps": resolved_steps,
         "sequence_count": int(budget.sequence_count),
         "optimizer_step_count": int(budget.optimizer_step_count),
         "realized_tokens_per_selected_parameter": float(budget.tokens_per_selected_parameter),
@@ -106,6 +114,7 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
 
     cfg = _resolved_config(args)
     budget = _budget_summary(cfg, args.token_multiplier)
+    cli_max_steps = getattr(args, "max_steps", None)
     payload = {
         "dry_run": dry_run,
         "profile": getattr(args, "profile", None),
@@ -118,6 +127,12 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
         "levels": [args.level],
         "seeds": seeds,
         "token_budgets": budget,
+        "budget_derived_optimizer_steps": budget["budget_derived_optimizer_steps"],
+        "configured_max_steps": budget["configured_max_steps"],
+        "cli_max_steps": cli_max_steps,
+        "resolved_optimizer_steps": budget["resolved_optimizer_steps"],
+        "optimizer_step_limit_source": "cli_max_steps" if cli_max_steps is not None and budget["resolved_optimizer_steps"] <= budget["budget_derived_optimizer_steps"] else budget["optimizer_step_limit_source"],
+        "resolved_train_tokens": budget["resolved_train_tokens"],
         "scaling_law_accounting": {"selected_convention": budget["parameter_count_convention"], "definition": budget["parameter_count_convention_definition"], "comparison_old_total_vs_selected": {"old_total_parameter_count": budget["old_total_parameter_count"], "old_total_requested_tokens": budget["old_total_requested_tokens"], "old_total_realized_tokens": budget["old_total_realized_tokens"], "selected_parameter_count": budget["selected_parameter_count"], "selected_requested_tokens": budget["requested_tokens"], "selected_realized_tokens": budget["realized_tokens"]}},
         "level_multiplier_table": _level_multiplier_table(cfg, args.level, args.token_multiplier),
         "estimated_optimizer_steps": budget["estimated_optimizer_steps"],
@@ -178,7 +193,7 @@ def main() -> None:
     pd=sub.add_parser("prepare-data", help="prepare data for profiles: reproduction_tiny, reproduction_fineweb, scaling"); pd.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Experiment profile; omit to use --config (default configs/default.yaml)"); pd.add_argument("--level", type=int, required=True); pd.add_argument("--data-root", type=Path, required=True); pd.add_argument("--token-multiplier", type=int, required=True); pd.add_argument("--config", type=Path, default=Path("configs/default.yaml")); pd.add_argument("--docs-file", type=Path, help="newline-delimited local documents for offline data-preparation tests"); pd.add_argument("--dry-run", action="store_true")
     rm=sub.add_parser("run-multiseed", help="run one profile: reproduction_tiny, reproduction_fineweb, or scaling"); rm.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Experiment profile; omit to use --config (default configs/default.yaml)"); rm.add_argument("--level", type=int, required=True); rm.add_argument("--data-root", type=Path, required=True); rm.add_argument("--results-root", type=Path, required=True); rm.add_argument("--token-multiplier", type=int, required=True); rm.add_argument("--seeds"); rm.add_argument("--device"); rm.add_argument("--precision"); rm.add_argument("--resume", action="store_true"); rm.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rm.add_argument("--ww-interval", type=int); rm.add_argument("--spectral-interval", type=int); rm.add_argument("--eval-interval", type=int); rm.add_argument("--checkpoint-interval", type=int); rm.add_argument("--optimizer", choices=["adamw","muon","stableadamw"], default="adamw"); rm.add_argument("--extensions", default="none,wwpgd"); rm.add_argument("--extension", choices=["none","wwpgd"]); rm.add_argument("--wwpgd-interval", type=int); rm.add_argument("--batch-size", type=int); rm.add_argument("--gradient-accumulation", type=int); rm.add_argument("--weight-decay", type=float); rm.add_argument("--grad-clip", type=float); rm.add_argument("--eval-batches", type=int); rm.add_argument("--dropout", type=float); rm.add_argument("--lr-schedule", choices=["constant","warmup_cosine","warmup_linear"], help="LR schedule; warmup_cosine is the nanoGPT-style default."); rm.add_argument("--warmup-ratio", type=float, help="Derived warmup fraction when --warmup-steps is omitted."); rm.add_argument("--warmup-steps", type=int, help="Explicit linear warmup optimizer steps."); rm.add_argument("--lr-decay-steps", type=int, help="Cosine/linear decay horizon; defaults to the total optimizer-step horizon."); rm.add_argument("--min-lr-ratio", type=float, help="Minimum LR as a ratio of each group peak LR."); rm.add_argument("--layer-lr", choices=["flat","llrd","manual"], help="Layer LR policy: flat is nanoGPT-compatible; llrd and manual are research ablations."); rm.add_argument("--llrd-gamma", type=float); rm.add_argument("--llrd-min-multiplier", type=float); rm.add_argument("--max-train-tokens", type=int); rm.add_argument("--max-steps", type=int); rm.set_defaults(immediate_projection_spectral=False); rm.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rm.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rm.add_argument("--allow-code-version-mismatch", action="store_true"); rm.add_argument("--dry-run", action="store_true")
 
-    rt=sub.add_parser("run-canonical-trials", help="publication six-arm canonical trials"); rt.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"]); rt.add_argument("--level", type=int, required=True); rt.add_argument("--data-root", type=Path, required=True); rt.add_argument("--results-root", type=Path, required=True); rt.add_argument("--token-multiplier", type=int, required=True); rt.add_argument("--seeds"); rt.add_argument("--device"); rt.add_argument("--precision"); rt.add_argument("--resume", action="store_true"); rt.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rt.add_argument("--ww-interval", type=int); rt.add_argument("--spectral-interval", type=int); rt.add_argument("--eval-interval", type=int); rt.add_argument("--checkpoint-interval", type=int); rt.set_defaults(immediate_projection_spectral=False); rt.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rt.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rt.add_argument("--allow-code-version-mismatch", action="store_true"); rt.add_argument("--dry-run", action="store_true")
+    rt=sub.add_parser("run-canonical-trials", help="publication six-arm canonical trials"); rt.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"]); rt.add_argument("--level", type=int, required=True); rt.add_argument("--data-root", type=Path, required=True); rt.add_argument("--results-root", type=Path, required=True); rt.add_argument("--token-multiplier", type=int, required=True); rt.add_argument("--seeds"); rt.add_argument("--device"); rt.add_argument("--precision"); rt.add_argument("--resume", action="store_true"); rt.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rt.add_argument("--ww-interval", type=int); rt.add_argument("--spectral-interval", type=int); rt.add_argument("--eval-interval", type=int); rt.add_argument("--checkpoint-interval", type=int); rt.set_defaults(immediate_projection_spectral=False); rt.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rt.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rt.add_argument("--allow-code-version-mismatch", action="store_true"); rt.add_argument("--max-steps", type=int); rt.add_argument("--dry-run", action="store_true")
     ss=sub.add_parser("run-strength-scan", help="explicit external blend_eta/strength ablation; not part of primary reproduction") ; ss.add_argument("--level", type=int, required=True); ss.add_argument("--data-root", type=Path, required=True); ss.add_argument("--results-root", type=Path, required=True); ss.add_argument("--token-multiplier", type=int, required=True); ss.add_argument("--seeds", default="1337"); ss.add_argument("--strengths", default="0.1,0.25,0.5,1.0", help="Explicit ablation strengths. The retired 0.02 scan is not part of reproduction and is not a default."); ss.add_argument("--device"); ss.add_argument("--optimizer", choices=["adamw","muon","stableadamw"], default="adamw"); ss.add_argument("--config", type=Path, default=Path("configs/default.yaml")); ss.add_argument("--eval-interval", type=int); ss.add_argument("--spectral-interval", type=int); ss.add_argument("--checkpoint-interval", type=int); ss.set_defaults(immediate_projection_spectral=True); ss.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); ss.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); ss.add_argument("--resume", action="store_true"); ss.add_argument("--continue-on-error", action="store_true", default=True); ss.add_argument("--scan-name", default="strength_scan"); ss.add_argument("--instability-loss-threshold", type=float, default=20.0); ss.add_argument("--include-adamw-control", action="store_true", default=True); ss.add_argument("--dry-run", action="store_true")
     ass=sub.add_parser("analyze-strength-scan"); ass.add_argument("--scan-root", type=Path, required=True)
     ic=sub.add_parser("inspect-checkpoint"); ic.add_argument("--checkpoint", type=Path, required=True)
@@ -219,6 +234,9 @@ def main() -> None:
             return
         print(run_canonical_trials(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),args.config,args.device,args.wwpgd_interval or args.ww_interval,args.eval_interval,args.checkpoint_interval,args.spectral_interval,args.precision,args.resume,args.immediate_projection_spectral,args.allow_code_version_mismatch))
     elif args.cmd=="run-canonical-trials":
+        args.config = _config_with_run_overrides(args)
+        if args.config is not None and Path(args.config).name == "cli_overrides_config.yaml":
+            args.profile = None
         seeds = _seeds(args.seeds) or _resolved_config(args).seeds
         out = args.results_root / "experiments" / f"level_{args.level:02d}" / f"multiplier_{args.token_multiplier}"
         _print_resolved_execution(args, arms=["adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stable_adamw", "stable_adamw_wwpgd"], seeds=seeds, trials=len(seeds), output_dirs=[out], dry_run=args.dry_run)

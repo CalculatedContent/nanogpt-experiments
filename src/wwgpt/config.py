@@ -44,6 +44,7 @@ class TrainConfig:
     weight_decay: float = 0.1
     warmup_steps: int | None = None
     lr_decay_steps: int | None = None
+    # Optional cap on completed base optimizer updates; not microbatches, gradient-accumulation iterations, evaluation events, or WW-PGD calls.
     max_steps: int | None = None
     grad_clip: float = 1.0
     eval_interval: int = 10
@@ -182,6 +183,8 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError("train.learning_rate must be > 0")
     if cfg.weight_decay < 0.0:
         raise ValueError("train.weight_decay must be >= 0")
+    if cfg.max_steps is not None and cfg.max_steps < 1:
+        raise ValueError("train.max_steps must be a positive integer or null")
     if cfg.wwpgd_interval is not None and cfg.wwpgd_interval < 1:
         raise ValueError("train.wwpgd_interval must be >= 1 when supplied")
     if cfg.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:  # stlr is intentionally retired.

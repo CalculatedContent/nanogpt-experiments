@@ -90,3 +90,50 @@ def test_run_multiseed_rejects_noncanonical_options(tmp_path):
     )
     assert cp.returncode != 0
     assert "canonical-only" in cp.stderr
+
+
+def test_run_multiseed_dry_run_reports_step_resolution(tmp_path):
+    cp = _run_cli(
+        "run-multiseed",
+        "--level",
+        "0",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--results-root",
+        str(tmp_path / "results"),
+        "--token-multiplier",
+        "20",
+        "--max-steps",
+        "2",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["cli_max_steps"] == 2
+    assert payload["configured_max_steps"] == 2
+    assert payload["resolved_optimizer_steps"] == 2
+    assert payload["optimizer_step_limit_source"] == "cli_max_steps"
+    assert payload["resolved_train_tokens"] == payload["resolved_optimizer_steps"] * payload["token_budgets"]["tokens_per_step"]
+    override = tmp_path / "results" / "cli_overrides_config.yaml"
+    assert override.exists()
+    assert "max_steps: 2" in override.read_text()
+
+
+def test_run_canonical_trials_accepts_max_steps_override_in_dry_run(tmp_path):
+    cp = _run_cli(
+        "run-canonical-trials",
+        "--level",
+        "0",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--results-root",
+        str(tmp_path / "results"),
+        "--token-multiplier",
+        "20",
+        "--max-steps",
+        "2",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["cli_max_steps"] == 2
+    assert payload["resolved_config"]["train"]["max_steps"] == 2
+    assert payload["number_of_arms"] == 6

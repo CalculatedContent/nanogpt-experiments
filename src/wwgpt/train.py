@@ -24,6 +24,7 @@ from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
+from wwgpt.scaling import resolve_optimizer_steps
 from wwgpt.device import autocast_context, device_summary, memory_stats, optimizer_step, precision_policy, synchronize_device
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
 from wwgpt.ww import (
@@ -97,6 +98,7 @@ def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
             "initialization_hash": manifest.get("initialization_hash", init),
             "optimizer_fingerprint": manifest.get("optimizer_fingerprint"),
             "immediate_projection_spectral": manifest.get("immediate_projection_spectral"),
+            "resolved_optimizer_steps": manifest.get("resolved_optimizer_steps", manifest.get("optimizer_steps")),
         }
         mm={k:{"expected": v, "found": observed.get(k)} for k,v in expected.items() if observed.get(k) != v}
         if mm:
@@ -498,6 +500,30 @@ def _state_hash(state: dict[str, torch.Tensor]) -> str:
     return sha256_bytes(b"".join(state[k].detach().cpu().numpy().tobytes() for k in sorted(state)))
 
 
+
+def _optimizer_step_resolution(cfg: ExperimentConfig, token_multiplier: int, parameter_count_used: int) -> dict[str, int | str | None]:
+    tokens_per_step = cfg.train.batch_size * cfg.model.block_size * cfg.train.gradient_accumulation
+    if cfg.train.max_train_tokens is not None:
+        budget_target_tokens = int(cfg.train.max_train_tokens)
+        budget_derived_steps = max(1, math.ceil(budget_target_tokens / tokens_per_step))
+        budget_source = "max_train_tokens"
+    else:
+        budget_target_tokens = int(parameter_count_used * token_multiplier)
+        budget_derived_steps = max(1, math.ceil(budget_target_tokens / tokens_per_step))
+        budget_source = "token_multiplier"
+    resolved_steps = resolve_optimizer_steps(budget_derived_steps, cfg.train.max_steps)
+    resolved_tokens = resolved_steps * tokens_per_step
+    return {
+        "budget_derived_optimizer_steps": budget_derived_steps,
+        "configured_max_steps": cfg.train.max_steps,
+        "resolved_optimizer_steps": resolved_steps,
+        "tokens_per_optimizer_step": tokens_per_step,
+        "resolved_train_tokens": resolved_tokens,
+        "optimizer_step_limit_source": "configured_max_steps" if cfg.train.max_steps is not None and resolved_steps < budget_derived_steps else budget_source,
+        "budget_source": budget_source,
+        "requested_tokens": budget_target_tokens,
+    }
+
 def _compatibility(cfg: ExperimentConfig, data, init_hash: str, validation_probe_hash: str, training_probe_hash: str) -> dict[str, object]:
     cfgd = json.loads(json.dumps(asdict(cfg)))
     return {
@@ -560,14 +586,15 @@ def run_scientific_single(
     report = model.parameter_report()
     from wwgpt.scaling import selected_parameter_count
     parameter_count_used = selected_parameter_count(report, cfg.parameter_count_convention)
-    tokens_per_step = cfg.train.batch_size * cfg.model.block_size * cfg.train.gradient_accumulation
-    if cfg.train.max_steps is not None:
-        steps = cfg.train.max_steps; target_tokens = steps * tokens_per_step; budget_source = "max_steps"
-    elif cfg.train.max_train_tokens is not None:
-        target_tokens = cfg.train.max_train_tokens; steps = max(1, math.ceil(target_tokens / tokens_per_step)); budget_source = "max_train_tokens"
-    else:
-        target_tokens = parameter_count_used * token_multiplier; steps = max(1, math.ceil(target_tokens / tokens_per_step)); budget_source = "token_multiplier"
-    realized_tokens = steps * tokens_per_step
+    resolution = _optimizer_step_resolution(cfg, token_multiplier, parameter_count_used)
+    tokens_per_step = int(resolution["tokens_per_optimizer_step"])
+    budget_derived_steps = int(resolution["budget_derived_optimizer_steps"])
+    budget_source = str(resolution["budget_source"])
+    budget_target_tokens = int(resolution["requested_tokens"])
+    steps = int(resolution["resolved_optimizer_steps"])
+    target_tokens = int(resolution["resolved_train_tokens"])
+    realized_tokens = target_tokens
+    optimizer_step_limit_source = str(resolution["optimizer_step_limit_source"])
     resolved_lr_decay_steps = resolve_lr_decay_steps(steps, cfg.train.lr_decay_steps)
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
     wwpgd_interval = 1 if extension_name == "wwpgd" else int(cfg.train.wwpgd_interval or 1)
@@ -590,13 +617,18 @@ def run_scientific_single(
         "extension": extension_name,
         "arm_name": optimizer_name,
         "arm_display_name": ARM_DISPLAY[optimizer_name],
-        "requested_tokens": target_tokens,
+        "requested_tokens": budget_target_tokens,
         "target_train_tokens": target_tokens,
         "realized_tokens": realized_tokens,
         "realized_train_tokens": realized_tokens,
+        "budget_derived_optimizer_steps": budget_derived_steps,
+        "configured_max_steps": cfg.train.max_steps,
+        "resolved_optimizer_steps": steps,
         "optimizer_steps": steps,
         "total_optimizer_steps": steps,
         "tokens_per_optimizer_step": tokens_per_step,
+        "resolved_train_tokens": realized_tokens,
+        "optimizer_step_limit_source": optimizer_step_limit_source,
         "budget_source": budget_source,
         "parameter_count_convention": cfg.parameter_count_convention,
         "parameter_count_used": parameter_count_used,
@@ -693,6 +725,7 @@ def run_scientific_single(
         "initialization_hash": init_hash,
         "optimizer_fingerprint": man["optimizer_fingerprint"],
         "immediate_projection_spectral": immediate_projection_spectral,
+        "resolved_optimizer_steps": steps,
     }
     if resume:
         run_dir = _select_resume_run(run_parent / optimizer_name, expected_identity)
@@ -727,7 +760,7 @@ def run_scientific_single(
     wwpgd_call_count = 0
     projected_matrix_count = 0
     compatibility = _compatibility(cfg, data, init_hash, validation_probe_hash, training_probe_hash)
-    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": target_tokens, "realized_tokens": realized_tokens, "optimizer_fingerprint": man["optimizer_fingerprint"]})
+    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": budget_target_tokens, "realized_tokens": realized_tokens, "resolved_optimizer_steps": steps, "optimizer_step_limit_source": optimizer_step_limit_source, "optimizer_fingerprint": man["optimizer_fingerprint"]})
     _log_train_progress(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
@@ -996,7 +1029,7 @@ def run_scientific_single(
         })
         model.load_state_dict(final_model_state)
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "base_optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule}, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "resolved_config": cfgd, "optimizer_fingerprint": man["optimizer_fingerprint"], "data_hash": data.corpus_hash, "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"], "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": target_tokens, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "base_optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule}, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "resolved_config": cfgd, "optimizer_fingerprint": man["optimizer_fingerprint"], "data_hash": data.corpus_hash, "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"], "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": budget_target_tokens, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _append_only_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
@@ -1009,7 +1042,7 @@ def run_scientific_single(
         if immediate_projection_spectral:
             _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
-    write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count})
+    write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source})
     _log_train_progress(
         f"completed run pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )
@@ -1022,12 +1055,15 @@ CANONICAL_TRIAL_BASES = ("adamw", "muon", "stable_adamw")
 
 def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, cfg: ExperimentConfig, data, init_hash: str) -> dict:
     cfgd = json.loads(json.dumps(asdict(cfg)))
+    report = GPT(cfg.model).parameter_report()
+    from wwgpt.scaling import selected_parameter_count
+    resolution = _optimizer_step_resolution(cfg, token_multiplier, selected_parameter_count(report, cfg.parameter_count_convention))
     shared = {
         "trial_id": pair_id, "seed": seed, "level": level, "token_multiplier": token_multiplier,
         "model_config": asdict(cfg.model), "model_configuration_hash": stable_hash(cfgd.get("model", {})),
         "data_manifest": data.data_manifest, "data_hash": data.corpus_hash,
         "tokenizer_manifest": data.tokenizer_manifest, "tokenizer_hash": data.tokenizer_manifest.get("tokenizer_hash"),
-        "initialization_hash": init_hash, "train": asdict(cfg.train), "token_budget": {"realized_tokens": data.data_manifest.get("realized_tokens"), "token_multiplier": token_multiplier},
+        "initialization_hash": init_hash, "train": asdict(cfg.train), "token_budget": {"realized_tokens": data.data_manifest.get("realized_tokens"), "token_multiplier": token_multiplier, **resolution},
     }
     arms = []
     for base in CANONICAL_TRIAL_BASES:

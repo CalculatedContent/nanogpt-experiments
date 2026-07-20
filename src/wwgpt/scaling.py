@@ -53,6 +53,30 @@ def plan_budget(param_count: int, token_multiplier: int, batch_size: int, block_
     return ScalingPlan(requested, realized, steps, tokens_per_step, 6.0 * param_count * realized, realized / max(available_tokens, 1), valid, reason, int(param_count), realized / max(param_count, 1), seqs, steps)
 
 
+
+def resolve_optimizer_steps(budget_steps: int, configured_max_steps: int | None) -> int:
+    """Resolve the base optimizer-update horizon for scientific training.
+
+    ``configured_max_steps`` is an optional cap on completed base optimizer
+    updates. It is not a microbatch count, gradient-accumulation iteration
+    count, evaluation cadence, or WW-PGD call count. A supplied cap can only
+    keep or reduce the budget-derived optimizer-step count; it never increases
+    training beyond the token budget.
+    """
+    budget_steps = int(budget_steps)
+    if budget_steps < 1:
+        raise ValueError("budget-derived optimizer steps must be >= 1")
+    if configured_max_steps is None:
+        resolved = budget_steps
+    else:
+        configured_max_steps = int(configured_max_steps)
+        if configured_max_steps < 1:
+            raise ValueError("train.max_steps must be a positive integer or null")
+        resolved = min(budget_steps, configured_max_steps)
+    if resolved < 1:
+        raise ValueError("resolved optimizer steps must be >= 1")
+    return resolved
+
 def design_condition_number(ns: list[float], ds: list[float]) -> float:
     x = np.column_stack([np.ones(len(ns)), np.log(ns), np.log(ds)])
     return float(np.linalg.cond(x))
