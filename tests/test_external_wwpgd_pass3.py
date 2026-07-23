@@ -74,9 +74,11 @@ def test_no_strength_multiplier_external_blend_eta(monkeypatch):
     assert all(row["blend_eta"] == 0.5 for row in rows)
 
 
-def test_projection_interval_must_be_standard_one():
-    with pytest.raises(ValueError, match="standard WW-PGD interval"):
-        WWPGDExtension(cfg=WWPGDConfig(), interval=3)
+def test_projection_interval_accepts_positive_integers():
+    ext = WWPGDExtension(cfg=WWPGDConfig(), interval=3)
+    assert ext.interval == 3
+    with pytest.raises(ValueError, match="positive integer"):
+        WWPGDExtension(cfg=WWPGDConfig(), interval=0)
 
 
 def test_base_step_occurs_before_projection(monkeypatch):
