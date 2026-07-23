@@ -137,3 +137,39 @@ def test_run_canonical_trials_accepts_max_steps_override_in_dry_run(tmp_path):
     assert payload["cli_max_steps"] == 2
     assert payload["resolved_config"]["train"]["max_steps"] == 2
     assert payload["number_of_arms"] == 6
+
+
+def test_run_multiseed_dry_run_reports_ww_interval_alias(tmp_path):
+    cp = _run_cli(
+        "run-multiseed",
+        "--level", "0",
+        "--data-root", str(tmp_path / "data"),
+        "--results-root", str(tmp_path / "results"),
+        "--token-multiplier", "20",
+        "--max-steps", "24",
+        "--ww-interval", "8",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["effective_wwpgd_interval"] == 8
+    assert payload["estimated_projection_event_count"] == 3
+    assert payload["resolved_config"]["train"]["wwpgd_interval"] == 8
+
+
+def test_run_multiseed_conflicting_interval_aliases_fail(tmp_path):
+    cp = subprocess.run(
+        [
+            sys.executable, "-m", "wwgpt.cli", "run-multiseed",
+            "--level", "0",
+            "--data-root", str(tmp_path / "data"),
+            "--results-root", str(tmp_path / "results"),
+            "--token-multiplier", "20",
+            "--ww-interval", "2",
+            "--wwpgd-interval", "4",
+            "--dry-run",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode != 0
+    assert "conflicting WW-PGD interval aliases" in cp.stderr

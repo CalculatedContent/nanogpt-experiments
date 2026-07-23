@@ -127,10 +127,9 @@ class WWPGDExtension(TrainingExtension):
     name = "wwpgd"
 
     def __init__(self, cfg: WWPGDConfig, interval: int = 1):
-        if interval != 1:
-            raise ValueError("standard WW-PGD interval must be 1 optimizer step")
+        interval = _validate_wwpgd_interval(interval, source="WWPGDExtension.interval")
         self.cfg = cfg
-        self.interval = 1
+        self.interval = interval
 
     def after_optimizer_step(
         self,
@@ -141,11 +140,41 @@ class WWPGDExtension(TrainingExtension):
         tokens_seen: int,
         collect_pre_details: bool = False,
     ) -> tuple[object | None, list[dict[str, object]]]:
-        event = optimizer_step - 1
+        if optimizer_step % self.interval != 0:
+            return None, []
+        event = optimizer_step // self.interval - 1
         details = weightwatcher_details(model) if collect_pre_details else None
         frac = max(0.0, min(1.0, optimizer_step / max(1, total_optimizer_steps)))
         rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg))
         return details, rows
+
+
+def _validate_wwpgd_interval(value: int | None, *, source: str) -> int:
+    if value is None:
+        return 1
+    if isinstance(value, bool):
+        raise ValueError(f"{source} must be a positive integer")
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} must be a positive integer") from exc
+    if interval != value and not (isinstance(value, str) and str(interval) == value):
+        raise ValueError(f"{source} must be a positive integer")
+    if interval < 1:
+        raise ValueError(f"{source} must be a positive integer")
+    return interval
+
+
+def _resolve_wwpgd_interval(cfg: ExperimentConfig, extension_name: str, ww_interval: int | None) -> int:
+    if extension_name != "wwpgd":
+        return 1
+    return _validate_wwpgd_interval(ww_interval if ww_interval is not None else cfg.train.wwpgd_interval, source="WW-PGD interval")
+
+
+def _expected_projection_optimizer_steps(total_optimizer_steps: int, interval: int, extension_name: str) -> list[int]:
+    if extension_name != "wwpgd":
+        return []
+    return list(range(interval, total_optimizer_steps + 1, interval))
 
 
 def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_steps: int | None = None, resolved_lr_decay_steps: int | None = None, resolved_llrd_gamma: float | None = None) -> dict[str, object]:
@@ -597,7 +626,8 @@ def run_scientific_single(
     optimizer_step_limit_source = str(resolution["optimizer_step_limit_source"])
     resolved_lr_decay_steps = resolve_lr_decay_steps(steps, cfg.train.lr_decay_steps)
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
-    wwpgd_interval = 1 if extension_name == "wwpgd" else int(cfg.train.wwpgd_interval or 1)
+    wwpgd_interval = _resolve_wwpgd_interval(cfg, extension_name, ww_interval)
+    expected_projection_optimizer_steps = _expected_projection_optimizer_steps(steps, wwpgd_interval, extension_name)
     extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
     reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, resolved_seeds["train_reader_seed"]) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
     initial_minibatch_indices = _initial_minibatch_indices(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.training_sampling, resolved_seeds["train_reader_seed"])
@@ -678,7 +708,8 @@ def run_scientific_single(
         "gradient_accumulation": cfg.train.gradient_accumulation,
         "wwpgd_interval": wwpgd_interval,
         "projection_schedule_type": "optimizer_step_interval",
-        "total_projection_events": steps if extension_name == "wwpgd" else 0,
+        "expected_projection_optimizer_steps": expected_projection_optimizer_steps,
+        "total_projection_events": len(expected_projection_optimizer_steps),
         "optimizer_step_count": 0,
         "device": selected_device_summary,
         "device_support": {"single_device_only": True, "distributed_training": False, "multi_gpu_or_tpu": "not claimed; no executable distributed smoke path is implemented"},
@@ -828,7 +859,7 @@ def run_scientific_single(
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
         pre_details, new_proj = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step, collect_pre_details=immediate_projection_spectral)
-        if extension_name == "wwpgd":
+        if extension_name == "wwpgd" and new_proj:
             wwpgd_call_count += 1
         projected_matrix_count += len(new_proj)
         proj_rows.extend(new_proj)
@@ -962,7 +993,7 @@ def run_scientific_single(
                 "optimizer_step_count": optimizer_step_count,
                 "wwpgd_call_count": wwpgd_call_count,
                 "projected_matrix_count": projected_matrix_count,
-                "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule},
+                "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "wwpgd_interval": wwpgd_interval},
                 "tokens_processed": step * tokens_per_step,
                 "training_reader_position": reader.pos,
                 "reader_position": reader.pos,
@@ -1029,7 +1060,7 @@ def run_scientific_single(
         })
         model.load_state_dict(final_model_state)
     final_elapsed = elapsed_prior + time.perf_counter() - start
-    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "base_optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule}, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "resolved_config": cfgd, "optimizer_fingerprint": man["optimizer_fingerprint"], "data_hash": data.corpus_hash, "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"], "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": budget_target_tokens, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
+    save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "base_optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "wwpgd_interval": wwpgd_interval}, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "projection_schedule": cfg.wwpgd.projection_schedule, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows, "wwpgd_projection_rows": proj_rows, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "resolved_config": cfgd, "optimizer_fingerprint": man["optimizer_fingerprint"], "data_hash": data.corpus_hash, "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"], "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": budget_target_tokens, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _append_only_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
@@ -1042,7 +1073,7 @@ def run_scientific_single(
         if immediate_projection_spectral:
             _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
-    write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source})
+    write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "wwpgd_interval": wwpgd_interval, "expected_projection_optimizer_steps": expected_projection_optimizer_steps, "total_projection_events": len(expected_projection_optimizer_steps), "projection_schedule_type": "optimizer_step_interval", "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source})
     _log_train_progress(
         f"completed run pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )
