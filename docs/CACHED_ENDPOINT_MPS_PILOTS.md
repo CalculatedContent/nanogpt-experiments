@@ -3,6 +3,11 @@
 Run these pilots on a Mac, one level at a time. Data, logs, and results remain under
 `/tmp`; periodic test-set feedback stays disabled by the experiment YAML.
 
+Level 2 intentionally keeps a 1000-step measurement interval, two minimum
+observations, and `start_step: 2200`. The measurements at steps 1000 and 2000
+therefore cannot activate an endpoint; the first eligible fresh endpoint
+measurement is step **3000**. This timing is deliberate.
+
 ```bash
 export TMP=/tmp
 export WWGPT_ROOT="$TMP/wwgpt_mac"

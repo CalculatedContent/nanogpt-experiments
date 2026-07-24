@@ -76,14 +76,34 @@ def audit_arm(run: Path, required_arm: str | None = None) -> dict:
     if not man.get("valid_for_science", False): reasons.append("fixture_or_invalid_for_science")
     if ext in BASELINE_EXTENSIONS and (run / "wwpgd_projection.csv").exists(): reasons.append("baseline_has_wwpgd_projection_artifact")
     if ext == "wwpgd":
-        for f in WWPGD_REQUIRED_EXTENSION_ARTIFACTS:
-            if not (run / f).exists(): reasons.append(f"missing_required_extension_artifact:{f}")
+        cached = man.get("adapter_mode") == "cached_endpoint_relaxation_v1"
+        if not cached:
+            for f in WWPGD_REQUIRED_EXTENSION_ARTIFACTS:
+                if not (run / f).exists(): reasons.append(f"missing_required_extension_artifact:{f}")
         if not (man.get("wwpgd_implementation") and man.get("wwpgd_implementation") != "none" and man.get("wwpgd_commit")):
             reasons.append("missing_resolved_wwpgd_metadata")
-        if int(complete.get("wwpgd_call_count", man.get("wwpgd_call_count", 0)) or 0) <= 0: reasons.append("missing_wwpgd_call_count")
-        if int(complete.get("projected_matrix_count", man.get("projected_matrix_count", 0)) or 0) <= 0: reasons.append("missing_projected_matrix_count")
-        proj, perr = _read_csv(run / "wwpgd_projection.csv") if (run / "wwpgd_projection.csv").exists() else (pd.DataFrame(), None)
-        if perr or proj.empty: reasons.append("missing_projection_records")
+        if cached:
+            metadata = ("endpoint_measurement_source", "endpoint_measurement_interval", "endpoint_apply_interval",
+                        "expected_endpoint_measurement_steps", "expected_fast_apply_steps", "expected_measurement_count",
+                        "start_step", "max_per_step_gain", "max_relative_frobenius_change_per_step",
+                        "endpoint_stop_relative_distance", "max_endpoint_age_steps", "stale_distance_multiplier",
+                        "controller_version", "adapter_mode")
+            if any(key not in man for key in metadata): reasons.append("missing_cached_controller_metadata")
+            measurements, merr = _read_csv(run / "wwpgd_endpoint_measurements.csv") if (run / "wwpgd_endpoint_measurements.csv").exists() else (pd.DataFrame(), "missing_endpoint_measurements")
+            if merr or measurements.empty: reasons.append("missing_endpoint_measurement_records")
+            elif (not {"skip_reason", "cache_activated"}.issubset(measurements.columns)
+                  or ((measurements["skip_reason"].fillna("").astype(str) == "")
+                      & ~measurements["cache_activated"].astype(str).str.lower().isin(["true", "1"])).any()):
+                reasons.append("measurement_outcomes_missing")
+            if int(complete.get("completed_measurement_count", -1)) != int(man.get("expected_measurement_count", -2)): reasons.append("incomplete_endpoint_measurements")
+            relaxation, rerr = _read_csv(run / "wwpgd_endpoint_relaxation.csv") if (run / "wwpgd_endpoint_relaxation.csv").exists() else (pd.DataFrame(), "missing_endpoint_relaxation")
+            if rerr and not str(rerr).startswith("empty_csv:"): reasons.append("unreadable_endpoint_relaxation")
+            if not relaxation.empty and relaxation.get("invalidation_reason", pd.Series(dtype=str)).astype(str).isin(["nonfinite_tensor", "endpoint_corruption"]).any(): reasons.append("endpoint_corruption")
+        else:
+            if int(complete.get("wwpgd_call_count", man.get("wwpgd_call_count", 0)) or 0) <= 0: reasons.append("missing_wwpgd_call_count")
+            if int(complete.get("projected_matrix_count", man.get("projected_matrix_count", 0)) or 0) <= 0: reasons.append("missing_projected_matrix_count")
+            proj, perr = _read_csv(run / "wwpgd_projection.csv") if (run / "wwpgd_projection.csv").exists() else (pd.DataFrame(), None)
+            if perr or proj.empty: reasons.append("missing_projection_records")
     ok, msg = _selected_checkpoint_ok(run, man, metrics, complete)
     if not ok and msg: reasons.append(msg)
     return {"arm_name": arm, "base_optimizer": base, "extension": ext, "run_dir": str(run), "passed": not reasons, "reasons": reasons, "identity": {k: man.get(k) for k in ("data_hash", "tokenizer_hash", "model_configuration_hash", "model_config_hash", "realized_tokens", "requested_tokens", "target_train_tokens", "initialization_hash", "training_schedule_hash", "resolved_stochastic_seeds", "optimizer_fingerprint", "weight_decay")}}
