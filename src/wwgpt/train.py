@@ -404,20 +404,22 @@ class WWPGDExtension(TrainingExtension):
             count, ema = self.controller.observe(name, raw, beta=float(rcfg["alpha_ema_beta"])) if math.isfinite(raw) else (0, math.nan)
             hardness, _, _ = hardness_for_alpha(ema, rcfg)
             D=float(data.get("D", math.nan)); xmin=float(data.get("xmin", math.nan))
+            signed=ema-self.cfg.target_alpha if math.isfinite(ema) else math.nan
+            info_side="above_target" if signed>0 else "below_target" if signed<0 else "at_target"
             reason = ""
             if not cfg.enabled: reason="controller_disabled"
             elif not rcfg.get("enabled", True): reason="layer_disabled"
             elif optimizer_step < cfg.start_step: reason="before_start_step"
-            elif not math.isfinite(raw): reason="invalid_raw_alpha"
+            elif not math.isfinite(raw): reason="invalid_alpha"
             elif count < rcfg.get("min_observations", cfg.min_observations): reason="insufficient_observations"
             elif hardness <= 0: reason="inside_deadband"
             elif not math.isfinite(xmin) or xmin <= 0: reason="invalid_xmin"
             elif rcfg.get("max_D") is not None and not math.isfinite(D): reason="invalid_D"
             elif rcfg.get("max_D") is not None and rcfg["max_D"] < D: reason="D_above_max_D"
+            elif info_side not in {rcfg.get("direction"), "at_target"} and rcfg.get("direction") != "both": reason="direction_excluded"
             elif global_hardness <= 0: reason="zero_hardness"
-            signed=ema-self.cfg.target_alpha if math.isfinite(ema) else math.nan
             selected[name]={"row":data,"raw":raw,"ema":ema,"count":count,"hardness":hardness,
-                            "signed":signed,"side":"above_target" if signed>0 else "below_target" if signed<0 else "at_target",
+                            "signed":signed,"side":info_side,
                             "reason":reason}
             if reason:
                 if name in self.endpoint_cache: self._invalidate(self.endpoint_cache[name], reason)
@@ -425,6 +427,8 @@ class WWPGDExtension(TrainingExtension):
             return _module_by_name(mm, name)
         observation_only = not cfg.enabled or optimizer_step < cfg.start_step or global_hardness == 0
         candidate = None
+        from wwgpt.ww import external_projected_layer_names
+        expected_names = set(external_projected_layer_names(model))
         try:
             model.eval()
             if observation_only:
@@ -443,10 +447,20 @@ class WWPGDExtension(TrainingExtension):
         self.counters["measurement_count"] += 1
         self.counters["last_measurement_step"] = optimizer_step
         self.counters["next_measurement_step"] = optimizer_step + interval
+        # The fresh WeightWatcher table is authoritative.  A missing current row
+        # explicitly retires a cached endpoint rather than allowing stale motion.
+        for name in sorted(expected_names - selected.keys()):
+            reason = "missing_current_weightwatcher_row"
+            if name in self.endpoint_cache:
+                self._invalidate(self.endpoint_cache[name], reason)
+            selected[name] = {"row": {}, "raw": math.nan, "ema": math.nan, "count": 0,
+                              "hardness": 0.0, "signed": math.nan, "side": "at_target", "reason": reason}
         rows=[]
         for name, info in selected.items():
             data=info["row"]; changed=bool(candidate and candidate.stock_candidate_changed.get(name, False)); active=False
             reason=info["reason"] or ("" if changed else "stock_candidate_unchanged")
+            if reason and name in self.endpoint_cache:
+                self._invalidate(self.endpoint_cache[name], reason)
             initial=float(candidate.original_to_candidate_relative_change.get(name, 0.0)) if candidate else 0.0
             if not reason and candidate is not None and name in candidate.candidate_weights:
                 endpoint=candidate.candidate_weights[name].detach().clone()
@@ -563,7 +577,7 @@ def _write_csv(path: Path, rows: list[dict[str, object]], *, overwrite: bool = F
         w.writerows(rows)
 
 
-def write_csv_union_schema(path: Path, rows: list[dict[str, object]]) -> None:
+def write_csv_union_schema(path: Path, rows: list[dict[str, object]], *, empty_fields: list[str] | None = None) -> None:
     """Persist append-only logical rows with a deterministic, resume-safe union schema."""
     existing_rows: list[dict[str, object]] = []
     existing_fields: list[str] = []
@@ -575,7 +589,7 @@ def write_csv_union_schema(path: Path, rows: list[dict[str, object]]) -> None:
     pending = rows[len(existing_rows):]
     if not pending and path.exists():
         return
-    fields = existing_fields + [key for row in rows for key in row if key not in existing_fields]
+    fields = existing_fields + list(empty_fields or []) + [key for row in rows for key in row if key not in existing_fields]
     fields = list(dict.fromkeys(fields))
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="") as handle:
@@ -983,6 +997,17 @@ def run_scientific_single(
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
     wwpgd_interval = _resolve_wwpgd_interval(cfg, extension_name, ww_interval)
     expected_projection_optimizer_steps = _expected_projection_optimizer_steps(steps, wwpgd_interval, extension_name)
+    cached_mode = extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
+    endpoint_measurement_interval = (resolve_endpoint_measurement_interval(cfg.wwpgd.adaptive, eval_interval or cfg.train.eval_interval)
+                                     if cached_mode else None)
+    expected_endpoint_measurement_steps = (list(range(endpoint_measurement_interval, steps + 1, endpoint_measurement_interval))
+                                           if cached_mode else [])
+    if cached_mode and cfg.wwpgd.adaptive.refresh_at_final_step and steps not in expected_endpoint_measurement_steps:
+        expected_endpoint_measurement_steps.append(steps)
+    expected_fast_apply_steps = ([step for step in range(cfg.wwpgd.adaptive.apply_interval, steps + 1,
+                                                         cfg.wwpgd.adaptive.apply_interval)
+                                  if not (cfg.wwpgd.adaptive.skip_fast_apply_on_measurement_step
+                                          and step in expected_endpoint_measurement_steps)] if cached_mode else [])
     extension = WWPGDExtension(cfg.wwpgd, wwpgd_interval) if extension_name == "wwpgd" else NoExtension()
     reader = (RandomWindowTokenReader(data.train, cfg.model.block_size, resolved_seeds["train_reader_seed"]) if cfg.train.training_sampling == "random_window" else NonRepeatingTokenReader(data.train, cfg.model.block_size))
     initial_minibatch_indices = _initial_minibatch_indices(data.train, cfg.model.block_size, cfg.train.batch_size, cfg.train.training_sampling, resolved_seeds["train_reader_seed"])
@@ -1102,6 +1127,25 @@ def run_scientific_single(
         "weightwatcher_diagnostic_outputs": {"per_layer_long_form": "spectral.csv", "run_level_aggregates": "weightwatcher_aggregates.csv"},
     }
     man.update(external_wwpgd_manifest_fields(extension_name == "wwpgd", cfg.wwpgd if extension_name == "wwpgd" else None))
+    if cached_mode:
+        adaptive = cfg.wwpgd.adaptive
+        man.update({
+            "endpoint_measurement_source": adaptive.measurement_source,
+            "endpoint_measurement_interval": endpoint_measurement_interval,
+            "endpoint_apply_interval": adaptive.apply_interval,
+            "expected_endpoint_measurement_steps": expected_endpoint_measurement_steps,
+            "expected_fast_apply_steps": expected_fast_apply_steps,
+            "expected_measurement_count": len(expected_endpoint_measurement_steps),
+            "start_step": adaptive.start_step,
+            "max_per_step_gain": adaptive.max_per_step_gain,
+            "max_relative_frobenius_change_per_step": adaptive.max_relative_frobenius_change_per_step,
+            "endpoint_stop_relative_distance": adaptive.endpoint_stop_relative_distance,
+            "max_endpoint_age_steps": adaptive.max_endpoint_age_steps,
+            "stale_distance_multiplier": adaptive.stale_distance_multiplier,
+            "controller_version": CONTROLLER_VERSION,
+            "adapter_mode": "cached_endpoint_relaxation_v1",
+            "projection_schedule_type": "cached_endpoint_measurement_and_fast_apply",
+        })
     cfgd_for_hash = json.loads(json.dumps(asdict(cfg)))
     man.update({
         "configuration_hash": stable_hash(cfgd_for_hash),
@@ -1452,10 +1496,17 @@ def run_scientific_single(
         _write_csv(run_dir / "composite_spectral.csv", composite_rows, overwrite=resume)
     _write_csv(run_dir / "lrs.csv", lr_rows, overwrite=resume)
     if extension_name == "wwpgd":
-        write_csv_union_schema(run_dir / "wwpgd_projection.csv", proj_rows)
-        write_csv_union_schema(run_dir / "wwpgd_controller.csv", controller_rows)
-        write_csv_union_schema(run_dir / "wwpgd_endpoint_measurements.csv", getattr(extension, "measurement_rows", []))
-        write_csv_union_schema(run_dir / "wwpgd_endpoint_relaxation.csv", getattr(extension, "relaxation_rows", []))
+        write_csv_union_schema(run_dir / "wwpgd_projection.csv", proj_rows, empty_fields=[
+            "optimizer_step", "layer_name", "changed", "requested_relative_frobenius_change",
+            "applied_relative_frobenius_change", "controller_gain_requested", "controller_gain_applied",
+            "action_type", "controller_version", "adapter_mode",
+        ])
+        write_csv_union_schema(run_dir / "wwpgd_controller.csv", controller_rows,
+                               empty_fields=["optimizer_step", "layer_name", "action_type", "skip_reason", "changed"])
+        write_csv_union_schema(run_dir / "wwpgd_endpoint_measurements.csv", getattr(extension, "measurement_rows", []),
+                               empty_fields=["optimizer_step", "measurement_index", "layer_name", "cache_activated", "skip_reason", "action_type"])
+        write_csv_union_schema(run_dir / "wwpgd_endpoint_relaxation.csv", getattr(extension, "relaxation_rows", []),
+                               empty_fields=["optimizer_step", "layer_name", "changed", "converged", "invalidated", "invalidation_reason", "action_type"])
         if immediate_projection_spectral:
             _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
@@ -1463,9 +1514,57 @@ def run_scientific_single(
     for r in controller_rows:
         reason=str(r.get("skip_reason", ""))
         if reason: skip_counts[reason]=skip_counts.get(reason,0)+1
-    applied=[float(r.get("combined_hardness_applied", 0.0) or 0.0) for r in controller_rows]
-    rels=[float(r.get("relative_frobenius_change_applied", 0.0) or 0.0) for r in controller_rows if math.isfinite(float(r.get("relative_frobenius_change_applied", 0.0) or 0.0))]
-    write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "wwpgd_interval": wwpgd_interval, "expected_projection_optimizer_steps": expected_projection_optimizer_steps, "total_projection_events": len(expected_projection_optimizer_steps), "projection_schedule_type": "optimizer_step_interval", "total_layer_decisions": len(controller_rows), "total_projected_layers": int(sum(1 for r in controller_rows if r.get("projected"))), "total_skipped_layers": int(sum(1 for r in controller_rows if not r.get("projected"))), "controller_skip_counts": skip_counts, "mean_applied_hardness": (sum(applied)/len(applied) if applied else 0.0), "max_applied_hardness": (max(applied) if applied else 0.0), "mean_relative_frobenius_change": (sum(rels)/len(rels) if rels else 0.0), "maximum_relative_frobenius_change": (max(rels) if rels else 0.0), "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source})
+    common_complete={"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count,
+                     "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count,
+                     "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps,
+                     "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step,
+                     "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source}
+    if cached_mode:
+        measurements = getattr(extension, "measurement_rows", [])
+        relaxations = getattr(extension, "relaxation_rows", [])
+        counters = getattr(extension, "counters", {})
+        changed = [r for r in relaxations if r.get("changed")]
+        requested_gains = [float(r["controller_gain_requested"]) for r in relaxations if r.get("controller_gain_requested") is not None]
+        applied_gains = [float(r["controller_gain_applied"]) for r in relaxations if r.get("controller_gain_applied") is not None]
+        applied_changes = [float(r["applied_relative_frobenius_change"]) for r in changed if r.get("applied_relative_frobenius_change") is not None]
+        activations = [r for r in measurements if r.get("cache_activated")]
+        common_complete.update({
+            "completed_measurement_count": int(counters.get("measurement_count", 0)),
+            "stock_wwpgd_invocation_count": int(counters.get("candidate_generation_count", 0)),
+            "endpoint_activation_count": len(activations),
+            "fast_control_step_count": int(counters.get("fast_control_step_count", 0)),
+            "fast_changed_step_count": int(counters.get("changed_fast_control_step_count", 0)),
+            "fast_layer_decision_count": len(relaxations), "fast_changed_layer_count": len(changed),
+            "endpoint_convergence_count": int(counters.get("endpoint_convergence_count", 0)),
+            "endpoint_invalidation_count": int(counters.get("endpoint_invalidation_count", 0)),
+            "active_endpoint_count_at_finish": sum(ep.active for ep in getattr(extension, "endpoint_cache", {}).values()),
+            "above_target_measurement_count": sum(r.get("alpha_side") == "above_target" for r in measurements),
+            "below_target_measurement_count": sum(r.get("alpha_side") == "below_target" for r in measurements),
+            "above_target_activation_count": sum(r.get("alpha_side") == "above_target" and r.get("cache_activated") for r in measurements),
+            "below_target_activation_count": sum(r.get("alpha_side") == "below_target" and r.get("cache_activated") for r in measurements),
+            "mean_controller_gain_requested": sum(requested_gains)/len(requested_gains) if requested_gains else 0.0,
+            "max_controller_gain_requested": max(requested_gains, default=0.0),
+            "mean_controller_gain_applied": sum(applied_gains)/len(applied_gains) if applied_gains else 0.0,
+            "max_controller_gain_applied": max(applied_gains, default=0.0),
+            "mean_applied_relative_frobenius_change": sum(applied_changes)/len(applied_changes) if applied_changes else 0.0,
+            "max_applied_relative_frobenius_change": max(applied_changes, default=0.0),
+            "expected_measurement_count": len(expected_endpoint_measurement_steps),
+            "expected_endpoint_measurement_steps": expected_endpoint_measurement_steps,
+            "expected_fast_apply_steps": expected_fast_apply_steps,
+            "projection_schedule_type": "cached_endpoint_measurement_and_fast_apply",
+        })
+    else:
+        applied=[float(r.get("combined_hardness_applied", 0.0) or 0.0) for r in controller_rows]
+        rels=[float(r.get("relative_frobenius_change_applied", 0.0) or 0.0) for r in controller_rows if math.isfinite(float(r.get("relative_frobenius_change_applied", 0.0) or 0.0))]
+        common_complete.update({"completed_projection_event_indexes": completed_projection_event_indexes,
+            "next_projection_event_index": next_projection_event_index, "wwpgd_interval": wwpgd_interval,
+            "expected_projection_optimizer_steps": expected_projection_optimizer_steps,
+            "total_projection_events": len(expected_projection_optimizer_steps), "projection_schedule_type": "optimizer_step_interval",
+            "total_layer_decisions": len(controller_rows), "total_projected_layers": sum(bool(r.get("projected")) for r in controller_rows),
+            "total_skipped_layers": sum(not bool(r.get("projected")) for r in controller_rows), "controller_skip_counts": skip_counts,
+            "mean_applied_hardness": sum(applied)/len(applied) if applied else 0.0, "max_applied_hardness": max(applied, default=0.0),
+            "mean_relative_frobenius_change": sum(rels)/len(rels) if rels else 0.0, "maximum_relative_frobenius_change": max(rels, default=0.0)})
+    write_json(run_dir / "run_complete.json", common_complete)
     _log_train_progress(
         f"completed run pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )
