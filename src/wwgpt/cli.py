@@ -114,6 +114,13 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
 
     cfg = _resolved_config(args)
     budget = _budget_summary(cfg, args.token_multiplier)
+    from wwgpt.adaptive_wwpgd import resolve_endpoint_measurement_interval
+    endpoint_interval = resolve_endpoint_measurement_interval(
+        cfg.wwpgd.adaptive, getattr(args, "eval_interval", None) or cfg.train.eval_interval
+    )
+    endpoint_steps = list(range(endpoint_interval, budget["resolved_optimizer_steps"] + 1, endpoint_interval))
+    if cfg.wwpgd.adaptive.refresh_at_final_step and budget["resolved_optimizer_steps"] not in endpoint_steps:
+        endpoint_steps.append(budget["resolved_optimizer_steps"])
     cli_max_steps = getattr(args, "max_steps", None)
     payload = {
         "dry_run": dry_run,
@@ -140,6 +147,12 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
         "estimated_projection_event_count": budget["estimated_optimizer_steps"] // _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)),
         "expected_scheduled_event_steps": list(range(_effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)), budget["estimated_optimizer_steps"] + 1, _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)))),
         "wwpgd_adaptive": asdict(cfg.wwpgd.adaptive),
+        "endpoint_measurement_source": cfg.wwpgd.adaptive.measurement_source,
+        "endpoint_measurement_interval": endpoint_interval,
+        "endpoint_apply_interval": cfg.wwpgd.adaptive.apply_interval,
+        "expected_endpoint_measurement_steps": endpoint_steps,
+        "expected_measurement_count": len(endpoint_steps),
+        "expected_fast_apply_steps": [step for step in range(cfg.wwpgd.adaptive.apply_interval, budget["resolved_optimizer_steps"] + 1, cfg.wwpgd.adaptive.apply_interval) if not (cfg.wwpgd.adaptive.skip_fast_apply_on_measurement_step and step in endpoint_steps)],
         "wwpgd_external_commit": __import__("wwgpt.ww", fromlist=["WWPGD_COMMIT"]).WWPGD_COMMIT,
         "expected_projection_event_steps": list(range(_effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)), budget["estimated_optimizer_steps"] + 1, _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)))),
         "wwpgd_adaptive_mode": cfg.wwpgd.adaptive.mode,
@@ -214,11 +227,28 @@ def _config_with_run_overrides(args):
             adaptive_updates[key] = value
     if adaptive_updates:
         cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, adaptive=replace(cfg.wwpgd.adaptive, **adaptive_updates)))
+    above_updates = {key: getattr(args, arg) for arg, key in (
+        ("wwpgd_alpha_above_deadband", "deadband"),
+        ("wwpgd_alpha_above_full_distance", "full_strength_distance"),
+        ("wwpgd_alpha_above_max_hardness", "max_hardness"),
+        ("wwpgd_alpha_above_response", "response_curve")) if getattr(args, arg, None) is not None}
+    below_updates = {key: getattr(args, arg) for arg, key in (
+        ("wwpgd_alpha_below_deadband", "deadband"),
+        ("wwpgd_alpha_below_full_distance", "full_strength_distance"),
+        ("wwpgd_alpha_below_max_hardness", "max_hardness"),
+        ("wwpgd_alpha_below_response", "response_curve")) if getattr(args, arg, None) is not None}
+    direction = getattr(args, "wwpgd_alpha_direction", None)
+    if direction is not None or above_updates or below_updates:
+        adaptive = cfg.wwpgd.adaptive
+        adaptive = replace(adaptive, direction=direction or adaptive.direction,
+                           above_target=replace(adaptive.above_target, **above_updates),
+                           below_target=replace(adaptive.below_target, **below_updates))
+        cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, adaptive=adaptive))
     if model_updates:
         cfg = replace(cfg, model=replace(cfg.model, **model_updates))
     if train_updates:
         cfg = replace(cfg, train=replace(cfg.train, **train_updates))
-    if not model_updates and not train_updates and not adaptive_updates:
+    if not model_updates and not train_updates and not adaptive_updates and not above_updates and not below_updates and direction is None:
         return _resolve_config_path(args)
     out = args.results_root / "cli_overrides_config.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)

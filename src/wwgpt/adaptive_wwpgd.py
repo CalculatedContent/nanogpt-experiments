@@ -88,6 +88,17 @@ class CachedLayerEndpoint:
     cumulative_applied_relative_change: float = 0.0
 
 
+def resolve_endpoint_measurement_interval(
+    adaptive_cfg: AdaptiveWWPGDConfig, runtime_eval_interval: int
+) -> int:
+    """Resolve the cached endpoint sampling cadence in exactly one place."""
+    value = (runtime_eval_interval if adaptive_cfg.measurement_source == "evaluation_interval"
+             else adaptive_cfg.measurement_interval)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("endpoint measurement interval must be a positive integer")
+    return value
+
+
 def _side_from_any(value: Any) -> AdaptiveAlphaSideConfig:
     if isinstance(value, AdaptiveAlphaSideConfig):
         return value
@@ -302,11 +313,13 @@ class AdaptiveWWPGDController:
         if state:
             self.state.update({k: v for k, v in state.items() if k in self.state})
 
-    def observe(self, layer_name: str, alpha: float) -> tuple[int, float]:
+    def observe(self, layer_name: str, alpha: float, *, beta: float | None = None) -> tuple[int, float]:
         c = int(self.state["observation_count"].get(layer_name, 0)) + 1
         self.state["observation_count"][layer_name] = c
         self.state["latest_raw_alpha"][layer_name] = alpha
-        beta = self.cfg.alpha_ema_beta
+        beta = self.cfg.alpha_ema_beta if beta is None else beta
+        if not 0 <= beta < 1:
+            raise ValueError("alpha EMA beta must satisfy 0 <= beta < 1")
         prev = self.state["alpha_ema"].get(layer_name)
         ema = alpha if beta == 0 or prev is None or not math.isfinite(float(prev)) else beta * float(prev) + (1 - beta) * alpha
         self.state["alpha_ema"][layer_name] = ema

@@ -5,7 +5,7 @@ import json
 import math
 import sys
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import torch
@@ -20,7 +20,7 @@ from wwgpt.config import (
     WWPGDConfig,
     load_config,
 )
-from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CachedLayerEndpoint, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index
+from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CachedLayerEndpoint, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index, resolve_endpoint_measurement_interval
 from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, optimizer_fingerprint, resolve_lr_decay_steps, resolve_warmup_steps
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
@@ -125,6 +125,24 @@ class NoExtension(TrainingExtension):
     name = "none"
 
 
+@dataclass
+class FastRelaxationResult:
+    all_rows: list[dict[str, object]]
+    changed_rows: list[dict[str, object]]
+    changed_layer_count: int
+    changed_step: bool
+
+
+@dataclass
+class EndpointMeasurementResult:
+    pre_projection_details: object | None
+    measurement_rows: list[dict[str, object]]
+    controller_rows: list[dict[str, object]]
+    stock_wwpgd_invoked: bool
+    endpoint_activation_count: int
+    measurement_index: int
+
+
 class WWPGDExtension(TrainingExtension):
     name = "wwpgd"
 
@@ -172,10 +190,10 @@ class WWPGDExtension(TrainingExtension):
         measurement_interval: int | None = None,
     ) -> tuple[object | None, list[dict[str, object]], list[dict[str, object]]]:
         if getattr(getattr(self.cfg, "adaptive", None), "apply_mode", "event_projection") == "cached_endpoint_relaxation":
-            rows = self.after_optimizer_step_fast(model=model, optimizer_step=optimizer_step,
+            result = self.after_optimizer_step_fast(model=model, optimizer_step=optimizer_step,
                                                   total_optimizer_steps=total_optimizer_steps,
                                                   measurement_interval=measurement_interval)
-            return None, rows, rows
+            return None, result.changed_rows, result.all_rows
         if optimizer_step % self.interval != 0:
             return None, [], []
         event = optimizer_step // self.interval - 1
@@ -265,15 +283,15 @@ class WWPGDExtension(TrainingExtension):
         endpoint.invalidation_reason = reason
 
     def after_optimizer_step_fast(self, *, model, optimizer_step: int, total_optimizer_steps: int | None = None,
-                                  measurement_interval: int | None = None, **_kwargs) -> list[dict[str, object]]:
+                                  measurement_interval: int | None = None, **_kwargs) -> FastRelaxationResult:
         """Apply cached residuals only; this hook performs no analysis, WW-PGD call, or SVD."""
         cfg = self.cfg.adaptive
         if cfg.apply_mode != "cached_endpoint_relaxation" or optimizer_step % cfg.apply_interval:
-            return []
-        cadence = cfg.measurement_interval or measurement_interval or self.interval
+            return FastRelaxationResult([], [], 0, False)
+        cadence = resolve_endpoint_measurement_interval(cfg, measurement_interval or self.interval)
         measurement_step = optimizer_step % cadence == 0 or (cfg.refresh_at_final_step and optimizer_step == total_optimizer_steps)
         if cfg.skip_fast_apply_on_measurement_step and measurement_step:
-            return []
+            return FastRelaxationResult([], [], 0, False)
         self.counters["fast_control_step_count"] += 1
         live = dict(__import__("wwgpt.ww", fromlist=["projected_matrix_modules"]).projected_matrix_modules(model))
         rows = []
@@ -281,7 +299,11 @@ class WWPGDExtension(TrainingExtension):
         eps = 1e-12
         with torch.no_grad():
             for name, ep in self.endpoint_cache.items():
-                if not ep.active or name not in live:
+                if not ep.active:
+                    continue
+                if name not in live:
+                    self._invalidate(ep, "layer_missing_from_model")
+                    rows.append(self._terminal_fast_row(name, ep, optimizer_step, "layer_missing_from_model"))
                     continue
                 weight = live[name]
                 endpoint = ep.endpoint_tensor.to(weight.device, dtype=weight.dtype)
@@ -295,10 +317,12 @@ class WWPGDExtension(TrainingExtension):
                     reason = "endpoint_distance_growth"
                 if reason:
                     self._invalidate(ep, reason)
+                    rows.append(self._terminal_fast_row(name, ep, optimizer_step, reason, before=before))
                     continue
                 if before <= cfg.endpoint_stop_relative_distance:
                     ep.active = False; ep.invalidation_reason = "endpoint_converged"
                     self.counters["endpoint_convergence_count"] += 1
+                    rows.append(self._terminal_fast_row(name, ep, optimizer_step, "endpoint_converged", before=before, converged=True))
                     continue
                 gain = max(0.0, min(cfg.max_per_step_gain,
                                     cfg.max_per_step_gain * ep.alpha_hardness * ep.global_event_hardness))
@@ -325,7 +349,8 @@ class WWPGDExtension(TrainingExtension):
                        "controller_gain_applied": gain * scale,
                        "initial_endpoint_relative_distance": ep.initial_endpoint_relative_distance,
                        "endpoint_relative_distance_before": before, "endpoint_relative_distance_after": after,
-                       "endpoint_progress_ratio": max(-1.0, min(1.0, 1-before/max(ep.initial_endpoint_relative_distance, eps))),
+                       "endpoint_progress_ratio_before": 1-before/max(ep.initial_endpoint_relative_distance, eps),
+                       "endpoint_progress_ratio": 1-after/max(ep.initial_endpoint_relative_distance, eps),
                        "requested_relative_frobenius_change": requested,
                        "applied_relative_frobenius_change": applied_rel, "trust_region_limit": limit,
                        "trust_region_scale": scale, "changed": changed, "converged": False,
@@ -333,27 +358,50 @@ class WWPGDExtension(TrainingExtension):
                        "adapter_mode": "cached_endpoint_relaxation_v1", "action_type": "fast_endpoint_relaxation"}
                 rows.append(row)
         if changed_step: self.counters["changed_fast_control_step_count"] += 1
-        if cfg.log_every_fast_step: self.relaxation_rows.extend(rows)
+        if cfg.log_every_fast_step:
+            self.relaxation_rows.extend(rows)
+        else:
+            self.relaxation_rows.extend(r for r in rows if r.get("converged") or r.get("invalidated"))
         self.decision_rows.extend(rows)
-        return rows
+        changed_rows = [row for row in rows if bool(row.get("changed"))]
+        return FastRelaxationResult(rows, changed_rows, len(changed_rows), changed_step)
+
+    def _terminal_fast_row(self, name, ep, step, reason, *, before=math.nan, converged=False):
+        return {"optimizer_step": step, "layer_name": name, "endpoint_measurement_step": ep.measurement_step,
+                "endpoint_age_steps": step - ep.measurement_step, "cached_raw_alpha": ep.raw_alpha,
+                "cached_smoothed_alpha": ep.smoothed_alpha, "cached_alpha_hardness": ep.alpha_hardness,
+                "global_event_hardness": ep.global_event_hardness,
+                "endpoint_relative_distance_before": before, "endpoint_relative_distance_after": before,
+                "changed": False, "converged": converged, "invalidated": not converged,
+                "invalidation_reason": reason, "controller_version": CONTROLLER_VERSION,
+                "adapter_mode": "cached_endpoint_relaxation_v1", "action_type": "fast_endpoint_relaxation"}
 
     def after_metrics_measurement(self, *, model, optimizer_step: int, total_optimizer_steps: int,
-                                  tokens_seen: int = 0, force: bool = False, **_metrics) -> tuple[object | None, list[dict], list[dict]]:
+                                  tokens_seen: int = 0, force: bool = False, measurement_interval: int | None = None, **_metrics) -> EndpointMeasurementResult:
         """Refresh sample-and-hold alpha state and endpoints after reporting metrics."""
         cfg = self.cfg.adaptive
-        if cfg.apply_mode != "cached_endpoint_relaxation": return None, [], []
-        interval = cfg.measurement_interval or self.interval
+        if cfg.apply_mode != "cached_endpoint_relaxation": return EndpointMeasurementResult(None, [], [], False, 0, -1)
+        interval = resolve_endpoint_measurement_interval(cfg, measurement_interval or self.interval)
         due = optimizer_step % interval == 0 or (cfg.refresh_at_final_step and optimizer_step == total_optimizer_steps)
-        if not (due or force): return None, [], []
+        if not (due or force): return EndpointMeasurementResult(None, [], [], False, 0, -1)
         from wwgpt.ww import _module_by_name
         selected: dict[str, dict] = {}
         measurement_index = int(self.counters["measurement_count"])
         was_training = model.training
+        if measurement_index < self.cfg.warmup_events:
+            global_hardness = 0.0
+        elif measurement_index >= self.cfg.warmup_events + self.cfg.ramp_events:
+            global_hardness = 1.0
+        else:
+            global_hardness = (measurement_index - self.cfg.warmup_events + 1) / max(self.cfg.ramp_events, 1)
         def selector(mm, name, row=None):
+            from wwgpt.ww import is_projected_layer
+            if not is_projected_layer(name):
+                return None
             data = row.to_dict() if hasattr(row, "to_dict") else dict(row or {})
             raw = float(data.get("alpha", math.nan))
-            count, ema = self.controller.observe(name, raw) if math.isfinite(raw) else (0, math.nan)
             rcfg = resolve_layer_config(cfg, name, self.cfg.target_alpha)
+            count, ema = self.controller.observe(name, raw, beta=float(rcfg["alpha_ema_beta"])) if math.isfinite(raw) else (0, math.nan)
             hardness, _, _ = hardness_for_alpha(ema, rcfg)
             D=float(data.get("D", math.nan)); xmin=float(data.get("xmin", math.nan))
             reason = ""
@@ -361,10 +409,12 @@ class WWPGDExtension(TrainingExtension):
             elif not rcfg.get("enabled", True): reason="layer_disabled"
             elif optimizer_step < cfg.start_step: reason="before_start_step"
             elif not math.isfinite(raw): reason="invalid_raw_alpha"
-            elif count < rcfg.get("min_observations", cfg.min_observations): reason="min_observations"
-            elif hardness <= 0: reason="zero_hardness"
+            elif count < rcfg.get("min_observations", cfg.min_observations): reason="insufficient_observations"
+            elif hardness <= 0: reason="inside_deadband"
             elif not math.isfinite(xmin) or xmin <= 0: reason="invalid_xmin"
-            elif rcfg.get("max_D") is not None and (not math.isfinite(D) or rcfg["max_D"] < D): reason="D_gate"
+            elif rcfg.get("max_D") is not None and not math.isfinite(D): reason="invalid_D"
+            elif rcfg.get("max_D") is not None and rcfg["max_D"] < D: reason="D_above_max_D"
+            elif global_hardness <= 0: reason="zero_hardness"
             signed=ema-self.cfg.target_alpha if math.isfinite(ema) else math.nan
             selected[name]={"row":data,"raw":raw,"ema":ema,"count":count,"hardness":hardness,
                             "signed":signed,"side":"above_target" if signed>0 else "below_target" if signed<0 else "at_target",
@@ -373,27 +423,38 @@ class WWPGDExtension(TrainingExtension):
                 if name in self.endpoint_cache: self._invalidate(self.endpoint_cache[name], reason)
                 return None
             return _module_by_name(mm, name)
+        observation_only = not cfg.enabled or optimizer_step < cfg.start_step or global_hardness == 0
+        candidate = None
         try:
             model.eval()
-            candidate = build_stock_wwpgd_candidate(model, event_index=measurement_index,
-                actual_step=optimizer_step, cfg=external_wwpgd_config_from_experiment(self.cfg), layer_selector=selector)
+            if observation_only:
+                from wwgpt.ww import _match_ww_row, external_projected_layer_names
+                details = weightwatcher_details(model)
+                for name in external_projected_layer_names(model):
+                    matched = _match_ww_row(details, name)
+                    selector(model, name, {} if matched is None else matched)
+            else:
+                candidate = build_stock_wwpgd_candidate(model, event_index=measurement_index,
+                    actual_step=optimizer_step, cfg=external_wwpgd_config_from_experiment(self.cfg), layer_selector=selector)
+                details = candidate.pre_projection_details
+                self.counters["candidate_generation_count"] += 1
         finally:
             model.train(was_training)
-        self.counters["measurement_count"] += 1; self.counters["candidate_generation_count"] += 1
+        self.counters["measurement_count"] += 1
         self.counters["last_measurement_step"] = optimizer_step
         self.counters["next_measurement_step"] = optimizer_step + interval
         rows=[]
         for name, info in selected.items():
-            data=info["row"]; changed=bool(candidate.stock_candidate_changed.get(name, False)); active=False
+            data=info["row"]; changed=bool(candidate and candidate.stock_candidate_changed.get(name, False)); active=False
             reason=info["reason"] or ("" if changed else "stock_candidate_unchanged")
-            initial=float(candidate.original_to_candidate_relative_change.get(name, 0.0))
-            if not reason and name in candidate.candidate_weights:
+            initial=float(candidate.original_to_candidate_relative_change.get(name, 0.0)) if candidate else 0.0
+            if not reason and candidate is not None and name in candidate.candidate_weights:
                 endpoint=candidate.candidate_weights[name].detach().clone()
                 original=candidate.original_weights[name].detach().clone()
                 if cfg.cache_endpoint_on_cpu: endpoint=endpoint.cpu(); original=original.cpu()
                 self.endpoint_cache[name]=CachedLayerEndpoint(name,endpoint,original,optimizer_step,measurement_index,
                     info["raw"],info["ema"],self.cfg.target_alpha,info["signed"],abs(info["signed"]),info["side"],
-                    info["hardness"],1.0,info["hardness"],initial,initial,initial,float(data.get("D",math.nan)),
+                    info["hardness"],global_hardness,info["hardness"]*global_hardness,initial,initial,initial,float(data.get("D",math.nan)),
                     float(data.get("xmin",math.nan)),float(data.get("detX_num",math.nan)),float(data.get("num_evals",math.nan)))
                 active=True
             row={"optimizer_step":optimizer_step,"measurement_index":measurement_index,"layer_name":name,
@@ -402,13 +463,15 @@ class WWPGDExtension(TrainingExtension):
                  "alpha_distance":abs(info["signed"]),"alpha_side":info["side"],"alpha_hardness":info["hardness"],
                  "D":data.get("D"),"xmin":data.get("xmin"),"detX_num":data.get("detX_num"),"num_evals":data.get("num_evals"),
                  "selected_for_candidate":not bool(info["reason"]),"stock_candidate_changed":changed,
-                 "initial_endpoint_relative_distance":initial,"global_event_hardness":1.0,"cache_activated":active,
-                 "cache_invalidation_reason":reason,"measurement_runtime":candidate.runtime,
+                 "initial_endpoint_relative_distance":initial,"global_event_hardness":global_hardness,"cache_activated":active,
+                 "cache_invalidation_reason":reason,"skip_reason":reason,
+                 "measurement_runtime":candidate.runtime if candidate else 0.0,
                  "controller_version":CONTROLLER_VERSION,"adapter_mode":"cached_endpoint_relaxation_v1",
                  "action_type":"slow_measurement"}
             rows.append(row)
         self.measurement_rows.extend(rows); self.decision_rows.extend(rows)
-        return candidate.pre_projection_details, [], rows
+        return EndpointMeasurementResult(details, rows, rows, candidate is not None,
+                                         sum(bool(r["cache_activated"]) for r in rows), measurement_index)
 
 
 def _validate_wwpgd_interval(value: int | None, *, source: str) -> int:
@@ -494,9 +557,32 @@ def _write_csv(path: Path, rows: list[dict[str, object]], *, overwrite: bool = F
     if path.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite {path}")
     with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        fieldnames = list(dict.fromkeys(key for row in rows for key in row))
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(rows)
+
+
+def write_csv_union_schema(path: Path, rows: list[dict[str, object]]) -> None:
+    """Persist append-only logical rows with a deterministic, resume-safe union schema."""
+    existing_rows: list[dict[str, object]] = []
+    existing_fields: list[str] = []
+    if path.exists():
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            existing_fields = list(reader.fieldnames or [])
+            existing_rows = list(reader)
+    pending = rows[len(existing_rows):]
+    if not pending and path.exists():
+        return
+    fields = existing_fields + [key for row in rows for key in row if key not in existing_fields]
+    fields = list(dict.fromkeys(fields))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, restval="")
+        writer.writeheader()
+        writer.writerows(existing_rows)
+        writer.writerows(pending)
 
 
 def _append_only_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -1140,12 +1226,13 @@ def run_scientific_single(
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
         pre_details, new_proj, new_controller = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step, collect_pre_details=immediate_projection_spectral, seed=seed, pair_id=pair_id, base_optimizer=base_optimizer, arm_name=optimizer_name, measurement_interval=(eval_interval or cfg.train.eval_interval))
-        if extension_name == "wwpgd" and new_proj:
+        cached_mode = extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
+        if extension_name == "wwpgd" and new_proj and not cached_mode:
             wwpgd_call_count += 1
         projected_matrix_count += sum(bool(r.get("changed", r.get("projected", True))) for r in new_proj)
         proj_rows.extend(new_proj)
         controller_rows.extend(new_controller)
-        if new_proj:
+        if new_proj and not cached_mode:
             event_idx = int(new_proj[0].get("projection_event", next_projection_event_index))
             if event_idx not in completed_projection_event_indexes:
                 completed_projection_event_indexes.append(event_idx)
@@ -1249,11 +1336,14 @@ def run_scientific_single(
                 }
             )
             if measurement_due:
-                measured_details, _, measurement_decisions = extension.after_metrics_measurement(
+                measurement_result = extension.after_metrics_measurement(
                     model=model, optimizer_step=step, total_optimizer_steps=steps,
-                    tokens_seen=step * tokens_per_step, force=True)
-                controller_rows.extend(measurement_decisions)
-                wwpgd_call_count += 1
+                    tokens_seen=step * tokens_per_step, force=True,
+                    measurement_interval=measurement_interval)
+                measured_details = measurement_result.pre_projection_details
+                controller_rows.extend(measurement_result.controller_rows)
+                if measurement_result.stock_wwpgd_invoked:
+                    wwpgd_call_count += 1
             ws = time.perf_counter()
             if step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps:
                 new_spectral_rows = spectral_summary(
@@ -1362,10 +1452,10 @@ def run_scientific_single(
         _write_csv(run_dir / "composite_spectral.csv", composite_rows, overwrite=resume)
     _write_csv(run_dir / "lrs.csv", lr_rows, overwrite=resume)
     if extension_name == "wwpgd":
-        _write_csv(run_dir / "wwpgd_projection.csv", proj_rows, overwrite=resume)
-        _write_csv(run_dir / "wwpgd_controller.csv", controller_rows, overwrite=resume)
-        _write_csv(run_dir / "wwpgd_endpoint_measurements.csv", getattr(extension, "measurement_rows", []), overwrite=resume)
-        _write_csv(run_dir / "wwpgd_endpoint_relaxation.csv", getattr(extension, "relaxation_rows", []), overwrite=resume)
+        write_csv_union_schema(run_dir / "wwpgd_projection.csv", proj_rows)
+        write_csv_union_schema(run_dir / "wwpgd_controller.csv", controller_rows)
+        write_csv_union_schema(run_dir / "wwpgd_endpoint_measurements.csv", getattr(extension, "measurement_rows", []))
+        write_csv_union_schema(run_dir / "wwpgd_endpoint_relaxation.csv", getattr(extension, "relaxation_rows", []))
         if immediate_projection_spectral:
             _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
     (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")

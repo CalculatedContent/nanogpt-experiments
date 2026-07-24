@@ -299,7 +299,7 @@ def _module_by_name(model: nn.Module, layer_name: str) -> nn.Module | None:
 
 def _selected_layer_selector(selected_names: set[str]):
     def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
-        if layer_name not in selected_names:
+        if not is_projected_layer(layer_name) or layer_name not in selected_names:
             return None
         return _module_by_name(mm, layer_name)
     return layer_selector
@@ -335,21 +335,25 @@ def build_stock_wwpgd_candidate(
     originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     ww_logs: list[pd.DataFrame] = []
     start = time.perf_counter()
-    with torch.no_grad():
-        projector(
-            model,
-            _external_config_object(ww_pgd_module, full_cfg),
-            epoch=event_index,
-            num_epochs=max(event_index + 1, 1),
-            global_step=actual_step,
-            ww_logs=ww_logs,
-            layer_selector=selector,
-        )
+    candidates: dict[str, torch.Tensor] = {}
+    try:
+        with torch.no_grad():
+            projector(
+                model, _external_config_object(ww_pgd_module, full_cfg),
+                epoch=event_index, num_epochs=max(event_index + 1, 1),
+                global_step=actual_step, ww_logs=ww_logs, layer_selector=selector,
+            )
+            candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+    finally:
+        with torch.no_grad():
+            for name, weight in projected_matrix_modules(model):
+                weight.copy_(originals[name].to(weight.device, dtype=weight.dtype))
+                if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
+                    raise RuntimeError(f"failed to restore original WW_PGD weight bitwise for {name}")
     runtime = time.perf_counter() - start
     usable = [x for x in ww_logs if isinstance(x, pd.DataFrame) and not x.empty]
     if len(usable) != 1:
         raise RuntimeError(f"stock WW_PGD candidate generation expected exactly one usable ww_logs DataFrame, got {len(usable)}")
-    candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     rel: dict[str, float] = {}
     changed: dict[str, bool] = {}
     with torch.no_grad():
@@ -359,9 +363,6 @@ def build_stock_wwpgd_candidate(
             disp = (cand - orig).float()
             rel[name] = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
             changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
-            weight.copy_(orig)
-            if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
-                raise RuntimeError(f"failed to restore original WW_PGD weight bitwise for {name}")
     return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg)
 
 
