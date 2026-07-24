@@ -33,9 +33,15 @@ def _fake_ww_pgd(monkeypatch, calls):
     class WWTailConfig:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
-    def ww_pgd_project(model, cfg, *, layer_names=None, **kwargs):
-        calls.append({"cfg": cfg, "layer_names": tuple(layer_names or ()), "kwargs": kwargs})
-        return [{"layer_name": n, "changed": True} for n in (layer_names or [])]
+    def ww_pgd_project(model, cfg, *, epoch, num_epochs, global_step=None, ww_logs=None, layer_selector=None):
+        names = [name for name, module in model.named_modules() if name.startswith("blocks.") and hasattr(module, "weight") and getattr(module.weight, "ndim", 0) == 2]
+        calls.append({"cfg": cfg, "layer_names": tuple(names), "kwargs": {"epoch": epoch, "num_epochs": num_epochs, "global_step": global_step, "ww_logs": ww_logs, "layer_selector": layer_selector}})
+        ww_logs.append(pd.DataFrame({"longname": names, "alpha": [2.8] * len(names), "xmin": [1.0] * len(names), "D": [0.05] * len(names), "num_evals": [64] * len(names)}))
+        with torch.no_grad():
+            for name, module in model.named_modules():
+                if name in names and (layer_selector is None or layer_selector(model, name) is not None):
+                    module.weight.add_(0.01)
+        return None
     mod.WWTailConfig = WWTailConfig
     mod.ww_pgd_project = ww_pgd_project
     monkeypatch.setitem(sys.modules, "ww_pgd", mod)

@@ -11,7 +11,8 @@ import torch
 from torch import nn
 from wwgpt.adaptive_wwpgd import matrix_type, block_index
 
-WWPGD_COMMIT = "5155d1f484fbf33c5302736c1dc2c5de88d205db"
+WWPGD_COMMIT = "bf970cb6b73e977f8374114c442ae5b0589eccaa"
+WWPGD_ADAPTER_MODE = "stock_candidate_displacement_scaling_v1"
 SCIENTIFIC_SCHEMA_VERSION = 3
 PROJECTED_LAYER_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
 
@@ -207,6 +208,8 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
         "wwpgd_commit": WWPGD_COMMIT,
         "wwpgd_implementation": "ww_pgd",
+        "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
+        "wwpgd_adaptive_implementation": "nanogpt-experiments scales stock WW_PGD candidate displacements per layer",
         "q": cfg.q,
         "blend_eta": cfg.blend_eta,
         "cayley_eta": cfg.cayley_eta,
@@ -251,6 +254,115 @@ def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
         return config_cls(**accepted)
 
 
+
+def _assert_stock_wwpgd_api(projector: object) -> None:
+    import inspect
+    sig = inspect.signature(projector)
+    required = {"epoch", "num_epochs", "global_step", "ww_logs", "layer_selector"}
+    missing = sorted(required - set(sig.parameters))
+    unsupported = {"precomputed_details", "global_event_hardness", "layer_hardness", "layer_max_relative_change", "layer_names"} & set(sig.parameters)
+    if missing or unsupported:
+        try:
+            import ww_pgd
+            version = getattr(ww_pgd, "__version__", metadata.version("ww-pgd"))
+        except Exception:
+            version = "unknown"
+        raise RuntimeError(
+            f"installed ww_pgd API is not the expected stock public interface at {WWPGD_COMMIT}; "
+            f"version={version}; missing={missing}; unsupported_adaptive_parameters={sorted(unsupported)}"
+        )
+
+
+@dataclass(frozen=True)
+class StockWWPGDCandidate:
+    pre_projection_details: pd.DataFrame
+    original_weights: dict[str, torch.Tensor]
+    candidate_weights: dict[str, torch.Tensor]
+    original_to_candidate_relative_change: dict[str, float]
+    stock_candidate_changed: dict[str, bool]
+    runtime: float
+    stock_config: ExternalWWTailConfigSpec
+    stock_commit: str = WWPGD_COMMIT
+
+
+def _module_by_name(model: nn.Module, layer_name: str) -> nn.Module | None:
+    cur: nn.Module = model
+    for part in layer_name.split("."):
+        if part.isdigit() and isinstance(cur, (nn.ModuleList, nn.Sequential)):
+            cur = cur[int(part)]
+        elif hasattr(cur, part):
+            cur = getattr(cur, part)
+        else:
+            return None
+    return cur if hasattr(cur, "weight") else None
+
+
+def _selected_layer_selector(selected_names: set[str]):
+    def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
+        if layer_name not in selected_names:
+            return None
+        return _module_by_name(mm, layer_name)
+    return layer_selector
+
+
+def build_stock_wwpgd_candidate(
+    model: nn.Module,
+    *,
+    event_index: int = 0,
+    actual_step: int = 0,
+    cfg: ExternalWWTailConfigSpec | None = None,
+    selected_names: set[str] | None = None,
+) -> StockWWPGDCandidate:
+    cfg = cfg or resolved_external_wwpgd_config()
+    full_cfg = ExternalWWTailConfigSpec(
+        enable_tail_pgd=cfg.enable_tail_pgd,
+        q=cfg.q,
+        blend_eta=cfg.blend_eta,
+        cayley_eta=cfg.cayley_eta,
+        min_tail=cfg.min_tail,
+        use_detx=cfg.use_detx,
+        warmup_epochs=0,
+        ramp_epochs=0,
+        verbose=cfg.verbose,
+        max_relative_frobenius_change=None,
+    )
+    ww_pgd_module = _external_wwpgd_module()
+    projector = getattr(ww_pgd_module, "ww_pgd_project")
+    _assert_stock_wwpgd_api(projector)
+    selected_names = selected_names or set(external_projected_layer_names(model))
+    originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+    ww_logs: list[pd.DataFrame] = []
+    start = time.perf_counter()
+    with torch.no_grad():
+        projector(
+            model,
+            _external_config_object(ww_pgd_module, full_cfg),
+            epoch=event_index,
+            num_epochs=max(event_index + 1, 1),
+            global_step=actual_step,
+            ww_logs=ww_logs,
+            layer_selector=_selected_layer_selector(set(selected_names)),
+        )
+    runtime = time.perf_counter() - start
+    usable = [x for x in ww_logs if isinstance(x, pd.DataFrame) and not x.empty]
+    if len(usable) != 1:
+        raise RuntimeError(f"stock WW_PGD candidate generation expected exactly one usable ww_logs DataFrame, got {len(usable)}")
+    candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+    rel: dict[str, float] = {}
+    changed: dict[str, bool] = {}
+    with torch.no_grad():
+        for name, weight in projected_matrix_modules(model):
+            orig = originals[name].to(weight.device, dtype=weight.dtype)
+            cand = candidates[name].to(weight.device, dtype=weight.dtype)
+            disp = (cand - orig).float()
+            rel[name] = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
+            changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
+            weight.copy_(orig)
+            if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
+                raise RuntimeError(f"failed to restore original WW_PGD weight bitwise for {name}")
+    return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg)
+
+
 def apply_external_wwpgd(
     model: nn.Module,
     *,
@@ -263,102 +375,57 @@ def apply_external_wwpgd(
     layer_hardness: dict[str, float] | None = None,
     global_event_hardness: float | None = None,
     layer_max_relative_change: dict[str, float | None] | None = None,
+    stock_candidate: StockWWPGDCandidate | None = None,
 ) -> list[dict[str, object]]:
+    if precomputed_details is not None:
+        raise TypeError("stock WW_PGD adapter does not accept precomputed_details")
     cfg = cfg or resolved_external_wwpgd_config()
-    ww_pgd_module = _external_wwpgd_module()
-    external_cfg = _external_config_object(ww_pgd_module, cfg)
-    layer_names = external_projected_layer_names(model)
-    projector = getattr(ww_pgd_module, "ww_pgd_project")
-    start = time.perf_counter()
-    originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
-    adaptive_requested = layer_hardness is not None
-    layer_hardness = layer_hardness or {}
-    selected_names = [n for n in layer_names if layer_hardness.get(n, 0.0 if adaptive_requested else 1.0) > 0.0]
-    def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
-        if layer_name not in selected_names:
-            return None
-        cur: nn.Module = mm
-        for part in layer_name.split("."):
-            if part.isdigit() and isinstance(cur, (nn.ModuleList, nn.Sequential)):
-                cur = cur[int(part)]
-            elif hasattr(cur, part):
-                cur = getattr(cur, part)
-            else:
-                return None
-        return cur if hasattr(cur, "weight") else None
-
-    ww_logs: list[pd.DataFrame] = []
-    try:
-        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector, precomputed_details=precomputed_details, global_event_hardness=global_event_hardness, layer_hardness=(layer_hardness if adaptive_requested else None), layer_max_relative_change=layer_max_relative_change)
-    except TypeError as exc:
-        if adaptive_requested or precomputed_details is not None or global_event_hardness is not None or layer_max_relative_change is not None:
-            raise RuntimeError("installed ww_pgd package lacks adaptive layerwise API; install WW_PGD commit 5155d1f484fbf33c5302736c1dc2c5de88d205db or newer") from exc
-        try:
-            result = projector(model=model, config=external_cfg, layer_names=layer_names)
-        except TypeError:
-            result = projector(model, external_cfg, layer_names=layer_names)
-    runtime = time.perf_counter() - start
-    if isinstance(result, pd.DataFrame):
-        rows = result.to_dict("records")
-    elif isinstance(result, list):
-        rows = list(result)
-    elif ww_logs:
-        key = "longname" if "longname" in ww_logs[-1].columns else "name"
-        rows = [{"layer_name": str(row.get(key, row.get("name", "")))} for _, row in ww_logs[-1].iterrows() if str(row.get(key, row.get("name", ""))) in layer_names]
-    elif result is None:
-        rows = []
+    if stock_candidate is not None:
+        candidate = stock_candidate
+        if layer_hardness is None:
+            layer_hardness = {n: 1.0 for n in candidate.original_weights}
+    elif layer_hardness is None:
+        candidate = build_stock_wwpgd_candidate(model, event_index=event_index, actual_step=actual_step, cfg=cfg)
+        layer_hardness = {n: 1.0 for n in candidate.original_weights}
+        global_event_hardness = 1.0
+        layer_max_relative_change = {}
     else:
-        rows = [dict(result)] if isinstance(result, dict) else [{"external_result": repr(result)}]
-    if not rows:
-        rows = [{"layer_name": name} for name in selected_names]
-    for row in rows:
-        lname = str(row.get("layer_name", row.get("longname", row.get("name", ""))))
-        row.setdefault("layer_name", lname)
-        row.setdefault("matrix_type", matrix_type(lname))
-        row.setdefault("block", block_index(lname))
-        row.setdefault("controller_hardness", layer_hardness.get(lname, 0.0 if adaptive_requested else 1.0))
-        row.setdefault("layer_controller_hardness", row.get("controller_hardness"))
-        row.setdefault("projection_event", event_index)
-        row.setdefault("scheduled_token_fraction", scheduled_token_fraction)
-        row.setdefault("actual_step", actual_step)
-        row.setdefault("actual_tokens_seen", actual_tokens_seen)
-        row.setdefault("projection_runtime", runtime / max(1, len(rows)))
-        row.setdefault("wwpgd_implementation", "ww_pgd")
-        row.setdefault("wwpgd_package", "ww_pgd")
-        row.setdefault("wwpgd_commit", WWPGD_COMMIT)
-        row.setdefault("q", cfg.q)
-        row.setdefault("blend_eta", cfg.blend_eta)
-        row.setdefault("cayley_eta", cfg.cayley_eta)
-        row.setdefault("min_tail", cfg.min_tail)
-        row.setdefault("warmup", cfg.warmup_epochs)
-        row.setdefault("ramp", cfg.ramp_epochs)
-        row.setdefault("use_detx", cfg.use_detx)
-        # Prefer measured parameter displacement over package-reported values.
-        try:
-            cur = dict(projected_matrix_modules(model)).get(lname)
-            orig = originals.get(lname)
-            if cur is not None and orig is not None:
-                disp = (cur.detach()-orig).float()
-                rel = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
-                limit = cfg.max_relative_frobenius_change
-                if limit is not None and math.isfinite(rel) and rel > float(limit):
-                    scale = float(limit) / max(rel, 1e-12)
-                    with torch.no_grad():
-                        cur.copy_(orig.to(cur.device, dtype=cur.dtype) + (cur.detach() - orig.to(cur.device, dtype=cur.dtype)) * scale)
-                    rel = float(limit)
-                    row["trust_region_scale"] = scale
-                else:
-                    row.setdefault("trust_region_scale", 1.0)
-                row.setdefault("relative_frobenius_change_requested", rel)
-                row.setdefault("relative_frobenius_change_applied", rel)
-                row["relative_frobenius_change"] = row.get("relative_frobenius_change_applied", rel)
-                row["relative_frobenius_weight_change"] = row.get("relative_frobenius_change_applied", rel)
-                row.setdefault("changed", rel > 0.0)
-        except Exception:
-            row.setdefault("relative_frobenius_weight_change", row.get("relative_frobenius_change", 0.0))
-            row.setdefault("relative_frobenius_change", row.get("relative_frobenius_weight_change", 0.0))
+        candidate = build_stock_wwpgd_candidate(model, event_index=event_index, actual_step=actual_step, cfg=cfg, selected_names=set(layer_hardness))
+    geh = 1.0 if global_event_hardness is None else float(global_event_hardness)
+    rows=[]
+    with torch.no_grad():
+        live = dict(projected_matrix_modules(model))
+        for name, orig in candidate.original_weights.items():
+            if name not in layer_hardness and layer_hardness:
+                continue
+            req_h = max(0.0, min(1.0, float(layer_hardness.get(name, 0.0)) * geh))
+            cand = candidate.candidate_weights[name]
+            weight = live[name]
+            disp = cand.to(orig.device, dtype=orig.dtype) - orig
+            requested = orig + req_h * disp
+            req_rel = float(torch.linalg.norm((requested - orig).float()) / max(float(torch.linalg.norm(orig.float())), 1e-12))
+            limit = (layer_max_relative_change or {}).get(name, cfg.max_relative_frobenius_change)
+            scale = 1.0
+            if limit is not None and math.isfinite(req_rel) and req_rel > float(limit):
+                scale = float(limit) / max(req_rel, 1e-12)
+            applied = orig + scale * (requested - orig)
+            app_rel = float(torch.linalg.norm((applied - orig).float()) / max(float(torch.linalg.norm(orig.float())), 1e-12))
+            if req_h == 0.0:
+                applied = orig
+                app_rel = 0.0
+                scale = 1.0
+            weight.copy_(applied.to(weight.device, dtype=weight.dtype))
+            changed = app_rel > 0.0 and not torch.equal(weight.detach().cpu(), orig.cpu())
+            rows.append({"layer_name": name, "matrix_type": matrix_type(name), "block": block_index(name), "projection_event": event_index,
+                "scheduled_token_fraction": scheduled_token_fraction, "actual_step": actual_step, "actual_tokens_seen": actual_tokens_seen,
+                "projection_runtime": candidate.runtime / max(1, len(candidate.original_weights)), "wwpgd_implementation": "ww_pgd", "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
+                "wwpgd_package": "ww_pgd", "wwpgd_commit": WWPGD_COMMIT, "q": cfg.q, "blend_eta": cfg.blend_eta, "cayley_eta": cfg.cayley_eta, "min_tail": cfg.min_tail,
+                "warmup": 0, "ramp": 0, "use_detx": cfg.use_detx, "stock_candidate_changed": candidate.stock_candidate_changed.get(name, False),
+                "stock_candidate_relative_frobenius_change": candidate.original_to_candidate_relative_change.get(name, 0.0),
+                "combined_hardness_requested": req_h, "combined_hardness_applied": req_h * scale, "trust_region_limit": limit, "trust_region_scale": scale,
+                "relative_frobenius_change_requested": req_rel, "relative_frobenius_change_applied": app_rel, "relative_frobenius_change": app_rel,
+                "relative_frobenius_weight_change": app_rel, "changed": changed, "projection_attempted": req_h > 0.0, "projected": changed})
     return rows
-
 
 def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 0):
     if strength is not None:

@@ -33,15 +33,22 @@ class FakeExternalConfig:
     warmup_epochs: int
     ramp_epochs: int
     verbose: bool
+    max_relative_frobenius_change: float | None = None
 
 
 def install_fake_ww_pgd(monkeypatch, calls):
     mod = types.ModuleType("ww_pgd")
     mod.WWTailConfig = FakeExternalConfig
 
-    def ww_pgd_project(*args, **kwargs):
-        calls.append({"args": args, "kwargs": kwargs})
-        return [{"layer_name": name, "changed": True} for name in kwargs.get("layer_names", [])]
+    def ww_pgd_project(model, cfg, *, epoch, num_epochs, global_step=None, ww_logs=None, layer_selector=None):
+        calls.append({"args": (model, cfg), "kwargs": {"epoch": epoch, "num_epochs": num_epochs, "global_step": global_step, "ww_logs": ww_logs, "layer_selector": layer_selector}})
+        names = external_projected_layer_names(model)
+        ww_logs.append(pd.DataFrame({"longname": names, "alpha": [2.8] * len(names), "xmin": [1.0] * len(names), "D": [0.05] * len(names), "num_evals": [64] * len(names)}))
+        with torch.no_grad():
+            for name, weight in projected_matrix_modules(model):
+                if layer_selector is None or layer_selector(model, name) is not None:
+                    weight.add_(0.01)
+        return None
 
     mod.ww_pgd_project = ww_pgd_project
     monkeypatch.setitem(sys.modules, "ww_pgd", mod)
@@ -101,7 +108,7 @@ def test_base_step_occurs_before_projection(monkeypatch):
     assert isinstance(order[1], dict)
 
 
-def test_base_and_projected_arms_identical_before_first_projection(monkeypatch):
+def test_base_and_projected_arms_use_stock_candidate_at_first_projection(monkeypatch):
     calls = []
     install_fake_ww_pgd(monkeypatch, calls)
     torch.manual_seed(123)
@@ -113,7 +120,7 @@ def test_base_and_projected_arms_identical_before_first_projection(monkeypatch):
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
     ext.after_optimizer_step(model=projected, optimizer_step=1, total_optimizer_steps=20, tokens_seen=8)
     assert len(calls) == 1
-    assert all(torch.equal(base.state_dict()[k], projected.state_dict()[k]) for k in base.state_dict())
+    assert any(not torch.equal(base.state_dict()[k], projected.state_dict()[k]) for k in base.state_dict())
 
 
 def test_optimizer_group_and_weight_decay_signatures_identical():
@@ -197,10 +204,12 @@ def test_real_extension_passes_resolved_experiment_config_to_installed_package(m
 
     captured = {}
 
-    def capture_projector(model, cfg, **kwargs):
+    def capture_projector(model, cfg, *, epoch, num_epochs, global_step=None, ww_logs=None, layer_selector=None):
         captured["cfg"] = cfg
-        captured["kwargs"] = kwargs
-        return [{"layer_name": name, "changed": False} for name in external_projected_layer_names(model)]
+        captured["kwargs"] = {"epoch": epoch, "num_epochs": num_epochs, "global_step": global_step, "ww_logs": ww_logs, "layer_selector": layer_selector}
+        names = external_projected_layer_names(model)
+        ww_logs.append(pd.DataFrame({"longname": names, "alpha": [2.8] * len(names), "xmin": [1.0] * len(names), "D": [0.05] * len(names), "num_evals": [64] * len(names)}))
+        return None
 
     monkeypatch.setattr(ww_pgd, "ww_pgd_project", capture_projector)
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())

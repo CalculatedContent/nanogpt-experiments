@@ -16,7 +16,10 @@ Requires-Dist: tokenizers
 Requires-Dist: jupyterlab
 Requires-Dist: nbformat
 Requires-Dist: scipy
-Requires-Dist: weightwatcher
+Requires-Dist: weightwatcher<0.8,>=0.7.7
+Requires-Dist: torch-optimi
+Requires-Dist: tiktoken
+Requires-Dist: ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git@bf970cb6b73e977f8374114c442ae5b0589eccaa
 Dynamic: license-file
 
 # nanoGPT WW-PGD Scaling
@@ -39,15 +42,34 @@ Smoke test only, invalid for scientific conclusions:
 ./scripts/run_smoke_test.sh /tmp
 ```
 
+
+## Execution interface
+
+The CLI prints a resolved execution configuration before data preparation or training. Use `--dry-run` on `prepare-data`, `run-multiseed`, `run-canonical-trials`, or `run-strength-scan` to report trial counts, arm counts, levels, seeds, token budgets, estimated optimizer steps, output directories, dataset revision, and the resolved YAML-backed configuration without downloading data or training.
+
+Profiles map directly to pinned configuration files: `scaling` -> `configs/default.yaml`, `reproduction_tiny` -> `configs/reproduction_tiny.yaml`, and `reproduction_fineweb` -> `configs/reproduction_fineweb.yaml`. If `--profile` is supplied, it is the configuration source; conflicting explicit `--config` values are rejected instead of ignored. Publication and multiseed entry points use the canonical six-arm design: AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD. Non-canonical optimizer/extension ablations belong in explicit scan commands rather than `run-multiseed`.
+
+Environment-variable overrides are intentionally minimized. General workflows should pass CLI arguments. The Colab helper reads only `LEVEL`, `DATA_ROOT`, `RESULTS_ROOT`, `TOKEN_MULTIPLIER`, `SEEDS`, and optional `CONFIG`. The level-0 strength-scan helper additionally supports documented scan conveniences (`WWPGD_STRENGTH`, `DEVICE`, interval variables, `RUN_LOG`, and `PID_FILE`) and exports `WWGPT_STRENGTH_SCAN_ROOT` for notebooks.
+
+## Schema v3 highlights
+
+Scientific schema v3 separates base optimizers from extensions. Publication commands run the canonical base optimizer plus extension pairs. The six canonical arms are AdamW, AdamW+WW-PGD, Muon, Muon+WW-PGD, StableAdamW, and StableAdamW+WW-PGD.
+
+The default ladder is level 0 `(n_layer=1,n_head=1,n_embd=64,block_size=256)`, then levels 1-4 `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)`, always with 64-dimensional attention heads. Blocks use separate bias-free key/query/value/projection matrices, bias-free MLP linears, and an untied bias-free LM head.
+
+Training defaults are batch size 16, gradient accumulation 1, dropout 0, weight decay 0.01, and no gradient clipping when `grad_clip=0.0`. Warmup-cosine scheduling updates every optimizer parameter group after the post-step WW-PGD extension and before gradients are zeroed. Level-aware LLRD derives gamma from `llrd_min_multiplier=0.50` unless explicitly supplied. Token budgets are based on actual trainable parameter counts: target tokens default to `20 * parameter_count_used`, with extended horizons such as 40, 80, and 160 accepted.
+
+Evaluation uses random-per-evaluation train and validation batches from deterministic SHA-256-derived streams; paired arms share hashes at the same evaluation index, and validation data is never concatenated with training data. WW-PGD uses an optimizer-step interval: the canonical default `wwpgd_interval` is `1`, so default runs project after every successful base optimizer step; explicit positive intervals are supported ablations and are never derived from evaluation or logging cadence. Interval `N` applies WW-PGD at optimizer steps `N, 2N, 3N, ...`. For example, Level 1 can be rerun with `--ww-interval 8`, keeping `blend_eta=0.5` while reducing projection events. Raw and composite WeightWatcher diagnostics use correct PyTorch linear conventions, including `OV=sum_h W_O,h @ W_V,h` and `VO=W_V @ W_O`. Schema-v2 and schema-v3 results are readable but not comparable as pooled paired statistics. See `docs/SCHEMA_V3.md`.
+
 ## Design
 
 The AdamW baseline uses configurable learning rate, betas, epsilon, weight decay, warmup, cosine scheduling hooks, gradient clipping, batch size, gradient accumulation, dropout, evaluation interval, and checkpoint interval. WW-PGD first applies the normal AdamW step, then projects selected matrix-valued transformer layers with a documented local projection. WW-PGD is not standard WeightWatcher.
 
 Default scientific data is `HuggingFaceFW/fineweb-edu`, config `sample-10BT`, revision pinned in YAML. Data preparation streams documents, assigns deterministic train/validation splits by normalized-content SHA-256, keeps duplicate documents in the same split, trains the BPE tokenizer only on training-assigned documents, writes manifests and hashes, and refuses to repeat tokens. Tiny Shakespeare is not used for scientific experiments; local synthetic text is used only for infrastructure smoke tests.
 
-Model ladder levels 0-4 use 64 per-head dimensions where practical: `(2,1,64)`, `(4,2,128)`, `(6,3,192)`, `(8,4,256)`, `(10,5,320)` with block size 256. Actual instantiated parameter counts are the source of truth and reports include total, trainable, embedding, and non-embedding parameters.
+Model ladder levels 0-4 are `(1,1,64)`, `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)` with block size 256. Actual instantiated parameter counts are the source of truth and reports include total, trainable, token embedding, position embedding, output head, embedding, and non-embedding parameters.
 
-Scaling uses an experimental Chinchilla-style extrapolation `D = kN` for multipliers 5, 10, 20, and 40. Applying 20 tokens per parameter to tiny GPTs is an extrapolation, not a proven optimum. Valid scaling analysis requires a non-collinear grid over model size and token multiplier.
+Scaling uses an experimental Chinchilla-style extrapolation `D = kN` with arbitrary positive token multipliers, including 20, 40, 80, and 160. Applying 20 tokens per parameter to tiny GPTs is an extrapolation, not a proven optimum. Valid scaling analysis requires a non-collinear grid over model size and token multiplier.
 
 Five default paired seeds are 1337, 2027, 4099, 7919, and 104729. Paired arms share initialization, token order, model config, tokenizer and corpus hashes, and token budgets. Results are immutable run directories beneath `level_XX/pair_<id>/<optimizer>/run_<timestamp>_<suffix>`.
 
@@ -56,3 +78,55 @@ Analysis discovers completed runs, ignores incomplete runs, verifies pairs, comp
 Notebooks in `notebooks/` validate repository integrity, compare a single level, analyze WeightWatcher trajectories, inspect scaling laws, examine overfitting/generalization, and generate a summary report. Plotting helpers live in the package and use matplotlib.
 
 Append-only behavior: scripts create new timestamped directories, preserve partial outputs, never recycle result directories, and never treat smoke tests as scaling-law evidence.
+
+## Level-0 WW-PGD 0.5 from scratch
+
+For a fully scripted level-0 run with five seeds, environment-variable setup, notebook execution, and a per-layer alpha-error confirmation for WW-PGD strength `0.5`, see [`docs/LEVEL0_WWPGD_0P5_FROM_SCRATCH.md`](docs/LEVEL0_WWPGD_0P5_FROM_SCRATCH.md). The entry point is:
+
+```bash
+DATA_ROOT=/tmp/wwpgd_v2/data RESULTS_ROOT=/tmp/wwpgd_level0_wwpgd_0p5 ./scripts/run_level0_wwpgd_0p5_from_scratch.sh
+```
+
+## WW-PGD Strength Scan
+
+The strength scan is a secondary ablation for AdamW + WW-PGD. It is not run by default and does not change `wwgpt run-multiseed` or the default WW-PGD strength of `0.02`. The runner creates one shared initialization per seed, runs one immutable AdamW control, and reuses that control for every fixed WW-PGD strength arm. Every arm resets the deterministic token reader and fixed probes so only `wwpgd.strength` differs.
+
+Run a scan:
+
+```bash
+wwgpt run-strength-scan --level 0 --data-root /tmp/wwpgd_v2/data --results-root /tmp/wwpgd_strength_scan --token-multiplier 20 --seeds 1337 --strengths 0.1,0.25,0.5,1.0 --device mps --eval-interval 25 --spectral-interval 100 --checkpoint-interval 500 --immediate-projection-spectral --resume
+```
+
+Analyze without notebooks:
+
+```bash
+wwgpt analyze-strength-scan --scan-root /tmp/wwpgd_strength_scan
+```
+
+Outputs are under `experiments/strength_scan/level_<NN>/multiplier_<M>/scan_<timestamp>_*`, with `seeds/`, one `adamw_control/`, per-strength run directories, and `analysis/strength_scan_*.csv`. Resume skips compatible completed arms and writes new append-only run directories for reruns. Immediate alpha before/after logging is written to `wwpgd_projection_spectral.csv`; it matches WeightWatcher layer names by `longname`/`name` and reports alpha-error changes, projection norms, and WeightWatcher overhead.
+
+Open notebooks after setting `WWGPT_STRENGTH_SCAN_ROOT` to either a scan directory or parent results directory:
+
+```bash
+WWGPT_STRENGTH_SCAN_ROOT=/tmp/wwpgd_strength_scan jupyter lab notebooks/07_strength_scan_overview.ipynb notebooks/08_strength_scan_weightwatcher.ipynb
+```
+
+## CI branch protection
+
+Pull requests should require the separate `quality`, `tests`, and `analysis-notebooks` workflow jobs before merge. The notebook job executes the fixture-backed analysis notebook regression independently of the normal `pytest -m "not slow"` suite, so green fast tests cannot mask broken analysis notebooks.
+
+### Adaptive layerwise WW-PGD alpha controller
+
+WW-PGD event timing and adaptive projection strength are separate controls. The optimizer-step interval (`train.wwpgd_interval` or `--wwpgd-interval`) decides when a WW-PGD event occurs; `wwpgd.adaptive` decides which eligible transformer matrices are projected at that event and how strongly. The default controller mode is `uniform`, which is the canonical backward-compatible behavior and applies unit layer hardness to every otherwise eligible projected matrix.
+
+Adaptive modes are explicit research ablations. They do not change AdamW learning rate, weight decay, gradient clipping, optimizer moments, model architecture, token budget, training data, or `q`. The configured `blend_eta=0.5` and `cayley_eta=0.25` remain full-strength maxima; at an event the implementation multiplies them by `global_event_hardness * layer_alpha_hardness`.
+
+For `alpha_linear`, using `wwpgd.target_alpha` as the target, the controller computes `deadband_high = target_alpha + deadband_above_target` and clamps `(alpha - deadband_high) / (full_strength_alpha - deadband_high)` to `[0, 1]`. The `linear` response uses this value directly; `smoothstep` uses `x*x*(3-2*x)`. Layers inside the deadband are skipped. Optional gates skip layers with invalid alpha/xmin, insufficient tail size, `D` above `max_D`, too few observations, or per-layer cooldown. Optional `max_relative_frobenius_change` clips a projected candidate displacement back to a per-layer trust region without resetting optimizer moments.
+
+Override precedence is deterministic: global adaptive defaults, then matrix type (`W_K`, `W_Q`, `W_V`, `W_O`, `W_MLP_IN`, `W_MLP_OUT`), then matching layer globs, then exact layer names. Overrides replace only explicitly supplied fields. Controller decisions are logged to `wwpgd_controller.csv`; actual projection-package results continue to be written to `wwpgd_projection.csv`. Checkpoints persist alpha EMA, observation counts, last projection event, last applied hardness, accumulated decision rows, and the controller implementation version so resume decisions match uninterrupted runs.
+
+## Adaptive layerwise WW-PGD alpha-distance pilot
+
+Adaptive WW-PGD is an experimental ablation, not evidence of a generalization improvement. Event timing and projection strength are separate: `train.wwpgd_interval` schedules projection events, `wwpgd.warmup_events`/`wwpgd.ramp_events` define event-level hardness, and `wwpgd.adaptive` defines each eligible transformer matrix's layer hardness. The backward-compatible default mode remains `uniform`.
+
+The recommended pilot mode is `alpha_distance`, which treats alpha above and below `wwpgd.target_alpha` as separate sides. A deadband means no intervention. Farther above the target requests stronger projection on the above side; farther below the target requests stronger projection on the below side. The configured `blend_eta` and `cayley_eta` are maximum full-strength values and are multiplied by event hardness and layer hardness. `wwpgd.adaptive.max_relative_frobenius_change` limits the actual Frobenius-norm parameter displacement without changing AdamW moments, learning rate, betas, weight decay, gradient clipping, minibatch order, token budget, architecture, or q.
