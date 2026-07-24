@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+from wwgpt.adaptive_wwpgd import matrix_type, block_index
 
 WWPGD_COMMIT = "bf970cb6b73e977f8374114c442ae5b0589eccaa"
 SCIENTIFIC_SCHEMA_VERSION = 3
@@ -157,6 +158,7 @@ class ExternalWWTailConfigSpec:
     warmup_epochs: int = 0
     ramp_epochs: int = 0
     verbose: bool = False
+    max_relative_frobenius_change: float | None = None
 
 
 WWTailConfig = ExternalWWTailConfigSpec
@@ -178,6 +180,7 @@ def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSp
         warmup_epochs=STANDARD_WWPGD_WARMUP_EVENTS,
         ramp_epochs=STANDARD_WWPGD_RAMP_EVENTS,
         verbose=bool(getattr(cfg, "verbose", False)),
+        max_relative_frobenius_change=getattr(cfg, "max_relative_frobenius_change", None),
     )
 
 
@@ -196,7 +199,8 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
             "wwpgd_implementation": "none",
         }
     cfg = external_wwpgd_config_from_experiment(requested_cfg) if requested_cfg is not None else resolved_external_wwpgd_config()
-    requested = dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
+    from dataclasses import asdict as _asdict
+    requested = _asdict(requested_cfg) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
     resolved = dict(vars(cfg))
     return {
         "wwpgd_package": "ww_pgd",
@@ -233,6 +237,7 @@ def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
         "cayley_eta": cfg.cayley_eta,
         "min_tail": cfg.min_tail,
         "use_detx": cfg.use_detx,
+        "max_relative_frobenius_change": cfg.max_relative_frobenius_change,
         "warmup_epochs": cfg.warmup_epochs,
         "ramp_epochs": cfg.ramp_epochs,
         "verbose": cfg.verbose,
@@ -254,6 +259,8 @@ def apply_external_wwpgd(
     actual_step: int = 0,
     actual_tokens_seen: int = 0,
     cfg: ExternalWWTailConfigSpec | None = None,
+    precomputed_details: pd.DataFrame | None = None,
+    layer_hardness: dict[str, float] | None = None,
 ) -> list[dict[str, object]]:
     cfg = cfg or resolved_external_wwpgd_config()
     ww_pgd_module = _external_wwpgd_module()
@@ -261,8 +268,11 @@ def apply_external_wwpgd(
     layer_names = external_projected_layer_names(model)
     projector = getattr(ww_pgd_module, "ww_pgd_project")
     start = time.perf_counter()
+    originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+    layer_hardness = layer_hardness or {}
+    selected_names = [n for n in layer_names if layer_hardness.get(n, 1.0) > 0.0]
     def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
-        if layer_name not in layer_names:
+        if layer_name not in selected_names:
             return None
         cur: nn.Module = mm
         for part in layer_name.split("."):
@@ -276,7 +286,7 @@ def apply_external_wwpgd(
 
     ww_logs: list[pd.DataFrame] = []
     try:
-        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector)
+        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector, precomputed_details=precomputed_details, layer_hardness=layer_hardness)
     except TypeError:
         try:
             result = projector(model=model, config=external_cfg, layer_names=layer_names)
@@ -295,8 +305,13 @@ def apply_external_wwpgd(
     else:
         rows = [dict(result)] if isinstance(result, dict) else [{"external_result": repr(result)}]
     if not rows:
-        rows = [{"layer_name": name} for name in layer_names]
+        rows = [{"layer_name": name} for name in selected_names]
     for row in rows:
+        lname = str(row.get("layer_name", row.get("longname", row.get("name", ""))))
+        row.setdefault("layer_name", lname)
+        row.setdefault("matrix_type", matrix_type(lname))
+        row.setdefault("block", block_index(lname))
+        row.setdefault("controller_hardness", layer_hardness.get(lname, 1.0))
         row.setdefault("projection_event", event_index)
         row.setdefault("scheduled_token_fraction", scheduled_token_fraction)
         row.setdefault("actual_step", actual_step)
@@ -312,8 +327,28 @@ def apply_external_wwpgd(
         row.setdefault("warmup", cfg.warmup_epochs)
         row.setdefault("ramp", cfg.ramp_epochs)
         row.setdefault("use_detx", cfg.use_detx)
-        row.setdefault("relative_frobenius_weight_change", row.get("relative_frobenius_change", 0.0))
-        row.setdefault("relative_frobenius_change", row.get("relative_frobenius_weight_change", 0.0))
+        # Prefer measured parameter displacement over package-reported values.
+        try:
+            cur = dict(projected_matrix_modules(model)).get(lname)
+            orig = originals.get(lname)
+            if cur is not None and orig is not None:
+                disp = (cur.detach()-orig).float()
+                rel = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
+                limit = cfg.max_relative_frobenius_change
+                if limit is not None and math.isfinite(rel) and rel > float(limit):
+                    scale = float(limit) / max(rel, 1e-12)
+                    with torch.no_grad():
+                        cur.copy_(orig.to(cur.device, dtype=cur.dtype) + (cur.detach() - orig.to(cur.device, dtype=cur.dtype)) * scale)
+                    rel = float(limit)
+                    row["trust_region_scale"] = scale
+                else:
+                    row.setdefault("trust_region_scale", 1.0)
+                row["relative_frobenius_change"] = rel
+                row["relative_frobenius_weight_change"] = rel
+                row.setdefault("changed", rel > 0.0)
+        except Exception:
+            row.setdefault("relative_frobenius_weight_change", row.get("relative_frobenius_change", 0.0))
+            row.setdefault("relative_frobenius_change", row.get("relative_frobenius_weight_change", 0.0))
     return rows
 
 

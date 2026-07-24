@@ -19,3 +19,15 @@ Every schema-v3 run manifest records a normalized base `optimizer_fingerprint` c
 Spectral diagnostics run independently of evaluation. Raw matrices include W_K, W_Q, W_V, W_O, W_MLP_IN, and W_MLP_OUT. Composite diagnostics include `KQ=W_K@W_Q`, `QK=W_Q@W_K`, `QK_effective=W_Q.T@W_K`, `KQ_effective=W_K.T@W_Q`, `OV=sum_h W_O,h@W_V,h`, `VO=W_V@W_O`, and `MLP_IO=W_MLP_OUT@W_MLP_IN`. Composite matrices are diagnostics only.
 
 Schema-v2 and schema-v3 runs remain readable, but analysis must not pool them in statistical comparisons because optimizer arms, architecture, evaluation sampling, and projection schedules differ.
+
+## `wwpgd.adaptive`
+
+Schema v3 supports an optional nested adaptive WW-PGD controller configuration. Defaults preserve prior behavior:
+
+- `mode: uniform` applies layer hardness `1.0` to every otherwise eligible transformer matrix.
+- `mode: alpha_linear` maps smoothed layer alpha above `wwpgd.target_alpha + deadband_above_target` to hardness in `[0, max_hardness]`, with `response_curve: linear` or `smoothstep`.
+- `mode: alpha_piecewise` linearly interpolates an ordered list of `[alpha, hardness]` points and clamps outside the configured range.
+
+Fields: `direction` (`above_target`), `response_curve`, `start_step`, `min_observations`, `alpha_ema_beta`, `deadband_above_target`, `full_strength_alpha`, `max_hardness`, `max_D`, `max_relative_frobenius_change`, `cooldown_events`, `piecewise_points`, `matrix_type_overrides`, and `layer_overrides`. `strength` remains a deprecated compatibility field and is not used as adaptive hardness.
+
+The interval schedule controls only event timing. Adaptive hardness controls per-layer projection strength at an event. Run manifests record the resolved adaptive configuration, controller version, override precedence, expected projection steps, maximum `blend_eta`/`cayley_eta`, and trust-region setting. `run_complete.json` records layer-decision counts, skip-counts by reason, and aggregate applied-hardness and relative-Frobenius-change statistics.
