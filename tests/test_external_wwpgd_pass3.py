@@ -206,7 +206,7 @@ def test_real_extension_passes_resolved_experiment_config_to_installed_package(m
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
     cfg = WWPGDConfig(q=1.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
     ext = WWPGDExtension(cfg=cfg, interval=1)
-    details, rows = ext.after_optimizer_step(model=tiny_model(), optimizer_step=1, total_optimizer_steps=1, tokens_seen=8)
+    details, rows, _controller = ext.after_optimizer_step(model=tiny_model(), optimizer_step=1, total_optimizer_steps=1, tokens_seen=8)
 
     external_cfg = captured["cfg"]
     assert external_cfg.__class__ is ww_pgd.WWTailConfig
@@ -227,7 +227,7 @@ def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):
     ext = WWPGDExtension(cfg=WWPGDConfig(blend_eta=0.9, warmup_events=3, ramp_events=7), interval=1)
 
     for step in range(1, 6):
-        _pre, rows = ext.after_optimizer_step(
+        _pre, rows, _controller = ext.after_optimizer_step(
             model=model,
             optimizer_step=step,
             total_optimizer_steps=5,

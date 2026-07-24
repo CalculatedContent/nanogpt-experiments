@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, validate_adaptive_config
+from wwgpt.adaptive_wwpgd import AdaptiveAlphaSideConfig, AdaptiveWWPGDConfig, validate_adaptive_config
 
 DEFAULT_SEEDS = [1337, 2027, 4099, 7919, 104729]
 TOKEN_MULTIPLIERS = [20, 40, 80, 160]
@@ -222,7 +222,9 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
         raise ValueError("wwpgd.min_tail must be >= 1")
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
-    validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
+    if cfg.q <= 0:
+        raise ValueError("wwpgd.q must be > 0")
+    validate_adaptive_config(cfg.adaptive, cfg.target_alpha, cfg.q)
 
 
 def validate_experiment_config(cfg: ExperimentConfig) -> None:
@@ -280,7 +282,11 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
             raise ValueError("configuration section wwpgd.adaptive must be a mapping")
         adaptive_keys = set(AdaptiveWWPGDConfig.__dataclass_fields__)
         _reject_unknown_keys("wwpgd.adaptive", ww_data["adaptive"], adaptive_keys)
-        ww_data["adaptive"] = AdaptiveWWPGDConfig(**{**asdict(cfg.wwpgd.adaptive), **ww_data["adaptive"]})
+        adaptive_data = {**asdict(cfg.wwpgd.adaptive), **ww_data["adaptive"]}
+        for side_key in ("above_target", "below_target"):
+            if isinstance(adaptive_data.get(side_key), dict):
+                adaptive_data[side_key] = AdaptiveAlphaSideConfig(**adaptive_data[side_key])
+        ww_data["adaptive"] = AdaptiveWWPGDConfig(**adaptive_data)
     else:
         ww_data["adaptive"] = cfg.wwpgd.adaptive
     base_ww = asdict(cfg.wwpgd)

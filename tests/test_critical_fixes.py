@@ -45,8 +45,8 @@ def test_wwpgd_extension_one_pre_call_and_fraction(monkeypatch):
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", fake_details)
     monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", fake_apply)
     ext = WWPGDExtension(DummyCfg(), interval=1)
-    pre, rows1 = ext.after_optimizer_step(model=object(), optimizer_step=1, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
-    pre, rows2 = ext.after_optimizer_step(model=object(), optimizer_step=4, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
+    pre, rows1, _controller1 = ext.after_optimizer_step(model=object(), optimizer_step=1, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
+    pre, rows2, _controller2 = ext.after_optimizer_step(model=object(), optimizer_step=4, total_optimizer_steps=4, tokens_seen=999, collect_pre_details=True)
     assert calls["pre"] == 2
     assert rows1[0]["scheduled_token_fraction"] == 0.25
     assert rows2[0]["scheduled_token_fraction"] == 1.0

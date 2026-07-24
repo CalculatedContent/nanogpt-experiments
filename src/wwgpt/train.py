@@ -20,7 +20,7 @@ from wwgpt.config import (
     WWPGDConfig,
     load_config,
 )
-from wwgpt.adaptive_wwpgd import AdaptiveWWPGDController, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index
+from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index
 from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, optimizer_fingerprint, resolve_lr_decay_steps, resolve_warmup_steps
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
@@ -131,7 +131,7 @@ class WWPGDExtension(TrainingExtension):
         interval = _validate_wwpgd_interval(interval, source="WWPGDExtension.interval")
         self.cfg = cfg
         self.interval = interval
-        self.controller = AdaptiveWWPGDController(cfg.adaptive, cfg.target_alpha)
+        self.controller = AdaptiveWWPGDController(getattr(cfg, "adaptive", AdaptiveWWPGDConfig()), cfg.target_alpha)
         self.decision_rows: list[dict[str, object]] = []
 
     def state_dict(self) -> dict[str, object]:
@@ -159,14 +159,28 @@ class WWPGDExtension(TrainingExtension):
             return None, [], []
         event = optimizer_step // self.interval - 1
         frac = max(0.0, min(1.0, optimizer_step / max(1, total_optimizer_steps)))
-        mode = self.cfg.adaptive.mode
+        adaptive_cfg = getattr(self.cfg, "adaptive", AdaptiveWWPGDConfig())
+        mode = adaptive_cfg.mode
         if mode == "uniform":
             details = weightwatcher_details(model) if collect_pre_details else None
-            rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg), precomputed_details=details)
+            kwargs = {"event_index": event, "scheduled_token_fraction": frac, "actual_step": optimizer_step, "actual_tokens_seen": tokens_seen, "cfg": external_wwpgd_config_from_experiment(self.cfg)}
+            if details is not None:
+                kwargs["precomputed_details"] = details
+            try:
+                rows = apply_external_wwpgd(model, **kwargs)
+            except TypeError:
+                kwargs.pop("precomputed_details", None)
+                rows = apply_external_wwpgd(model, **kwargs)
             return details, rows, []
         details = weightwatcher_details(model)
-        global_event_hardness = 1.0
+        if event < self.cfg.warmup_events:
+            global_event_hardness = 0.0
+        elif event >= self.cfg.warmup_events + self.cfg.ramp_events:
+            global_event_hardness = 1.0
+        else:
+            global_event_hardness = (event - self.cfg.warmup_events + 1) / max(self.cfg.ramp_events, 1)
         layer_hardness: dict[str, float] = {}
+        layer_limits: dict[str, float | None] = {}
         decisions=[]
         from wwgpt.ww import external_projected_layer_names, _match_ww_row
         for lname in external_projected_layer_names(model):
@@ -175,15 +189,21 @@ class WWPGDExtension(TrainingExtension):
             count, ema = self.controller.observe(lname, raw) if math.isfinite(raw) else (int(self.controller.state["observation_count"].get(lname,0)), float("nan"))
             rcfg=resolve_layer_config(self.cfg.adaptive, lname, self.cfg.target_alpha)
             requested, norm, dead_high = hardness_for_alpha(ema, rcfg)
+            signed = ema - self.cfg.target_alpha if math.isfinite(float(ema)) else float("nan")
+            alpha_side = "above_target" if signed > 0 else "below_target" if signed < 0 else "at_target"
+            side_cfg = rcfg.get(alpha_side, {}) if alpha_side in {"above_target", "below_target"} else {}
             skip=""; projected=False; trust=1.0; applied=requested*global_event_hardness
             xmin=float(row.get("xmin", float("nan"))) if row else float("nan")
             D=float(row.get("D", float("nan"))) if row else float("nan")
-            tail=float(row.get("num_evals", row.get("selected_tail_size", float("nan")))) if row else float("nan")
-            if not bool(rcfg.get("enabled", True)): skip="controller_disabled"
+            tail=float(row.get("selected_tail_size", row.get("num_evals", float("nan")))) if row else float("nan")
+            if not bool(self.cfg.adaptive.enabled): skip="controller_disabled"
+            elif not bool(rcfg.get("enabled", True)): skip="layer_disabled"
+            elif alpha_side in {"above_target", "below_target"} and rcfg.get("direction") not in {alpha_side, "both"}: skip="direction_excluded"
             elif optimizer_step < self.cfg.adaptive.start_step: skip="before_start_step"
-            elif not math.isfinite(raw): skip="invalid_alpha"
+            elif not math.isfinite(raw): skip="invalid_raw_alpha"
+            elif not math.isfinite(ema): skip="invalid_smoothed_alpha"
             elif not (math.isfinite(xmin) and xmin > 0): skip="invalid_xmin"
-            elif rcfg.get("max_D") is not None and (not math.isfinite(D) or D > float(rcfg["max_D"])): skip="D_above_max_D"
+            elif rcfg.get("max_D") is not None and (not math.isfinite(D) or float(rcfg["max_D"]) < D): skip="D_above_max_D"
             elif math.isfinite(tail) and tail < self.cfg.min_tail: skip="min_tail"
             elif count < self.cfg.adaptive.min_observations: skip="min_observations"
             elif lname in self.controller.state["last_projection_event"] and event - int(self.controller.state["last_projection_event"][lname]) <= self.cfg.adaptive.cooldown_events: skip="cooldown"
@@ -191,19 +211,26 @@ class WWPGDExtension(TrainingExtension):
             if skip:
                 applied=0.0
             else:
-                projected=True; layer_hardness[lname]=applied
-            dec={"seed":seed,"pair_id":pair_id,"base_optimizer":base_optimizer,"arm_name":arm_name,"optimizer_step":optimizer_step,"tokens_seen":tokens_seen,"projection_event":event,"layer_name":lname,"block":block_index(lname),"matrix_type":matrix_type(lname),"controller_mode":mode,"raw_alpha":raw,"smoothed_alpha":ema,"target_alpha":rcfg.get("target_alpha"),"deadband_high":dead_high,"full_strength_alpha":rcfg.get("full_strength_alpha"),"normalized_alpha_error":norm,"response_curve":rcfg.get("response_curve"),"layer_hardness_requested":requested,"global_event_hardness":global_event_hardness,"combined_hardness_requested":requested*global_event_hardness,"trust_region_scale":trust,"combined_hardness_applied":applied,"effective_blend_eta":self.cfg.blend_eta*applied,"effective_cayley_eta":self.cfg.cayley_eta*applied,"D":D,"xmin":xmin,"detX_num":row.get("detX_num", float("nan")),"tail_size":tail,"relative_frobenius_change_requested":float("nan"),"relative_frobenius_change_applied":float("nan"),"projected":projected,"skip_reason":skip,"observation_count":count,"last_projected_event":self.controller.state["last_projection_event"].get(lname),"controller_version":CONTROLLER_VERSION}
+                projected=True; layer_hardness[lname]=requested; layer_limits[lname]=rcfg.get("max_relative_frobenius_change")
+            dec={"seed":seed,"pair_id":pair_id,"base_optimizer":base_optimizer,"arm_name":arm_name,"optimizer_step":optimizer_step,"tokens_seen":tokens_seen,"projection_event":event,"layer_name":lname,"block":block_index(lname),"matrix_type":matrix_type(lname),"controller_mode":mode,"direction":rcfg.get("direction"),"alpha_side":alpha_side,"raw_alpha":raw,"smoothed_alpha":ema,"target_alpha":rcfg.get("target_alpha"),"signed_alpha_error":signed,"alpha_distance":abs(signed) if math.isfinite(signed) else float("nan"),"side_enabled":side_cfg.get("enabled"),"side_deadband":side_cfg.get("deadband"),"side_full_strength_distance":side_cfg.get("full_strength_distance"),"side_max_hardness":side_cfg.get("max_hardness"),"side_response_curve":side_cfg.get("response_curve"),"deadband_high":dead_high,"full_strength_alpha":rcfg.get("full_strength_alpha"),"normalized_alpha_distance":norm,"normalized_alpha_error":norm,"response_curve":rcfg.get("response_curve"),"layer_hardness_requested":requested,"global_event_hardness":global_event_hardness,"combined_hardness_requested":requested*global_event_hardness,"trust_region_scale":trust,"combined_hardness_applied":applied,"effective_blend_eta_requested":self.cfg.blend_eta*requested*global_event_hardness,"effective_blend_eta_applied":self.cfg.blend_eta*applied,"effective_cayley_eta_requested":self.cfg.cayley_eta*requested*global_event_hardness,"effective_cayley_eta_applied":self.cfg.cayley_eta*applied,"effective_blend_eta":self.cfg.blend_eta*applied,"effective_cayley_eta":self.cfg.cayley_eta*applied,"D":D,"xmin":xmin,"detX_num":row.get("detX_num", float("nan")),"selected_tail_size":tail,"tail_size":tail,"relative_frobenius_change_requested":float("nan"),"relative_frobenius_change_applied":float("nan"),"projection_requested": requested > 0,"projection_attempted": False,"projected":projected,"skip_reason":skip,"observation_count":count,"last_projected_event":self.controller.state["last_projection_event"].get(lname),"controller_version":CONTROLLER_VERSION}
             decisions.append(dec)
-        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg), precomputed_details=details, layer_hardness=layer_hardness) if layer_hardness or mode == "uniform" else []
+        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg), precomputed_details=details, layer_hardness=layer_hardness, global_event_hardness=global_event_hardness, layer_max_relative_change=layer_limits) if layer_hardness or mode == "uniform" else []
         byname={str(r.get("layer_name", "")):r for r in rows}
         for dec in decisions:
             r=byname.get(dec["layer_name"])
             if r:
-                rel=float(r.get("relative_frobenius_change", 0.0) or 0.0)
-                dec["relative_frobenius_change_requested"]=rel; dec["relative_frobenius_change_applied"]=rel
-                dec["projected"]=bool(r.get("changed", True))
-                self.controller.state["last_projection_event"][dec["layer_name"]]=event
-                self.controller.state["last_applied_hardness"][dec["layer_name"]]=dec["combined_hardness_applied"]
+                req=float(r.get("relative_frobenius_change_requested", r.get("relative_frobenius_change", 0.0)) or 0.0)
+                app=float(r.get("relative_frobenius_change_applied", r.get("relative_frobenius_change", 0.0)) or 0.0)
+                dec["relative_frobenius_change_requested"]=req; dec["relative_frobenius_change_applied"]=app
+                dec["trust_region_scale"]=float(r.get("trust_region_scale", 1.0) or 1.0)
+                dec["combined_hardness_applied"]=float(r.get("combined_hardness_applied", dec["combined_hardness_requested"] * dec["trust_region_scale"]) or 0.0)
+                dec["effective_blend_eta_applied"]=float(r.get("effective_blend_eta_applied", self.cfg.blend_eta*dec["combined_hardness_applied"]) or 0.0)
+                dec["effective_cayley_eta_applied"]=float(r.get("effective_cayley_eta_applied", self.cfg.cayley_eta*dec["combined_hardness_applied"]) or 0.0)
+                dec["projection_attempted"]=bool(r.get("projection_attempted", True))
+                dec["projected"]=bool(r.get("changed", True)) and app > 0
+                if dec["projected"]:
+                    self.controller.state["last_projection_event"][dec["layer_name"]]=event
+                    self.controller.state["last_applied_hardness"][dec["layer_name"]]=dec["combined_hardness_applied"]
         self.decision_rows.extend(decisions)
         return (details if collect_pre_details else None), rows, decisions
 

@@ -31,3 +31,7 @@ Schema v3 supports an optional nested adaptive WW-PGD controller configuration. 
 Fields: `direction` (`above_target`), `response_curve`, `start_step`, `min_observations`, `alpha_ema_beta`, `deadband_above_target`, `full_strength_alpha`, `max_hardness`, `max_D`, `max_relative_frobenius_change`, `cooldown_events`, `piecewise_points`, `matrix_type_overrides`, and `layer_overrides`. `strength` remains a deprecated compatibility field and is not used as adaptive hardness.
 
 The interval schedule controls only event timing. Adaptive hardness controls per-layer projection strength at an event. Run manifests record the resolved adaptive configuration, controller version, override precedence, expected projection steps, maximum `blend_eta`/`cayley_eta`, and trust-region setting. `run_complete.json` records layer-decision counts, skip-counts by reason, and aggregate applied-hardness and relative-Frobenius-change statistics.
+
+### Adaptive WW-PGD metadata
+
+Schema v3 manifests record whether adaptive WW-PGD is enabled, the adaptive mode and direction, above-target and below-target side settings, controller version, override precedence, expected scheduled event steps, maximum blend/Cayley eta, trust-region configuration, target/q consistency, and the external WW_PGD commit/API version. `wwpgd_controller.csv` contains one decision row for every eligible layer at every scheduled event; `wwpgd_projection.csv` is reserved for actual changed projection rows. Requested and applied hardness/eta/displacement fields are separate so trust-region clipping is auditable.
