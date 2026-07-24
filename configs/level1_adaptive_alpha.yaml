@@ -3,16 +3,24 @@ model_architecture_version: nanogpt_separate_qkv_tied_head_v2
 parameter_count_convention: transformer_body
 base_optimizer: adamw
 extensions:
-- none
-- wwpgd
+  - none
+  - wwpgd
+seeds: [1337, 2027, 4099]
+token_multipliers: [20]
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
-dataset_subset: sample-10BT
+dataset_subset: null
 dataset_split: train
+dataset_revision: main
 data_mode: fineweb_custom_bpe_scaling
-dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
+tokenizer: null
+tokenizer_revision: null
 composite_spectral_analysis_enabled: false
 model:
+  n_layer: 2
+  n_head: 2
+  n_embd: 128
+  block_size: 256
   vocab_size: 8192
   dropout: 0.0
   bias: false
@@ -20,37 +28,32 @@ model:
   linear_bias: false
   layernorm_bias: true
   init_mode: nanogpt_normal_0p02
-  profile_name: scaling_level0
+  profile_name: scaling_level1_adaptive_alpha
   mlp_mult: 4
 train:
   batch_size: 16
   gradient_accumulation: 1
   learning_rate: 0.0006
-  betas:
-  - 0.9
-  - 0.95
-  epsilon: 1.0e-08
+  betas: [0.9, 0.95]
+  epsilon: 1.0e-8
   weight_decay: 0.1
   grad_clip: 1.0
-  eval_interval: 10
-  spectral_interval: 10
-  checkpoint_interval: 50
+  eval_interval: 25
+  spectral_interval: 50
+  checkpoint_interval: 250
   eval_batches: 20
   training_sampling: random_window
+  evaluation_sampling: random_per_eval
   lr_schedule: warmup_cosine
   warmup_ratio: 0.01
   min_lr_ratio: 0.1
   layer_lr: flat
   llrd_min_multiplier: 0.5
-  evaluation_sampling: random_per_eval
-  wwpgd_interval: null
-  warmup_steps: null
-  lr_decay_steps: null
+  wwpgd_interval: 250
 wwpgd:
   enabled: true
   extension: wwpgd
   target_alpha: 2.0
-  strength: 1.0
   q: 1.0
   blend_eta: 0.5
   cayley_eta: 0.25
@@ -60,30 +63,31 @@ wwpgd:
   ramp_events: 0
   project_embeddings: false
   project_output_head: false
-
-# Adaptive layerwise WW-PGD alpha pilot. Uniform mode remains the default elsewhere.
-wwpgd:
-  enabled: true
-  extension: wwpgd
-  target_alpha: 2.0
-  q: 1.0
-  blend_eta: 0.5
-  cayley_eta: 0.25
   adaptive:
-    mode: alpha_linear
-    direction: above_target
-    response_curve: smoothstep
+    mode: alpha_distance
+    direction: both
     start_step: 500
     min_observations: 2
     alpha_ema_beta: 0.8
-    deadband_above_target: 0.4
-    full_strength_alpha: 4.0
-    max_hardness: 1.0
     max_D: 0.15
     max_relative_frobenius_change: 0.01
     cooldown_events: 0
+    above_target:
+      enabled: true
+      deadband: 0.4
+      full_strength_distance: 2.0
+      max_hardness: 1.0
+      response_curve: smoothstep
+    below_target:
+      enabled: true
+      deadband: 0.2
+      full_strength_distance: 1.0
+      max_hardness: 1.0
+      response_curve: smoothstep
     matrix_type_overrides:
       W_V:
-        full_strength_alpha: 3.8
+        above_target:
+          full_strength_distance: 1.8
       W_MLP_OUT:
-        deadband_above_target: 0.6
+        above_target:
+          deadband: 0.6

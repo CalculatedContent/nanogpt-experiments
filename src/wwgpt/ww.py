@@ -11,7 +11,7 @@ import torch
 from torch import nn
 from wwgpt.adaptive_wwpgd import matrix_type, block_index
 
-WWPGD_COMMIT = "bf970cb6b73e977f8374114c442ae5b0589eccaa"
+WWPGD_COMMIT = "5155d1f484fbf33c5302736c1dc2c5de88d205db"
 SCIENTIFIC_SCHEMA_VERSION = 3
 PROJECTED_LAYER_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
 
@@ -201,7 +201,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
     cfg = external_wwpgd_config_from_experiment(requested_cfg) if requested_cfg is not None else resolved_external_wwpgd_config()
     from dataclasses import asdict as _asdict
     requested = _asdict(requested_cfg) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
-    resolved = dict(vars(cfg))
+    resolved = {k: v for k, v in vars(cfg).items() if not (k == "max_relative_frobenius_change" and v is None)}
     return {
         "wwpgd_package": "ww_pgd",
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
@@ -261,6 +261,8 @@ def apply_external_wwpgd(
     cfg: ExternalWWTailConfigSpec | None = None,
     precomputed_details: pd.DataFrame | None = None,
     layer_hardness: dict[str, float] | None = None,
+    global_event_hardness: float | None = None,
+    layer_max_relative_change: dict[str, float | None] | None = None,
 ) -> list[dict[str, object]]:
     cfg = cfg or resolved_external_wwpgd_config()
     ww_pgd_module = _external_wwpgd_module()
@@ -269,8 +271,9 @@ def apply_external_wwpgd(
     projector = getattr(ww_pgd_module, "ww_pgd_project")
     start = time.perf_counter()
     originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+    adaptive_requested = layer_hardness is not None
     layer_hardness = layer_hardness or {}
-    selected_names = [n for n in layer_names if layer_hardness.get(n, 1.0) > 0.0]
+    selected_names = [n for n in layer_names if layer_hardness.get(n, 0.0 if adaptive_requested else 1.0) > 0.0]
     def layer_selector(mm: nn.Module, layer_name: str, row: object | None = None) -> nn.Module | None:
         if layer_name not in selected_names:
             return None
@@ -286,8 +289,10 @@ def apply_external_wwpgd(
 
     ww_logs: list[pd.DataFrame] = []
     try:
-        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector, precomputed_details=precomputed_details, layer_hardness=layer_hardness)
-    except TypeError:
+        result = projector(model, external_cfg, epoch=event_index, num_epochs=max(event_index + 1, cfg.ramp_epochs), global_step=actual_step, ww_logs=ww_logs, layer_selector=layer_selector, precomputed_details=precomputed_details, global_event_hardness=global_event_hardness, layer_hardness=(layer_hardness if adaptive_requested else None), layer_max_relative_change=layer_max_relative_change)
+    except TypeError as exc:
+        if adaptive_requested or precomputed_details is not None or global_event_hardness is not None or layer_max_relative_change is not None:
+            raise RuntimeError("installed ww_pgd package lacks adaptive layerwise API; install WW_PGD commit 5155d1f484fbf33c5302736c1dc2c5de88d205db or newer") from exc
         try:
             result = projector(model=model, config=external_cfg, layer_names=layer_names)
         except TypeError:
@@ -311,7 +316,8 @@ def apply_external_wwpgd(
         row.setdefault("layer_name", lname)
         row.setdefault("matrix_type", matrix_type(lname))
         row.setdefault("block", block_index(lname))
-        row.setdefault("controller_hardness", layer_hardness.get(lname, 1.0))
+        row.setdefault("controller_hardness", layer_hardness.get(lname, 0.0 if adaptive_requested else 1.0))
+        row.setdefault("layer_controller_hardness", row.get("controller_hardness"))
         row.setdefault("projection_event", event_index)
         row.setdefault("scheduled_token_fraction", scheduled_token_fraction)
         row.setdefault("actual_step", actual_step)
@@ -343,8 +349,10 @@ def apply_external_wwpgd(
                     row["trust_region_scale"] = scale
                 else:
                     row.setdefault("trust_region_scale", 1.0)
-                row["relative_frobenius_change"] = rel
-                row["relative_frobenius_weight_change"] = rel
+                row.setdefault("relative_frobenius_change_requested", rel)
+                row.setdefault("relative_frobenius_change_applied", rel)
+                row["relative_frobenius_change"] = row.get("relative_frobenius_change_applied", rel)
+                row["relative_frobenius_weight_change"] = row.get("relative_frobenius_change_applied", rel)
                 row.setdefault("changed", rel > 0.0)
         except Exception:
             row.setdefault("relative_frobenius_weight_change", row.get("relative_frobenius_change", 0.0))

@@ -41,7 +41,7 @@ def test_prepare_data_profile_dry_run_loads_profile(tmp_path):
         assert key in first["parameter_report"]
 
 
-def test_run_multiseed_dry_run_is_canonical_six_arm(tmp_path):
+def test_run_multiseed_dry_run_is_adamw_two_arm(tmp_path):
     cp = _run_cli(
         "run-multiseed",
         "--level",
@@ -60,13 +60,13 @@ def test_run_multiseed_dry_run_is_canonical_six_arm(tmp_path):
     )
     payload = _json_payload(cp.stdout)
     assert payload["number_of_trials"] == 2
-    assert payload["number_of_arms"] == 6
-    assert payload["arms"] == ["adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stable_adamw", "stable_adamw_wwpgd"]
+    assert payload["number_of_arms"] == 2
+    assert payload["arms"] == ["adamw", "adamw_wwpgd"]
     assert payload["seeds"] == [1, 2]
     assert payload["resolved_config"]["train"]["max_steps"] == 7
 
 
-def test_run_multiseed_rejects_noncanonical_options(tmp_path):
+def test_run_multiseed_accepts_optimizer_subset_options(tmp_path):
     cp = subprocess.run(
         [
             sys.executable,
@@ -88,8 +88,9 @@ def test_run_multiseed_rejects_noncanonical_options(tmp_path):
         text=True,
         capture_output=True,
     )
-    assert cp.returncode != 0
-    assert "canonical-only" in cp.stderr
+    assert cp.returncode == 0
+    payload = _json_payload(cp.stdout)
+    assert payload["arms"] == ["muon", "muon_wwpgd"]
 
 
 def test_run_multiseed_dry_run_reports_step_resolution(tmp_path):
