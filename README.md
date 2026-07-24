@@ -90,3 +90,13 @@ WWGPT_STRENGTH_SCAN_ROOT=/tmp/wwpgd_strength_scan jupyter lab notebooks/07_stren
 ## CI branch protection
 
 Pull requests should require the separate `quality`, `tests`, and `analysis-notebooks` workflow jobs before merge. The notebook job executes the fixture-backed analysis notebook regression independently of the normal `pytest -m "not slow"` suite, so green fast tests cannot mask broken analysis notebooks.
+
+### Adaptive layerwise WW-PGD alpha controller
+
+WW-PGD event timing and adaptive projection strength are separate controls. The optimizer-step interval (`train.wwpgd_interval` or `--wwpgd-interval`) decides when a WW-PGD event occurs; `wwpgd.adaptive` decides which eligible transformer matrices are projected at that event and how strongly. The default controller mode is `uniform`, which is the canonical backward-compatible behavior and applies unit layer hardness to every otherwise eligible projected matrix.
+
+Adaptive modes are explicit research ablations. They do not change AdamW learning rate, weight decay, gradient clipping, optimizer moments, model architecture, token budget, training data, or `q`. The configured `blend_eta=0.5` and `cayley_eta=0.25` remain full-strength maxima; at an event the implementation multiplies them by `global_event_hardness * layer_alpha_hardness`.
+
+For `alpha_linear`, using `wwpgd.target_alpha` as the target, the controller computes `deadband_high = target_alpha + deadband_above_target` and clamps `(alpha - deadband_high) / (full_strength_alpha - deadband_high)` to `[0, 1]`. The `linear` response uses this value directly; `smoothstep` uses `x*x*(3-2*x)`. Layers inside the deadband are skipped. Optional gates skip layers with invalid alpha/xmin, insufficient tail size, `D` above `max_D`, too few observations, or per-layer cooldown. Optional `max_relative_frobenius_change` clips a projected candidate displacement back to a per-layer trust region without resetting optimizer moments.
+
+Override precedence is deterministic: global adaptive defaults, then matrix type (`W_K`, `W_Q`, `W_V`, `W_O`, `W_MLP_IN`, `W_MLP_OUT`), then matching layer globs, then exact layer names. Overrides replace only explicitly supplied fields. Controller decisions are logged to `wwpgd_controller.csv`; actual projection-package results continue to be written to `wwpgd_projection.csv`. Checkpoints persist alpha EMA, observation counts, last projection event, last applied hardness, accumulated decision rows, and the controller implementation version so resume decisions match uninterrupted runs.

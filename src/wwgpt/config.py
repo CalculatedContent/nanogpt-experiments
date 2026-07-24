@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, validate_adaptive_config
 
 DEFAULT_SEEDS = [1337, 2027, 4099, 7919, 104729]
 TOKEN_MULTIPLIERS = [20, 40, 80, 160]
@@ -110,6 +111,7 @@ class WWPGDConfig:
     use_detx: bool = True
     warmup_events: int = 0
     ramp_events: int = 0
+    adaptive: AdaptiveWWPGDConfig = field(default_factory=AdaptiveWWPGDConfig)
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,7 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
         raise ValueError("wwpgd.min_tail must be >= 1")
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
+    validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
 
 
 def validate_experiment_config(cfg: ExperimentConfig) -> None:
@@ -271,7 +274,18 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     _reject_unknown_keys("wwpgd", data.get("wwpgd", {}), wwpgd_keys)
     model = ModelConfig(**{**asdict(cfg.model), **data.get("model", {})})
     train = TrainConfig(**{**asdict(cfg.train), **data.get("train", {})})
-    wwpgd = WWPGDConfig(**{**asdict(cfg.wwpgd), **data.get("wwpgd", {})})
+    ww_data = dict(data.get("wwpgd", {}))
+    if "adaptive" in ww_data:
+        if not isinstance(ww_data["adaptive"], dict):
+            raise ValueError("configuration section wwpgd.adaptive must be a mapping")
+        adaptive_keys = set(AdaptiveWWPGDConfig.__dataclass_fields__)
+        _reject_unknown_keys("wwpgd.adaptive", ww_data["adaptive"], adaptive_keys)
+        ww_data["adaptive"] = AdaptiveWWPGDConfig(**{**asdict(cfg.wwpgd.adaptive), **ww_data["adaptive"]})
+    else:
+        ww_data["adaptive"] = cfg.wwpgd.adaptive
+    base_ww = asdict(cfg.wwpgd)
+    base_ww["adaptive"] = cfg.wwpgd.adaptive
+    wwpgd = WWPGDConfig(**{**base_ww, **ww_data})
     rest: dict[str, Any] = {k: v for k, v in data.items() if k in experiment_keys}
     loaded = ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)
     validate_experiment_config(loaded)
