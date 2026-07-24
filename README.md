@@ -114,3 +114,16 @@ The recommended pilot mode is `alpha_distance`, which treats alpha above and bel
 The adaptive controller changes only the retained parameter displacement: `W_applied = W_original + trust_region_scale * combined_hardness_requested * (W_candidate - W_original)`. It does not change AdamW learning rate, betas, epsilon, weight decay, gradient clipping, minibatch order, optimizer moments, architecture, token budget, training data, or `q`. This is not mathematically identical to modifying WW_PGD's internal Cayley hardness; WW_PGD's Cayley transformation, SVD, tail selection, and WeightWatcher invocation remain owned by the external package.
 
 For `alpha_distance`, alpha above and below `wwpgd.target_alpha` are handled with side-specific deadbands, full-strength distances, maximum hardness, and response curves. Near-target layers receive zero or weak displacement; layers farther above or below target request stronger displacement. The configured trust-region limit clips the actual relative-Frobenius parameter move. No generalization improvement is claimed until experimentally demonstrated.
+
+`apply_mode: cached_endpoint_relaxation` is an explicit experimental two-timescale
+alternative; `event_projection` remains the default. After normal post-step
+train/validation reporting, one unchanged stock WW_PGD invocation performs
+WeightWatcher analysis and generates selected endpoints, and live weights are
+restored bitwise. Metrics, including test metrics, are reporting-only. Between
+measurements the post-AdamW fast hook performs no WeightWatcher, WW_PGD, SVD, or
+evaluation: it applies `gain * (endpoint - weight)` under a per-step trust region.
+The actual move shrinks with the endpoint residual, while alpha hardness is held
+until the next measurement. Stale, nonfinite, converged, disabled, near-target, or
+unchanged endpoints are deactivated. AdamW moments are not reset or modified.
+Actions are logged to `wwpgd_endpoint_measurements.csv` and
+`wwpgd_endpoint_relaxation.csv`.

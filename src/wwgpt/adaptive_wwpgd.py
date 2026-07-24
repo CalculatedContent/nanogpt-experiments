@@ -6,7 +6,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-CONTROLLER_VERSION = "adaptive_wwpgd_v2"
+CONTROLLER_VERSION = "adaptive_wwpgd_two_timescale_v1"
 MATRIX_TYPES = {"W_K", "W_Q", "W_V", "W_O", "W_MLP_IN", "W_MLP_OUT"}
 DIRECTIONS = {"above_target", "below_target", "both"}
 RESPONSES = {"linear", "smoothstep"}
@@ -26,6 +26,7 @@ class AdaptiveAlphaSideConfig:
 
 @dataclass(frozen=True)
 class AdaptiveWWPGDConfig:
+    apply_mode: str = "event_projection"
     mode: str = "uniform"
     direction: str = "above_target"
     response_curve: str = "linear"
@@ -44,6 +45,47 @@ class AdaptiveWWPGDConfig:
     below_target: AdaptiveAlphaSideConfig = field(default_factory=lambda: AdaptiveAlphaSideConfig(deadband=0.2, full_strength_distance=1.0, response_curve="smoothstep"))
     matrix_type_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     layer_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    measurement_interval: int | None = None
+    measurement_source: str = "evaluation_interval"
+    apply_interval: int = 1
+    max_per_step_gain: float = 0.02
+    max_relative_frobenius_change_per_step: float | None = None
+    endpoint_stop_relative_distance: float = 0.0001
+    max_endpoint_age_steps: int = 50
+    stale_distance_multiplier: float = 2.0
+    skip_fast_apply_on_measurement_step: bool = True
+    cache_endpoint_on_cpu: bool = False
+    refresh_at_final_step: bool = True
+    log_every_fast_step: bool = True
+
+
+@dataclass
+class CachedLayerEndpoint:
+    layer_name: str
+    endpoint_tensor: Any
+    measurement_weight_tensor: Any
+    measurement_step: int
+    measurement_index: int
+    raw_alpha: float
+    smoothed_alpha: float
+    target_alpha: float
+    signed_alpha_error: float
+    alpha_distance: float
+    alpha_side: str
+    alpha_hardness: float
+    global_event_hardness: float
+    combined_horizon_hardness: float
+    initial_endpoint_relative_distance: float
+    latest_endpoint_relative_distance: float
+    stock_candidate_relative_change: float
+    D: float
+    xmin: float
+    detX_num: float
+    num_evals: float
+    active: bool = True
+    invalidation_reason: str = ""
+    last_applied_step: int | None = None
+    cumulative_applied_relative_change: float = 0.0
 
 
 def _side_from_any(value: Any) -> AdaptiveAlphaSideConfig:
@@ -68,6 +110,26 @@ def _validate_side(side: AdaptiveAlphaSideConfig, prefix: str, *, piecewise: boo
 
 
 def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float, q: float = 1.0) -> None:
+    if cfg.apply_mode not in {"event_projection", "cached_endpoint_relaxation"}:
+        raise ValueError("wwpgd.adaptive.apply_mode must be event_projection or cached_endpoint_relaxation")
+    if cfg.measurement_source not in {"explicit_interval", "evaluation_interval"}:
+        raise ValueError("wwpgd.adaptive.measurement_source must be explicit_interval or evaluation_interval")
+    if cfg.measurement_interval is not None and cfg.measurement_interval <= 0:
+        raise ValueError("wwpgd.adaptive.measurement_interval must be positive when supplied")
+    if cfg.measurement_source == "explicit_interval" and cfg.measurement_interval is None:
+        raise ValueError("explicit_interval requires wwpgd.adaptive.measurement_interval")
+    if cfg.apply_interval <= 0:
+        raise ValueError("wwpgd.adaptive.apply_interval must be positive")
+    if not 0 <= cfg.max_per_step_gain <= 1:
+        raise ValueError("wwpgd.adaptive.max_per_step_gain must be in [0,1]")
+    if cfg.max_relative_frobenius_change_per_step is not None and cfg.max_relative_frobenius_change_per_step <= 0:
+        raise ValueError("wwpgd.adaptive.max_relative_frobenius_change_per_step must be positive")
+    if cfg.endpoint_stop_relative_distance < 0:
+        raise ValueError("wwpgd.adaptive.endpoint_stop_relative_distance must be nonnegative")
+    if cfg.max_endpoint_age_steps <= 0:
+        raise ValueError("wwpgd.adaptive.max_endpoint_age_steps must be positive")
+    if cfg.stale_distance_multiplier < 1:
+        raise ValueError("wwpgd.adaptive.stale_distance_multiplier must be at least 1")
     if cfg.mode not in {"uniform", "alpha_linear", "alpha_piecewise", "alpha_distance"}:
         raise ValueError(f"unknown wwpgd.adaptive.mode {cfg.mode}")
     if cfg.direction not in DIRECTIONS:

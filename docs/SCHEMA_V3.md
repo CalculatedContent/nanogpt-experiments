@@ -1,5 +1,16 @@
 # Scientific schema v3
 
+## Two-timescale endpoint records
+
+The optional `cached_endpoint_relaxation` mode checkpoints endpoint and measurement
+tensors, measurement step/index, raw and EMA alpha state, hardness/side/event
+hardness, fit diagnostics, endpoint distances, active/invalidation state, last
+application, cumulative movement, counters, controller version, and adapter mode.
+`wwpgd_endpoint_measurements.csv` records slow selection/fit/cache decisions;
+`wwpgd_endpoint_relaxation.csv` records requested/applied gain, before/after
+distance, physical relative movement, trust-region scale, convergence, and
+invalidation for fast actions. `num_evals` is never labeled as tail size.
+
 Schema v3 composes a base optimizer (`adamw`, `muon`, `stableadamw`) with an extension (`none`, `wwpgd`). Canonical arms are `adamw`, `adamw_wwpgd`, `muon`, `muon_wwpgd`, `stableadamw`, and `stableadamw_wwpgd`; paired effects compare the same base optimizer with and without WW-PGD.
 
 Base optimizers are authoritative and pairable. `adamw` uses standard `torch.optim.AdamW` with one documented parameter group per trainable parameter. `muon` uses the repository implementation matching the KellerJordan/modded-nanogpt Muon update with the Newton-Schulz coefficients recorded in `MUON_IMPLEMENTATION_VERSION`. `stableadamw` uses `optimi.StableAdamW` from the `torch-optimi` package, and run manifests record the installed package version. A requested optimizer construction failure is fatal; runs must not silently substitute AdamW for Muon or StableAdamW.
