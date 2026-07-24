@@ -312,6 +312,7 @@ def build_stock_wwpgd_candidate(
     actual_step: int = 0,
     cfg: ExternalWWTailConfigSpec | None = None,
     selected_names: set[str] | None = None,
+    layer_selector: object | None = None,
 ) -> StockWWPGDCandidate:
     cfg = cfg or resolved_external_wwpgd_config()
     full_cfg = ExternalWWTailConfigSpec(
@@ -330,6 +331,7 @@ def build_stock_wwpgd_candidate(
     projector = getattr(ww_pgd_module, "ww_pgd_project")
     _assert_stock_wwpgd_api(projector)
     selected_names = selected_names or set(external_projected_layer_names(model))
+    selector = layer_selector or _selected_layer_selector(set(selected_names))
     originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     ww_logs: list[pd.DataFrame] = []
     start = time.perf_counter()
@@ -341,7 +343,7 @@ def build_stock_wwpgd_candidate(
             num_epochs=max(event_index + 1, 1),
             global_step=actual_step,
             ww_logs=ww_logs,
-            layer_selector=_selected_layer_selector(set(selected_names)),
+            layer_selector=selector,
         )
     runtime = time.perf_counter() - start
     usable = [x for x in ww_logs if isinstance(x, pd.DataFrame) and not x.empty]
