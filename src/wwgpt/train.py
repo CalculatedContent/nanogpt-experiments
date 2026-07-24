@@ -30,6 +30,7 @@ from wwgpt.device import autocast_context, device_summary, memory_stats, optimiz
 from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
 from wwgpt.ww import (
     apply_external_wwpgd,
+    build_stock_wwpgd_candidate,
     external_wwpgd_config_from_experiment,
     fallback_spectral_summary,
     spectral_summary,
@@ -163,16 +164,11 @@ class WWPGDExtension(TrainingExtension):
         mode = adaptive_cfg.mode
         if mode == "uniform":
             details = weightwatcher_details(model) if collect_pre_details else None
-            kwargs = {"event_index": event, "scheduled_token_fraction": frac, "actual_step": optimizer_step, "actual_tokens_seen": tokens_seen, "cfg": external_wwpgd_config_from_experiment(self.cfg)}
-            if details is not None:
-                kwargs["precomputed_details"] = details
-            try:
-                rows = apply_external_wwpgd(model, **kwargs)
-            except TypeError:
-                kwargs.pop("precomputed_details", None)
-                rows = apply_external_wwpgd(model, **kwargs)
+            rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg))
             return details, rows, []
-        details = weightwatcher_details(model)
+        # Observation-only gates use ordinary WeightWatcher; eligible adaptive events use the single stock WW_PGD ww_logs details.
+        observation_only = (not bool(adaptive_cfg.enabled)) or optimizer_step < adaptive_cfg.start_step
+        details = weightwatcher_details(model) if observation_only else None
         if event < self.cfg.warmup_events:
             global_event_hardness = 0.0
         elif event >= self.cfg.warmup_events + self.cfg.ramp_events:
@@ -182,7 +178,13 @@ class WWPGDExtension(TrainingExtension):
         layer_hardness: dict[str, float] = {}
         layer_limits: dict[str, float | None] = {}
         decisions=[]
+        candidate = None
         from wwgpt.ww import external_projected_layer_names, _match_ww_row
+        if not observation_only and global_event_hardness > 0.0:
+            candidate = build_stock_wwpgd_candidate(model, event_index=event, actual_step=optimizer_step, cfg=external_wwpgd_config_from_experiment(self.cfg))
+            details = candidate.pre_projection_details
+        elif details is None:
+            details = weightwatcher_details(model)
         for lname in external_projected_layer_names(model):
             row=_match_ww_row(details, lname) or {}
             raw=float(row.get("alpha", float("nan"))) if row else float("nan")
@@ -195,26 +197,28 @@ class WWPGDExtension(TrainingExtension):
             skip=""; projected=False; trust=1.0; applied=requested*global_event_hardness
             xmin=float(row.get("xmin", float("nan"))) if row else float("nan")
             D=float(row.get("D", float("nan"))) if row else float("nan")
-            tail=float(row.get("selected_tail_size", row.get("num_evals", float("nan")))) if row else float("nan")
+            tail=float("nan")
             if not bool(self.cfg.adaptive.enabled): skip="controller_disabled"
             elif not bool(rcfg.get("enabled", True)): skip="layer_disabled"
             elif alpha_side in {"above_target", "below_target"} and rcfg.get("direction") not in {alpha_side, "both"}: skip="direction_excluded"
             elif optimizer_step < self.cfg.adaptive.start_step: skip="before_start_step"
             elif not math.isfinite(raw): skip="invalid_raw_alpha"
             elif not math.isfinite(ema): skip="invalid_smoothed_alpha"
+            elif count < int(rcfg.get("min_observations", self.cfg.adaptive.min_observations)): skip="min_observations"
             elif not (math.isfinite(xmin) and xmin > 0): skip="invalid_xmin"
-            elif rcfg.get("max_D") is not None and (not math.isfinite(D) or float(rcfg["max_D"]) < D): skip="D_above_max_D"
-            elif math.isfinite(tail) and tail < self.cfg.min_tail: skip="min_tail"
-            elif count < self.cfg.adaptive.min_observations: skip="min_observations"
+            elif rcfg.get("max_D") is not None and not math.isfinite(D): skip="invalid_D"
+            elif rcfg.get("max_D") is not None and float(rcfg["max_D"]) < D: skip="D_above_max_D"
             elif lname in self.controller.state["last_projection_event"] and event - int(self.controller.state["last_projection_event"][lname]) <= self.cfg.adaptive.cooldown_events: skip="cooldown"
             elif applied <= 0: skip="zero_hardness"
             if skip:
                 applied=0.0
             else:
                 projected=True; layer_hardness[lname]=requested; layer_limits[lname]=rcfg.get("max_relative_frobenius_change")
-            dec={"seed":seed,"pair_id":pair_id,"base_optimizer":base_optimizer,"arm_name":arm_name,"optimizer_step":optimizer_step,"tokens_seen":tokens_seen,"projection_event":event,"layer_name":lname,"block":block_index(lname),"matrix_type":matrix_type(lname),"controller_mode":mode,"direction":rcfg.get("direction"),"alpha_side":alpha_side,"raw_alpha":raw,"smoothed_alpha":ema,"target_alpha":rcfg.get("target_alpha"),"signed_alpha_error":signed,"alpha_distance":abs(signed) if math.isfinite(signed) else float("nan"),"side_enabled":side_cfg.get("enabled"),"side_deadband":side_cfg.get("deadband"),"side_full_strength_distance":side_cfg.get("full_strength_distance"),"side_max_hardness":side_cfg.get("max_hardness"),"side_response_curve":side_cfg.get("response_curve"),"deadband_high":dead_high,"full_strength_alpha":rcfg.get("full_strength_alpha"),"normalized_alpha_distance":norm,"normalized_alpha_error":norm,"response_curve":rcfg.get("response_curve"),"layer_hardness_requested":requested,"global_event_hardness":global_event_hardness,"combined_hardness_requested":requested*global_event_hardness,"trust_region_scale":trust,"combined_hardness_applied":applied,"effective_blend_eta_requested":self.cfg.blend_eta*requested*global_event_hardness,"effective_blend_eta_applied":self.cfg.blend_eta*applied,"effective_cayley_eta_requested":self.cfg.cayley_eta*requested*global_event_hardness,"effective_cayley_eta_applied":self.cfg.cayley_eta*applied,"effective_blend_eta":self.cfg.blend_eta*applied,"effective_cayley_eta":self.cfg.cayley_eta*applied,"D":D,"xmin":xmin,"detX_num":row.get("detX_num", float("nan")),"selected_tail_size":tail,"tail_size":tail,"relative_frobenius_change_requested":float("nan"),"relative_frobenius_change_applied":float("nan"),"projection_requested": requested > 0,"projection_attempted": False,"projected":projected,"skip_reason":skip,"observation_count":count,"last_projected_event":self.controller.state["last_projection_event"].get(lname),"controller_version":CONTROLLER_VERSION}
+            stock_changed = bool(candidate.stock_candidate_changed.get(lname, False)) if candidate is not None else False
+            if not skip and not stock_changed: skip="stock_candidate_unchanged"
+            dec={"seed":seed,"pair_id":pair_id,"base_optimizer":base_optimizer,"arm_name":arm_name,"optimizer_step":optimizer_step,"tokens_seen":tokens_seen,"projection_event":event,"layer_name":lname,"block":block_index(lname),"matrix_type":matrix_type(lname),"controller_mode":mode,"direction":rcfg.get("direction"),"alpha_side":alpha_side,"raw_alpha":raw,"smoothed_alpha":ema,"target_alpha":rcfg.get("target_alpha"),"signed_alpha_error":signed,"alpha_distance":abs(signed) if math.isfinite(signed) else float("nan"),"side_enabled":side_cfg.get("enabled"),"side_deadband":side_cfg.get("deadband"),"side_full_strength_distance":side_cfg.get("full_strength_distance"),"side_max_hardness":side_cfg.get("max_hardness"),"side_response_curve":side_cfg.get("response_curve"),"deadband_high":dead_high,"full_strength_alpha":rcfg.get("full_strength_alpha"),"normalized_alpha_distance":norm,"normalized_alpha_error":norm,"response_curve":rcfg.get("response_curve"),"layer_controller_hardness":requested,"layer_hardness_requested":requested,"global_event_hardness":global_event_hardness,"combined_hardness_requested":requested*global_event_hardness,"trust_region_scale":trust,"combined_hardness_applied":applied,"effective_blend_eta_requested":self.cfg.blend_eta*requested*global_event_hardness,"effective_blend_eta_applied":self.cfg.blend_eta*applied,"effective_cayley_eta_requested":self.cfg.cayley_eta*requested*global_event_hardness,"effective_cayley_eta_applied":self.cfg.cayley_eta*applied,"effective_blend_eta":self.cfg.blend_eta*applied,"effective_cayley_eta":self.cfg.cayley_eta*applied,"D":D,"xmin":xmin,"detX_num":row.get("detX_num", float("nan")),"num_evals":row.get("num_evals", float("nan")),"relative_frobenius_change_requested":float("nan"),"relative_frobenius_change_applied":float("nan"),"stock_candidate_changed":stock_changed,"maximum_blend_eta":self.cfg.blend_eta,"maximum_cayley_eta":self.cfg.cayley_eta,"wwpgd_adapter_mode":"stock_candidate_displacement_scaling_v1","projection_requested": requested > 0,"projection_attempted": False,"projected":projected,"skip_reason":skip,"observation_count":count,"last_projected_event":self.controller.state["last_projection_event"].get(lname),"controller_version":CONTROLLER_VERSION}
             decisions.append(dec)
-        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg), precomputed_details=details, layer_hardness=layer_hardness, global_event_hardness=global_event_hardness, layer_max_relative_change=layer_limits) if layer_hardness or mode == "uniform" else []
+        rows = apply_external_wwpgd(model, event_index=event, scheduled_token_fraction=frac, actual_step=optimizer_step, actual_tokens_seen=tokens_seen, cfg=external_wwpgd_config_from_experiment(self.cfg), layer_hardness=layer_hardness, global_event_hardness=global_event_hardness, layer_max_relative_change=layer_limits, stock_candidate=candidate) if layer_hardness else []
         byname={str(r.get("layer_name", "")):r for r in rows}
         for dec in decisions:
             r=byname.get(dec["layer_name"])

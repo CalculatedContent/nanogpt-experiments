@@ -8,4 +8,7 @@ tokenizers
 jupyterlab
 nbformat
 scipy
-weightwatcher
+weightwatcher<0.8,>=0.7.7
+torch-optimi
+tiktoken
+ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git@bf970cb6b73e977f8374114c442ae5b0589eccaa

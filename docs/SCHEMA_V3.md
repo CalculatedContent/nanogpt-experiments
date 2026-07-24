@@ -35,3 +35,11 @@ The interval schedule controls only event timing. Adaptive hardness controls per
 ### Adaptive WW-PGD metadata
 
 Schema v3 manifests record whether adaptive WW-PGD is enabled, the adaptive mode and direction, above-target and below-target side settings, controller version, override precedence, expected scheduled event steps, maximum blend/Cayley eta, trust-region configuration, target/q consistency, and the external WW_PGD commit/API version. `wwpgd_controller.csv` contains one decision row for every eligible layer at every scheduled event; `wwpgd_projection.csv` is reserved for actual changed projection rows. Requested and applied hardness/eta/displacement fields are separate so trust-region clipping is auditable.
+
+### Stock WW_PGD candidate-displacement adapter
+
+Schema v3 manifests record `wwpgd_commit: bf970cb6b73e977f8374114c442ae5b0589eccaa` and `wwpgd_adapter_mode: stock_candidate_displacement_scaling_v1`. This means the public WW_PGD API is used only as `ww_pgd_project(model, cfg, epoch=..., num_epochs=..., global_step=..., ww_logs=..., layer_selector=...)`; adaptive strength is implemented by `nanogpt-experiments` after stock candidate generation.
+
+`wwpgd_controller.csv` has one row for every eligible layer at every scheduled event, including raw and smoothed alpha, alpha side, side-specific deadband/full-strength/max-hardness/response settings, requested controller hardness, global event hardness, requested and applied combined hardness, requested/applied relative-Frobenius changes, trust-region limit/scale, whether the stock candidate changed, and skip/projected state. `wwpgd_projection.csv` contains only actual applied rows whose applied relative-Frobenius change is positive. `num_evals` is recorded under that name and is not a selected-tail-size field.
+
+Checkpoint state persists alpha observation counts, latest raw alpha, alpha EMA, last alpha side, signed error and distance, last applied projection event/hardness, accumulated controller decisions, scheduled event indexes, candidate-generation count, changed-event count, controller version, and adapter mode so resumed execution can reproduce uninterrupted controller decisions and scaled weights.

@@ -9,9 +9,9 @@ seeds: [1337, 2027, 4099]
 token_multipliers: [20]
 dataset_name: HuggingFaceFW/fineweb-edu
 dataset_config: sample-10BT
-dataset_subset: null
+dataset_subset: sample-10BT
 dataset_split: train
-dataset_revision: main
+dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
 data_mode: fineweb_custom_bpe_scaling
 tokenizer: null
 tokenizer_revision: null
