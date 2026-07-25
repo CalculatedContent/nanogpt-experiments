@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, csv, math
+import json, csv, math, hashlib
 from pathlib import Path
 import pandas as pd
 
@@ -46,18 +46,39 @@ def _arm_dir(trial: Path, arm: str) -> Path | None:
 def _selected_checkpoint_ok(run: Path, man: dict, metrics: pd.DataFrame, complete: dict) -> tuple[bool, str | None]:
     if metrics.empty:
         return False, "metrics_missing_or_empty"
-    test_cols = [c for c in ("test_loss", "test_cross_entropy", "test_perplexity") if c in metrics.columns]
-    if not test_cols:
+    artifact = run / "selected_checkpoint_metrics.json"
+    if not artifact.exists():
+        # Legacy schema: held-out values lived on the last time-series row.
+        final = metrics.tail(1).iloc[0]
+        step = final.get("selected_checkpoint_step", complete.get("selected_checkpoint_step", complete.get("best_validation_step", complete.get("step"))))
+        if pd.isna(step): return False, "selected_checkpoint_step_missing_for_test_metrics"
+        selected_path = run / "checkpoints" / f"best_val_step_{int(float(step)):06d}_{int(man.get('seed', 0))}.pt"
+        final_path = run / "checkpoints" / f"final_step_{int(float(step)):06d}_{int(man.get('seed', 0))}.pt"
+        latest = run / "checkpoints" / "latest.json"
+        if not (selected_path.exists() or final_path.exists() or latest.exists()):
+            return False, "selected_checkpoint_artifact_missing_for_test_metrics"
         return True, None
-    final = metrics.tail(1).iloc[0]
-    step = final.get("selected_checkpoint_step", complete.get("selected_checkpoint_step", complete.get("best_validation_step", complete.get("step"))))
-    if pd.isna(step):
-        return False, "selected_checkpoint_step_missing_for_test_metrics"
-    selected_path = run / "checkpoints" / f"best_val_step_{int(float(step)):06d}_{int(man.get('seed', 0))}.pt"
-    final_path = run / "checkpoints" / f"final_step_{int(float(step)):06d}_{int(man.get('seed', 0))}.pt"
-    latest = run / "checkpoints" / "latest.json"
-    if not (selected_path.exists() or final_path.exists() or (int(float(step)) == int(complete.get("step", -1)) and latest.exists())):
-        return False, "selected_checkpoint_artifact_missing_for_test_metrics"
+    try:
+        record = json.loads(artifact.read_text())
+        required = {f"{split}_{metric}" for split in ("train", "validation", "test") for metric in ("loss", "perplexity", "accuracy")}
+        required |= {"checkpoint_path", "checkpoint_hash", "selected_step", "selection_metric",
+                     "train_validation_gap", "train_test_gap", "train_probe_hash",
+                     "validation_probe_hash", "test_probe_hash"}
+        if not required.issubset(record): return False, "selected_checkpoint_metrics_fields_missing"
+        if record["selection_metric"] != "validation_loss": return False, "checkpoint_selection_not_validation_only"
+        selected_path = Path(record["checkpoint_path"])
+        if not selected_path.is_absolute(): selected_path = run / selected_path
+        if not selected_path.exists(): return False, "selected_checkpoint_artifact_missing"
+        actual = hashlib.sha256(selected_path.read_bytes()).hexdigest()
+        if actual != record["checkpoint_hash"]: return False, "selected_checkpoint_hash_mismatch"
+        if f"{int(record['selected_step']):06d}" not in selected_path.name: return False, "selected_checkpoint_step_path_mismatch"
+        csv_path = run / "selected_checkpoint_metrics.csv"
+        if not csv_path.exists(): return False, "selected_checkpoint_metrics_csv_missing"
+        csv_record = pd.read_csv(csv_path).iloc[0].to_dict()
+        for key in required:
+            if key not in csv_record: return False, "selected_checkpoint_json_csv_schema_mismatch"
+    except Exception as exc:
+        return False, f"selected_checkpoint_integrity_error:{type(exc).__name__}"
     return True, None
 
 

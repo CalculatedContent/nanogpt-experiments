@@ -138,6 +138,7 @@ def normalize_spectral_records(df: pd.DataFrame) -> pd.DataFrame:
 def load_run_artifacts(run_dir: Path) -> dict[str, Any]:
     d = {"run_dir": run_dir, "manifest": read_json_file(run_dir / "manifest.json"), "manifest.json": read_json_file(run_dir / "manifest.json"), "complete": read_json_file(run_dir / "run_complete.json"), "run_complete.json": read_json_file(run_dir / "run_complete.json")}
     d["metrics"] = normalize_metrics(load_csv_file(run_dir / "metrics.csv")); d["metrics.csv"] = d["metrics"]
+    d["selected_checkpoint_metrics"] = read_json_file(run_dir / "selected_checkpoint_metrics.json")
     d["spectral"] = normalize_spectral_records(load_csv_file(run_dir / "spectral.csv")); d["spectral.csv"] = d["spectral"]
     d["projection"] = normalize_projection_records(load_csv_file(run_dir / "wwpgd_projection.csv")); d["wwpgd_projection.csv"] = d["projection"]
     return d
@@ -270,7 +271,14 @@ def terminal_results(runs: list[dict[str, Any]], metric: str = "validation_loss"
     rows = []
     for r in runs:
         if not r.get("run_dir"): continue
-        m = (r.get("artifacts") or {}).get("metrics") if isinstance(r.get("artifacts"), dict) else load_run_artifacts(Path(r["run_dir"]))["metrics"]
+        artifacts = r.get("artifacts") if isinstance(r.get("artifacts"), dict) else load_run_artifacts(Path(r["run_dir"]))
+        selected = artifacts.get("selected_checkpoint_metrics", {})
+        if selected and metric in selected:
+            value = pd.to_numeric(pd.Series([selected[metric]]), errors="coerce").dropna()
+            if not value.empty:
+                rows.append({"pair_id": r.get("pair_id"), "seed": r.get("seed"), "optimizer_family": r.get("optimizer_family") or normalize_optimizer(r.get("optimizer_raw") or r.get("optimizer", ""), True)["optimizer_family"], "final": float(value.iloc[0]), "minimum": float(value.iloc[0])})
+                continue
+        m = artifacts.get("metrics")
         if metric not in m: continue
         vals = pd.to_numeric(m.sort_values("tokens_seen" if "tokens_seen" in m else "step")[metric], errors="coerce").dropna()
         if vals.empty: continue
@@ -333,8 +341,9 @@ def build_run_inventory(runs: list[dict[str, Any]]) -> pd.DataFrame:
     rows = []
     for r in runs:
         art = load_run_artifacts(Path(r["run_dir"])); m = art["metrics"]; man = r.get("manifest") or art["manifest"]
+        selected = art.get("selected_checkpoint_metrics", {})
         final = m.sort_values("tokens_seen" if "tokens_seen" in m.columns else "step").tail(1) if not m.empty else pd.DataFrame()
-        rows.append({"seed": r.get("seed"), "pair_id": r.get("pair_id"), "optimizer_raw": r.get("optimizer_raw"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension"), "run_dir": str(r.get("run_dir")), "final_validation_loss": final["validation_loss"].iloc[0] if len(final) and "validation_loss" in final else np.nan, "minimum_validation_loss": pd.to_numeric(m.get("validation_loss"), errors="coerce").min() if "validation_loss" in m else np.nan, "final_test_loss": final["test_loss"].iloc[0] if len(final) and "test_loss" in final else np.nan, "realized_tokens": _manifest_value(man, "realized_tokens"), "scientific_schema_version": man.get("scientific_schema_version")})
+        rows.append({"seed": r.get("seed"), "pair_id": r.get("pair_id"), "optimizer_raw": r.get("optimizer_raw"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension"), "run_dir": str(r.get("run_dir")), "final_validation_loss": selected.get("validation_loss", final["validation_loss"].iloc[0] if len(final) and "validation_loss" in final else np.nan), "minimum_validation_loss": pd.to_numeric(m.get("validation_loss"), errors="coerce").min() if "validation_loss" in m else np.nan, "final_test_loss": selected.get("test_loss", np.nan), "realized_tokens": _manifest_value(man, "realized_tokens"), "scientific_schema_version": man.get("scientific_schema_version")})
     return pd.DataFrame(rows)
 
 def build_pair_audit(candidates: list[PairCandidate]) -> pd.DataFrame:
