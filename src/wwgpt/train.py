@@ -1602,7 +1602,7 @@ CANONICAL_TRIAL_ARMS = ("adamw", "adamw_wwpgd", "muon", "muon_wwpgd", "stable_ad
 CANONICAL_TRIAL_PAIRS = {"adamw": "adamw_wwpgd", "muon": "muon_wwpgd", "stable_adamw": "stable_adamw_wwpgd"}
 CANONICAL_TRIAL_BASES = ("adamw", "muon", "stable_adamw")
 
-def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, cfg: ExperimentConfig, data, init_hash: str) -> dict:
+def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, cfg: ExperimentConfig, data, init_hash: str, analysis_plan_path: Path | None = None) -> dict:
     cfgd = json.loads(json.dumps(asdict(cfg)))
     report = GPT(cfg.model).parameter_report()
     from wwgpt.scaling import selected_parameter_count
@@ -1619,9 +1619,13 @@ def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, 
         for ext in ("none", "wwpgd"):
             arm = make_arm_name(base, ext)
             arms.append({"arm_name": arm, "base_optimizer": base, "extension": ext, "paired_with": CANONICAL_TRIAL_PAIRS.get(base) if ext == "none" else base, "learning_rate": cfg.train.learning_rate, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "weight_decay": cfg.train.weight_decay, "initialization_hash": init_hash, "batch_order_seed": resolved_stochastic_seeds(seed, level, token_multiplier, optimizer_identity=base)["train_reader_seed"], "token_budget": shared["token_budget"]})
-    return {"scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "immutable": True, "trial_id": pair_id, "shared": shared, "arms": arms, "pairs": [{"baseline": b, "wwpgd": w} for b, w in CANONICAL_TRIAL_PAIRS.items()]}
+    manifest = {"scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "immutable": True, "trial_id": pair_id, "shared": shared, "arms": arms, "pairs": [{"baseline": b, "wwpgd": w} for b, w in CANONICAL_TRIAL_PAIRS.items()]}
+    if analysis_plan_path is not None:
+        from wwgpt.acceleration_analysis import plan_manifest
+        manifest.update(plan_manifest(analysis_plan_path))
+    return manifest
 
-def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False) -> Path:
+def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False, analysis_plan_path: Path | None = None) -> Path:
     from wwgpt.data import load_prepared_scientific_data
     cfg = load_config(config_path, level)
     data = load_prepared_scientific_data(data_root, level, token_multiplier)
@@ -1636,7 +1640,7 @@ def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_
             init_state = torch.load(init_dir / "model.pt", map_location="cpu", weights_only=False); init_hash = (init_dir / "initialization_hash.txt").read_text().strip()
         else:
             torch.manual_seed(resolved_stochastic_seeds(seed, level, token_multiplier)["model_init_seed"]); init_model = GPT(cfg.model); init_state = {k: v.detach().clone() for k, v in init_model.state_dict().items()}; init_hash = _state_hash(init_state); torch.save(init_state, init_dir / "model.pt"); (init_dir / "initialization_hash.txt").write_text(init_hash)
-        if not (resume and (trial / "trial_manifest.json").exists()): write_json(trial / "trial_manifest.json", _trial_manifest(trial_id, level, token_multiplier, seed, cfg, data, init_hash))
+        if not (resume and (trial / "trial_manifest.json").exists()): write_json(trial / "trial_manifest.json", _trial_manifest(trial_id, level, token_multiplier, seed, cfg, data, init_hash, analysis_plan_path))
         for base in CANONICAL_TRIAL_BASES:
             for ext in ("none", "wwpgd"):
                 arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))

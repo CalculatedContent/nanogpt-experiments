@@ -1,0 +1,13 @@
+# Freeze this file (and its SHA-256) before collecting confirmatory outcomes.
+mode: confirmatory
+primary_outcomes:
+  - sustained_tokens_to_threshold
+  - tokens_saved
+  - speedup_ratio
+  - paired_validation_loss_auc
+  - validation_loss_at_fixed_token_budgets
+thresholds: [3.0, 2.5, 2.0]
+fixed_token_budgets: [1000000, 5000000, 10000000]
+sustained_evaluation_events: 2
+experimental_unit: seed
+pairing: within_base_optimizer
