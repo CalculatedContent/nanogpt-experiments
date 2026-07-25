@@ -220,7 +220,7 @@ class WWPGDExtension(TrainingExtension):
         layer_limits: dict[str, float | None] = {}
         decisions=[]
         candidate = None
-        from wwgpt.ww import external_projected_layer_names, _match_ww_row
+        from wwgpt.ww import alpha_measurement_exclusion_reason, external_projected_layer_names, _match_ww_row
         if not observation_only and global_event_hardness > 0.0:
             candidate = build_stock_wwpgd_candidate(model, event_index=event, actual_step=optimizer_step, cfg=external_wwpgd_config_from_experiment(self.cfg))
             details = candidate.pre_projection_details
@@ -239,16 +239,17 @@ class WWPGDExtension(TrainingExtension):
             xmin=float(row.get("xmin", float("nan"))) if row else float("nan")
             D=float(row.get("D", float("nan"))) if row else float("nan")
             tail=float("nan")
+            quality_reason = alpha_measurement_exclusion_reason(
+                {**dict(row), "spectral_estimator": "weightwatcher", "projected": True}, max_D=rcfg.get("max_D"),
+                min_tail=self.cfg.min_tail, require_projected=True,
+            )
             if not bool(self.cfg.adaptive.enabled): skip="controller_disabled"
             elif not bool(rcfg.get("enabled", True)): skip="layer_disabled"
             elif alpha_side in {"above_target", "below_target"} and rcfg.get("direction") not in {alpha_side, "both"}: skip="direction_excluded"
             elif optimizer_step < self.cfg.adaptive.start_step: skip="before_start_step"
-            elif not math.isfinite(raw): skip="invalid_raw_alpha"
+            elif quality_reason: skip=quality_reason
             elif not math.isfinite(ema): skip="invalid_smoothed_alpha"
             elif count < int(rcfg.get("min_observations", self.cfg.adaptive.min_observations)): skip="min_observations"
-            elif not (math.isfinite(xmin) and xmin > 0): skip="invalid_xmin"
-            elif rcfg.get("max_D") is not None and not math.isfinite(D): skip="invalid_D"
-            elif rcfg.get("max_D") is not None and float(rcfg["max_D"]) < D: skip="D_above_max_D"
             elif lname in self.controller.state["last_projection_event"] and event - int(self.controller.state["last_projection_event"][lname]) <= self.cfg.adaptive.cooldown_events: skip="cooldown"
             elif applied <= 0: skip="zero_hardness"
             if skip:
@@ -398,7 +399,7 @@ class WWPGDExtension(TrainingExtension):
         else:
             global_hardness = (measurement_index - self.cfg.warmup_events + 1) / max(self.cfg.ramp_events, 1)
         def selector(mm, name, row=None):
-            from wwgpt.ww import is_projected_layer
+            from wwgpt.ww import alpha_measurement_exclusion_reason, is_projected_layer
             if not is_projected_layer(name):
                 return None
             data = row.to_dict() if hasattr(row, "to_dict") else dict(row or {})
@@ -409,16 +410,17 @@ class WWPGDExtension(TrainingExtension):
             D=float(data.get("D", math.nan)); xmin=float(data.get("xmin", math.nan))
             signed=ema-self.cfg.target_alpha if math.isfinite(ema) else math.nan
             info_side="above_target" if signed>0 else "below_target" if signed<0 else "at_target"
+            quality_reason = alpha_measurement_exclusion_reason(
+                {**data, "spectral_estimator": "weightwatcher", "projected": True},
+                max_D=rcfg.get("max_D"), min_tail=self.cfg.min_tail,
+            )
             reason = ""
             if not cfg.enabled: reason="controller_disabled"
             elif not rcfg.get("enabled", True): reason="layer_disabled"
             elif optimizer_step < cfg.start_step: reason="before_start_step"
-            elif not math.isfinite(raw): reason="invalid_alpha"
+            elif quality_reason: reason=quality_reason
             elif count < rcfg.get("min_observations", cfg.min_observations): reason="insufficient_observations"
             elif hardness <= 0: reason="inside_deadband"
-            elif not math.isfinite(xmin) or xmin <= 0: reason="invalid_xmin"
-            elif rcfg.get("max_D") is not None and not math.isfinite(D): reason="invalid_D"
-            elif rcfg.get("max_D") is not None and rcfg["max_D"] < D: reason="D_above_max_D"
             elif info_side not in {rcfg.get("direction"), "at_target"} and rcfg.get("direction") != "both": reason="direction_excluded"
             elif global_hardness <= 0: reason="zero_hardness"
             selected[name]={"row":data,"raw":raw,"ema":ema,"count":count,"hardness":hardness,

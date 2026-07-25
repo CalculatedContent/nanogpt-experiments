@@ -17,6 +17,56 @@ SCIENTIFIC_SCHEMA_VERSION = 3
 PROJECTED_LAYER_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
 
 
+def alpha_measurement_exclusion_reason(row: object, *, max_D: float | None,
+                                       min_tail: int, require_projected: bool = True) -> str:
+    """Apply the alpha-quality gate used by both control and analysis.
+
+    ``detX_num`` is WeightWatcher's selected tail count.  Older WeightWatcher
+    releases do not always return it, so ``num_evals`` is the explicit fallback
+    eigenvalue count.  The estimator label is deliberately mandatory: an
+    unlabeled or fallback estimate must never silently become scientific data.
+    """
+    get = row.get if hasattr(row, "get") else lambda key, default=None: default
+    estimator = str(get("spectral_estimator", "")).strip().lower()
+    if estimator != "weightwatcher":
+        return "spectral_estimator_not_weightwatcher"
+    projected_value = get("projected", get("included_in_projected_alpha_summary", False))
+    projected = projected_value is True or str(projected_value).strip().lower() in {"true", "1"}
+    if require_projected and not projected:
+        return "nonprojected_matrix"
+    try:
+        alpha = float(get("alpha", float("nan")))
+        xmin = float(get("xmin", float("nan")))
+    except (TypeError, ValueError):
+        return "invalid_alpha_or_xmin"
+    if not math.isfinite(alpha):
+        return "invalid_alpha"
+    if not (math.isfinite(xmin) and xmin > 0):
+        return "invalid_xmin"
+    if max_D is not None:
+        try:
+            d_value = float(get("D", float("nan")))
+        except (TypeError, ValueError):
+            d_value = float("nan")
+        if not math.isfinite(d_value):
+            return "invalid_D"
+        if d_value > float(max_D):
+            return "D_above_max_D"
+    tail = get("detX_num", None)
+    try:
+        tail_value = float(tail)
+    except (TypeError, ValueError):
+        tail_value = float("nan")
+    if not math.isfinite(tail_value):
+        try:
+            tail_value = float(get("num_evals", float("nan")))
+        except (TypeError, ValueError):
+            tail_value = float("nan")
+    if not math.isfinite(tail_value) or tail_value < int(min_tail):
+        return "insufficient_tail_or_eigenvalue_count"
+    return ""
+
+
 def matrix_modules(model: nn.Module, include_tied_once: bool = True):
     seen: set[int] = set()
     for name, module in model.named_modules():
@@ -179,6 +229,8 @@ def alpha_measurement_rows(details: pd.DataFrame | None, model: nn.Module, *, st
             "D": data.get("D"), "xmin": data.get("xmin"), "detX_num": data.get("detX_num"),
             "num_evals": data.get("num_evals"), "spectral_norm": data.get("spectral_norm"),
             "stable_rank": data.get("stable_rank"), "WeightWatcher version": data.get("weightwatcher_version", _ww_version()),
+            "spectral_estimator": data.get("spectral_estimator", "weightwatcher" if matched is not None else ""),
+            "projected": projected,
             "weightwatcher_configuration": data.get("weightwatcher_configuration", config),
             "analysis_runtime": data.get("analysis_runtime"),
             "valid_for_science": not bool(reason), "validity_exclusion_reason": reason,
