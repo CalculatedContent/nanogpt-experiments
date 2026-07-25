@@ -12,6 +12,11 @@ dataset_split: train
 data_mode: fineweb_custom_bpe_scaling
 dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
 composite_spectral_analysis_enabled: false
+measurement:
+  alpha_interval: 10
+  trap_diagnostic_interval: 10
+  alpha_randomize: false
+  trap_randomize: true
 model:
   vocab_size: 8192
   dropout: 0.0

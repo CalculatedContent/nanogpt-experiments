@@ -1,4 +1,9 @@
 scientific_schema_version: 3
+measurement:
+  alpha_interval: 1000
+  trap_diagnostic_interval: 1000
+  alpha_randomize: false
+  trap_randomize: true
 model_architecture_version: nanogpt_separate_qkv_tied_head_v2
 parameter_count_convention: transformer_body
 base_optimizer: adamw
@@ -75,8 +80,6 @@ wwpgd:
     alpha_ema_beta: 0.8
     max_D: 0.15
     cooldown_events: 0
-    measurement_source: explicit_interval
-    measurement_interval: 1000
     apply_interval: 1
     max_per_step_gain: 0.02
     max_relative_frobenius_change_per_step: 0.001

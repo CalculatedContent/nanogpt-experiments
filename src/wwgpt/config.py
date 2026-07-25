@@ -104,12 +104,22 @@ class WWPGDConfig:
 
 
 @dataclass(frozen=True)
+class MeasurementConfig:
+    """Arm-independent, deterministic scientific measurement schedule."""
+    alpha_interval: int = 10
+    trap_diagnostic_interval: int = 10
+    alpha_randomize: bool = False
+    trap_randomize: bool = True
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     scientific_schema_version: int = SCIENTIFIC_SCHEMA_VERSION
     model_architecture_version: str = MODEL_ARCHITECTURE_VERSION
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     wwpgd: WWPGDConfig = field(default_factory=WWPGDConfig)
+    measurement: MeasurementConfig = field(default_factory=MeasurementConfig)
     seeds: list[int] = field(default_factory=lambda: DEFAULT_SEEDS.copy())
     token_multipliers: list[int] = field(default_factory=lambda: TOKEN_MULTIPLIERS.copy())
     parameter_count_convention: str = "transformer_body"
@@ -214,6 +224,10 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
     validate_model_config(cfg.model)
     validate_train_config(cfg.train)
     validate_wwpgd_config(cfg.wwpgd)
+    if cfg.measurement.alpha_interval < 1 or cfg.measurement.trap_diagnostic_interval < 1:
+        raise ValueError("measurement intervals must be positive integers")
+    if cfg.measurement.alpha_randomize:
+        raise ValueError("measurement.alpha_randomize must be false for scientific alpha trajectories")
     if len(cfg.seeds) < 1:
         raise ValueError("seeds must contain at least one seed")
     if cfg.base_optimizer not in VALID_BASE_OPTIMIZERS:
@@ -249,9 +263,10 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     model_keys = set(ModelConfig.__dataclass_fields__)
     train_keys = set(TrainConfig.__dataclass_fields__)
     wwpgd_keys = set(WWPGDConfig.__dataclass_fields__)
-    experiment_keys = set(ExperimentConfig.__dataclass_fields__) - {"model", "train", "wwpgd"}
-    _reject_unknown_keys("", data, experiment_keys | {"model", "train", "wwpgd"})
-    for section in ("model", "train", "wwpgd"):
+    measurement_keys = set(MeasurementConfig.__dataclass_fields__)
+    experiment_keys = set(ExperimentConfig.__dataclass_fields__) - {"model", "train", "wwpgd", "measurement"}
+    _reject_unknown_keys("", data, experiment_keys | {"model", "train", "wwpgd", "measurement"})
+    for section in ("model", "train", "wwpgd", "measurement"):
         if section in data and not isinstance(data[section], dict):
             raise ValueError(f"configuration section {section} must be a mapping")
     if "q" in data.get("wwpgd", {}):
@@ -259,6 +274,7 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     _reject_unknown_keys("model", data.get("model", {}), model_keys)
     _reject_unknown_keys("train", data.get("train", {}), train_keys)
     _reject_unknown_keys("wwpgd", data.get("wwpgd", {}), wwpgd_keys)
+    _reject_unknown_keys("measurement", data.get("measurement", {}), measurement_keys)
     model = ModelConfig(**{**asdict(cfg.model), **data.get("model", {})})
     train = TrainConfig(**{**asdict(cfg.train), **data.get("train", {})})
     ww_data = dict(data.get("wwpgd", {}))
@@ -278,6 +294,7 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     base_ww["adaptive"] = cfg.wwpgd.adaptive
     wwpgd = WWPGDConfig(**{**base_ww, **ww_data})
     rest: dict[str, Any] = {k: v for k, v in data.items() if k in experiment_keys}
-    loaded = ExperimentConfig(model=model, train=train, wwpgd=wwpgd, **rest)
+    measurement = MeasurementConfig(**{**asdict(cfg.measurement), **data.get("measurement", {})})
+    loaded = ExperimentConfig(model=model, train=train, wwpgd=wwpgd, measurement=measurement, **rest)
     validate_experiment_config(loaded)
     return loaded

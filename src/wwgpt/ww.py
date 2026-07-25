@@ -63,6 +63,23 @@ def weightwatcher_details(model: nn.Module, *, randomize: bool = False) -> pd.Da
     return df
 
 
+def nonmutating_weightwatcher_details(model: nn.Module, *, randomize: bool = False) -> pd.DataFrame:
+    """Run WeightWatcher as a pure observation and restore all torch RNG/state."""
+    state = {name: value.detach().clone() for name, value in model.state_dict().items()}
+    cpu_rng = torch.get_rng_state().clone()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    was_training = model.training
+    try:
+        model.eval()
+        return weightwatcher_details(model, randomize=randomize)
+    finally:
+        model.load_state_dict(state)
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+        model.train(was_training)
+
+
 WW_DIAGNOSTIC_FIELDS = (
     "layer_id",
     "name",
@@ -120,10 +137,55 @@ def add_weightwatcher_diagnostic_fields(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def spectral_summary(model: nn.Module, *, step: int, tokens_seen: int, optimizer: str, seed: int, pair_id: str) -> list[dict[str, object]]:
-    df = add_weightwatcher_diagnostic_fields(weightwatcher_details(model, randomize=True))
+def spectral_summary(model: nn.Module, *, step: int, tokens_seen: int, optimizer: str, seed: int, pair_id: str,
+                     randomize: bool = True) -> list[dict[str, object]]:
+    df = add_weightwatcher_diagnostic_fields(weightwatcher_details(model, randomize=randomize))
     df["step"] = step; df["tokens_seen"] = tokens_seen; df["optimizer"] = optimizer; df["seed"] = seed; df["pair_id"] = pair_id
     return df.to_dict("records")
+
+
+def alpha_measurement_rows(details: pd.DataFrame | None, model: nn.Module, *, step: int,
+                           tokens_seen: int, seed: int, pair_id: str,
+                           base_optimizer: str, extension: str, arm_name: str,
+                           failure_reason: str = "") -> list[dict[str, object]]:
+    """Normalize one nonrandomized WW result, including explicit exclusions.
+
+    Every named weighted module is represented.  Non-projected architecture parts
+    remain useful audit records, but cannot enter the projected-layer summary.
+    """
+    config = json.dumps({"detX": True, "plot": False, "randomize": False}, sort_keys=True)
+    frame = details if details is not None else pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    for name, module in model.named_modules():
+        weight = getattr(module, "weight", None)
+        if weight is None:
+            continue
+        kind = ("embedding" if isinstance(module, nn.Embedding) else
+                "layernorm" if isinstance(module, nn.LayerNorm) else
+                "output_head" if name == "lm_head" else matrix_type(name) or "other")
+        projected = is_projected_layer(name)
+        matched = _match_ww_row(frame, name) if len(frame) else None
+        data = matched.to_dict() if hasattr(matched, "to_dict") else dict(matched or {})
+        alpha = pd.to_numeric(pd.Series([data.get("alpha")]), errors="coerce").iloc[0]
+        reason = failure_reason
+        if not reason and matched is None: reason = "missing_weightwatcher_row"
+        if not reason and not math.isfinite(float(alpha)): reason = "invalid_alpha"
+        if not reason and not projected: reason = f"excluded_nonprojected_{kind}"
+        rows.append({
+            "seed": seed, "trial_id": pair_id, "pair_id": pair_id,
+            "base_optimizer": base_optimizer, "extension": extension, "arm_name": arm_name,
+            "optimizer_step": step, "tokens_seen": tokens_seen, "layer_name": name,
+            "matrix_type": kind, "block": block_index(name), "alpha": data.get("alpha"),
+            "D": data.get("D"), "xmin": data.get("xmin"), "detX_num": data.get("detX_num"),
+            "num_evals": data.get("num_evals"), "spectral_norm": data.get("spectral_norm"),
+            "stable_rank": data.get("stable_rank"), "WeightWatcher version": data.get("weightwatcher_version", _ww_version()),
+            "weightwatcher_configuration": data.get("weightwatcher_configuration", config),
+            "analysis_runtime": data.get("analysis_runtime"),
+            "valid_for_science": not bool(reason), "validity_exclusion_reason": reason,
+            "validity/exclusion reason": reason,
+            "included_in_projected_alpha_summary": projected and not bool(reason),
+        })
+    return rows
 
 
 def weightwatcher_run_aggregates(rows: list[dict[str, object]]) -> list[dict[str, object]]:
