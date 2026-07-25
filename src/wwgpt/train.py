@@ -92,7 +92,12 @@ def _expected_unique_sampled_positions(corpus_tokens: int, block_size: int,
         return 0.0
     # Position i is covered by this many legal window starts. Linearity of
     # expectation avoids incorrectly treating overlapping samples as unique.
-    return float(sum(1.0 - (1.0 - min(i + 1, block_size, corpus_tokens - i, windows) / windows) ** draws
+    def covering_windows(position: int) -> int:
+        first = max(0, position - block_size + 1)
+        last = min(position, windows - 1)
+        return max(0, last - first + 1)
+
+    return float(sum(1.0 - (1.0 - covering_windows(i) / windows) ** draws
                      for i in range(corpus_tokens)))
 
 def _repository_version() -> dict[str, object]:
@@ -1191,6 +1196,7 @@ def run_scientific_single(
         "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"],
         "data_hash": data.corpus_hash,
         "corpus_hash": data.corpus_hash,
+        "prepared_data_identity_hash": data.data_manifest.get("prepared_data_identity_hash"),
         "initialization_hash": init_hash,
         "parameter_report": model.report_dict(),
         "model_config": asdict(cfg.model),
@@ -1346,7 +1352,20 @@ def run_scientific_single(
         write_json(run_dir / "environment.json", environment())
         (run_dir / "initialization_hash.txt").write_text(init_hash)
         write_json(run_dir / "manifest.json", man)
-        write_json(run_dir / "data_manifest.json", data.data_manifest)
+        # The prepared manifest is immutable.  The run-local copy records how
+        # this particular trainer consumed it without pretending random-window
+        # samples form a unique, non-repeated stream.
+        run_data_manifest = dict(data.data_manifest)
+        run_data_manifest.update({
+            "sampling_with_replacement": man["sampling_with_replacement"],
+            "unique_training_token_guarantee": man["unique_training_token_guarantee"],
+            "window_overlap_possible": man["window_overlap_possible"],
+            "actual_tokens_processed": man["actual_tokens_processed"],
+            "unique_prepared_corpus_tokens": man["unique_prepared_corpus_tokens"],
+            "expected_unique_sampled_positions": man["expected_unique_sampled_positions"],
+        })
+        run_data_manifest.pop("repeated_stream", None)
+        write_json(run_dir / "data_manifest.json", run_data_manifest)
         write_json(run_dir / "tokenizer_manifest.json", data.tokenizer_manifest)
         (run_dir / "config.yaml").write_text(yaml.safe_dump(cfgd))
         write_json(run_dir / "config.json", cfgd)

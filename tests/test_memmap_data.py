@@ -13,6 +13,7 @@ from wwgpt.data import (
     split_for_doc3,
     token_dtype_for_vocab,
 )
+from wwgpt.train import _expected_unique_sampled_positions
 
 
 def _cfg(tmp_path: Path, vocab_size: int = 64) -> Path:
@@ -80,6 +81,12 @@ def test_random_window_can_start_at_last_valid_index():
     assert seen == {0, 1}
 
 
+def test_expected_unique_positions_accounts_for_edge_window_coverage():
+    # One four-token window always covers exactly four positions, even though
+    # edge positions are reachable from fewer starts than interior positions.
+    assert _expected_unique_sampled_positions(6, 4, 4) == pytest.approx(4.0)
+
+
 def test_obsolete_prepared_format_errors(tmp_path: Path):
     prep = tmp_path / "fineweb_edu" / "level_00" / "multiplier_1" / "prepared_old"
     prep.mkdir(parents=True)
@@ -97,4 +104,14 @@ def test_manifest_validation_detects_corrupt_token_file(tmp_path: Path):
     with (data.root / "val_tokens.bin").open("r+b") as f:
         f.write(b"xxxx")
     with pytest.raises(RuntimeError, match="sha256 mismatch"):
+        load_prepared_scientific_data(tmp_path, 0, 1, cfg)
+
+
+def test_loader_rejects_identity_that_disagrees_with_tokenizer_manifest(tmp_path: Path):
+    cfg = _cfg(tmp_path)
+    data = prepare_scientific_data(tmp_path, 0, 1, cfg, _docs(), min_validation_tokens=1)
+    tokenizer_manifest = json.loads((data.root / "tokenizer_manifest.json").read_text())
+    tokenizer_manifest["tokenizer_hash"] = "tampered"
+    (data.root / "tokenizer_manifest.json").write_text(json.dumps(tokenizer_manifest))
+    with pytest.raises(FileNotFoundError, match="expected exactly one prepared-data identity"):
         load_prepared_scientific_data(tmp_path, 0, 1, cfg)
