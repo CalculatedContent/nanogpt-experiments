@@ -1,8 +1,15 @@
 import json
 
 import pandas as pd
+import pytest
 
-from wwgpt.acceleration_analysis import analyze_acceleration_pairs, paired_auc, sustained_tokens_to_threshold
+from wwgpt.acceleration_analysis import (
+    _backward_validation_join,
+    analyze_acceleration_pairs,
+    analyze_paired_alpha_validation,
+    paired_auc,
+    sustained_tokens_to_threshold,
+)
 
 
 def curve(tokens, losses):
@@ -46,3 +53,47 @@ def test_auc_never_extrapolates_beyond_common_support():
     result = paired_auc(curve([0, 100], [3, 1]), curve([50, 200], [2, 0]))
     assert result["common_token_start"] == 50
     assert result["common_token_end"] == 100
+
+
+def test_alpha_alignment_uses_same_or_immediately_preceding_validation_event():
+    alpha = pd.DataFrame({"optimizer_step": [10, 15, 20], "median_absolute_alpha_error": [.4, .3, .2]})
+    metrics = pd.DataFrame({"step": [10, 20], "validation_loss": [3.0, 2.0]})
+    joined = _backward_validation_join(alpha, metrics)
+    assert joined.validation_step.tolist() == [10, 10, 20]
+    assert joined.validation_loss.tolist() == [3.0, 3.0, 2.0]
+    assert (joined.validation_step <= joined.optimizer_step).all()
+
+
+def test_temporal_outputs_are_paired_seed_trajectories(tmp_path):
+    out = tmp_path / "analysis"; out.mkdir()
+    alpha = []
+    runs = []
+    for arm, ext, errors, losses in [
+        ("adamw", "none", [.5, .4, .3], [3.0, 2.8, 2.5]),
+        ("adamw_wwpgd", "wwpgd", [.5, .2, .1], [3.0, 2.6, 2.2]),
+    ]:
+        run = tmp_path / arm; run.mkdir()
+        pd.DataFrame({"step": [10, 20, 30], "tokens_seen": [100, 200, 300],
+                      "validation_loss": losses}).to_csv(run / "metrics.csv", index=False)
+        for step, error in zip([10, 20, 30], errors):
+            alpha.append({"arm_name": arm, "seed": 7, "optimizer_step": step,
+                          "tokens_seen": step * 10, "median_absolute_alpha_error": error,
+                          "fraction_inside_configured_target_deadband": 1 - error})
+        runs.append({"run_dir": run, "seed": 7, "base_optimizer": "adamw",
+                     "extension": ext, "optimizer_raw": arm})
+    pd.DataFrame(alpha).to_csv(out / "alpha_summary_by_step.csv", index=False)
+    pd.DataFrame([{"seed": 7, "base_optimizer": "adamw", "tokens_saved": 50}]).to_csv(
+        out / "acceleration_by_seed.csv", index=False)
+    pd.DataFrame({"optimizer_step": [20], "cache_activated": [True]}).to_csv(
+        tmp_path / "adamw_wwpgd" / "wwpgd_endpoint_measurements.csv", index=False)
+    analyze_paired_alpha_validation(runs, out)
+    aligned = pd.read_csv(out / "alpha_validation_alignment_by_seed.csv")
+    assert len(aligned) == 3
+    assert aligned.delta_alpha_distance.tolist() == pytest.approx([0.0, -.2, -.2])
+    assert aligned.delta_validation_loss.tolist() == pytest.approx([0.0, -.2, -.3])
+    assert (aligned.validation_step <= aligned.optimizer_step).all()
+    event = pd.read_csv(out / "endpoint_event_study.csv")
+    assert event.event_time.tolist() == [-1, 0, 1, 2, 3]
+    assert event.observed.tolist() == [True, True, True, False, False]
+    assert {"acceleration_alpha_association.csv", "paired_alpha_and_validation_plot.png"} <= {
+        p.name for p in out.iterdir()}
