@@ -582,6 +582,21 @@ def _expected_projection_optimizer_steps(total_optimizer_steps: int, interval: i
     return list(range(interval, total_optimizer_steps + 1, interval))
 
 
+def _extension_protected_state(model) -> dict[str, torch.Tensor]:
+    """Snapshot every tensor that WW-PGD is scientifically forbidden to edit."""
+    from wwgpt.ww import is_projected_layer
+    eligible = {f"{name}.weight" for name, _module in model.named_modules() if is_projected_layer(name)}
+    return {name: value.detach().clone() for name, value in model.state_dict().items() if name not in eligible}
+
+
+def _assert_extension_scope_unchanged(model, before: dict[str, torch.Tensor]) -> None:
+    """Fail immediately if an extension touches embeddings, norms, biases, heads, or other ineligible tensors."""
+    current = model.state_dict()
+    changed = [name for name, value in before.items() if name not in current or not torch.equal(value, current[name])]
+    if changed:
+        raise RuntimeError("WW-PGD extension changed ineligible model tensors: " + ", ".join(changed))
+
+
 def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_steps: int | None = None, resolved_lr_decay_steps: int | None = None, resolved_llrd_gamma: float | None = None) -> dict[str, object]:
     """Return the fully resolved nanoGPT baseline settings recorded in run metadata."""
     model = cfg.model
@@ -1199,6 +1214,7 @@ def run_scientific_single(
         "batch_size": cfg.train.batch_size,
         "gradient_accumulation": cfg.train.gradient_accumulation,
         "wwpgd_interval": wwpgd_interval,
+        "target_alpha": cfg.wwpgd.target_alpha,
         "projection_schedule_type": "optimizer_step_interval",
         "expected_projection_optimizer_steps": expected_projection_optimizer_steps,
         "wwpgd_adaptive_enabled": extension_name in INTERVENTION_EXTENSIONS and cfg.wwpgd.adaptive.mode != "uniform",
@@ -1404,7 +1420,9 @@ def run_scientific_single(
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
         alpha_due = step % cfg.measurement.alpha_interval == 0 or step == steps
+        protected_before_extension = _extension_protected_state(model)
         pre_details, new_proj, new_controller = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step, collect_pre_details=(immediate_projection_spectral or alpha_due), seed=seed, pair_id=pair_id, base_optimizer=base_optimizer, arm_name=optimizer_name, measurement_interval=cfg.measurement.alpha_interval)
+        _assert_extension_scope_unchanged(model, protected_before_extension)
         cached_mode = extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
         if extension_name in INTERVENTION_EXTENSIONS and new_proj and not cached_mode:
             wwpgd_call_count += 1
