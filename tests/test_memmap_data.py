@@ -50,7 +50,8 @@ def test_dtype_selection():
 
 
 def test_memmap_manifest_reopen_and_no_document_overlap(tmp_path: Path):
-    data = prepare_scientific_data(tmp_path, 0, 1, _cfg(tmp_path), _docs(), min_validation_tokens=1)
+    cfg = _cfg(tmp_path)
+    data = prepare_scientific_data(tmp_path, 0, 1, cfg, _docs(), min_validation_tokens=1)
     assert isinstance(data.train, np.memmap)
     assert isinstance(data.val, np.memmap)
     assert isinstance(data.test, np.memmap)
@@ -63,7 +64,7 @@ def test_memmap_manifest_reopen_and_no_document_overlap(tmp_path: Path):
     assert train_docs.isdisjoint(val_docs)
     assert train_docs.isdisjoint(test_docs)
     assert val_docs.isdisjoint(test_docs)
-    reopened = load_prepared_scientific_data(tmp_path, 0, 1)
+    reopened = load_prepared_scientific_data(tmp_path, 0, 1, cfg)
     assert isinstance(reopened.train, np.memmap)
     assert reopened.train.shape == tuple(dm["splits"]["train"]["shape"])
     np.testing.assert_array_equal(reopened.train[:20], data.train[:20])
@@ -91,8 +92,9 @@ def test_obsolete_prepared_format_errors(tmp_path: Path):
 
 
 def test_manifest_validation_detects_corrupt_token_file(tmp_path: Path):
-    data = prepare_scientific_data(tmp_path, 0, 1, _cfg(tmp_path), _docs(), min_validation_tokens=1)
+    cfg = _cfg(tmp_path)
+    data = prepare_scientific_data(tmp_path, 0, 1, cfg, _docs(), min_validation_tokens=1)
     with (data.root / "val_tokens.bin").open("r+b") as f:
         f.write(b"xxxx")
     with pytest.raises(RuntimeError, match="sha256 mismatch"):
-        load_prepared_scientific_data(tmp_path, 0, 1)
+        load_prepared_scientific_data(tmp_path, 0, 1, cfg)

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from wwgpt.config import ExperimentConfig, ModelConfig, TrainConfig, WWPGDConfig, load_config
-from wwgpt.data import TokenData, prepare_fineweb_gpt2_reproduction, prepare_scientific_data, prepare_tiny_shakespeare_char_reproduction
+from wwgpt.data import TokenData, load_prepared_scientific_data, prepare_data_for_mode, prepare_fineweb_gpt2_reproduction, prepare_scientific_data, prepare_tiny_shakespeare_char_reproduction
 from wwgpt.model import GPT
 from wwgpt.optim import optimizer_group_signature, build_optimizer_bundle
 from wwgpt.train import run_scientific_single
@@ -74,6 +74,37 @@ def test_three_data_modes_and_custom_bpe_keeps_tokenizer_training_docs(tmp_path,
     assert custom.tokenizer_manifest["not_reproduction_of_uploaded_fineweb_experiment"] is True
     assert custom.data_manifest["train_document_count"] >= 128
     assert len(custom.train) >= custom.data_manifest["realized_tokens"] + 1
+
+
+@pytest.mark.parametrize("mode", ["tiny_shakespeare_char_reproduction", "fineweb_gpt2_reproduction"])
+def test_reproduction_mode_dispatch_offline_fixture(tmp_path, monkeypatch, mode):
+    _fake_tiktoken(monkeypatch)
+    cfg = tmp_path / f"{mode}.yaml"
+    cfg.write_text(f"""
+data_mode: {mode}
+dataset_name: fixture/fineweb
+dataset_config: fixture
+dataset_revision: pinned-fixture
+tokenizer: gpt2
+model:
+  n_layer: 1
+  n_head: 1
+  n_embd: 64
+  block_size: 4
+  vocab_size: {50257 if mode == 'fineweb_gpt2_reproduction' else 64}
+  profile_name: offline_fixture
+train:
+  batch_size: 1
+""")
+    docs = (["To be, or not to be. " * 40]
+            if mode.startswith("tiny") else
+            [f"offline fineweb fixture document {i}" for i in range(200)])
+    prepared = prepare_data_for_mode(tmp_path / "data", 0, 1, cfg, docs, 1)
+    digest = prepared.data_manifest["prepared_data_identity_hash"]
+    assert prepared.root.name == digest
+    reopened = load_prepared_scientific_data(tmp_path / "data", 0, 1, cfg, digest)
+    assert reopened.data_manifest["data_mode"] == mode
+    assert len(reopened.train) == len(prepared.train)
 
 
 def _fixture_data() -> TokenData:

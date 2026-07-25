@@ -96,7 +96,7 @@ def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multip
     strengths=parse_strengths(strengths if isinstance(strengths,str) or strengths is None else ','.join(map(str,strengths))); seeds=seeds or [1337]
     cfg=load_config(config, level)
     try:
-        data=load_prepared_scientific_data(data_root, level, token_multiplier)
+        data=load_prepared_scientific_data(data_root, level, token_multiplier, config) if config is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     except Exception as e:
         raise RuntimeError('scientific strength scan must never fall back to fixtures; prepare scientific data first') from e
     base=results_root/'experiments'/'strength_scan'/f'level_{level:02d}'/f'multiplier_{token_multiplier}'; base.mkdir(parents=True,exist_ok=True)

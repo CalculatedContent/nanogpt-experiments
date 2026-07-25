@@ -19,6 +19,63 @@ from wwgpt.model import GPT
 from wwgpt.scaling import plan_budget, selected_parameter_count
 from wwgpt.utils import sha256_bytes, unique_dir, write_json
 
+DATA_MODES = {
+    "fineweb_custom_bpe_scaling",
+    "tiny_shakespeare_char_reproduction",
+    "fineweb_gpt2_reproduction",
+}
+
+
+def _profile_mode_root(data_root: Path, cfg: ExperimentConfig) -> Path:
+    return data_root / (cfg.model.profile_name or "default") / cfg.data_mode
+
+
+def _budget_identity(cfg: ExperimentConfig, level: int, token_multiplier: int) -> dict[str, object]:
+    model = GPT(cfg.model)
+    count = selected_parameter_count(model.parameter_report(), cfg.parameter_count_convention)
+    budget = plan_budget(count, token_multiplier, cfg.train.batch_size, cfg.model.block_size,
+                         cfg.train.gradient_accumulation, 10**18)
+    tiny = cfg.data_mode == "tiny_shakespeare_char_reproduction"
+    return {
+        "data_mode": cfg.data_mode,
+        "dataset_name": "tiny_shakespeare" if tiny else cfg.dataset_name,
+        "dataset_config": None if tiny else (cfg.dataset_subset or cfg.dataset_config),
+        "dataset_revision": "karpathy-char-rnn-pinned-url" if tiny else cfg.dataset_revision,
+        "dataset_split": "first-90%-train-final-10%-validation" if tiny else cfg.dataset_split,
+        "vocabulary_size": cfg.model.vocab_size,
+        "model_architecture_version": cfg.model.model_architecture_version,
+        "block_size": cfg.model.block_size, "level": level,
+        "token_multiplier": token_multiplier,
+        "parameter_count_convention": cfg.parameter_count_convention,
+        "requested_token_budget": budget.requested_tokens,
+        "realized_token_budget": budget.realized_tokens,
+    }
+
+
+def _finalize_identity(data: TokenData, cfg: ExperimentConfig, level: int,
+                       token_multiplier: int) -> TokenData:
+    """Seal a prepared corpus and move it beneath its immutable identity."""
+    assert data.root and data.data_manifest and data.tokenizer_manifest
+    identity = _budget_identity(cfg, level, token_multiplier) | {
+        "tokenizer_type": data.tokenizer_manifest["tokenizer_type"],
+        "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"],
+        # Use the realized tokenizer vocabulary (not merely the requested BPE cap).
+        "vocabulary_size": data.vocab_size,
+    }
+    digest = sha256_bytes(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode())
+    dm = dict(data.data_manifest)
+    dm.update(identity)
+    dm["prepared_data_identity"] = identity
+    dm["prepared_data_identity_hash"] = digest
+    (data.root / "data_manifest.json").unlink()
+    write_json(data.root / "data_manifest.json", dm)
+    destination = (data.root.parents[0] / digest)
+    if destination.exists():
+        raise FileExistsError(f"prepared data identity already exists: {destination}")
+    data.root.rename(destination)
+    return TokenData(data.train, data.val, data.vocab_size, data.corpus_hash, destination,
+                     dm, data.tokenizer_manifest, data.test)
+
 
 def _preparation_git_commit() -> str:
     try:
@@ -72,7 +129,7 @@ def prepare_tiny_shakespeare_char_reproduction(data_root: Path, text: str | None
     np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     corpus_hash = sha256_bytes(text.encode())
     vocab_hash = sha256_bytes(json.dumps(vocab, sort_keys=True).encode())
-    data_manifest = {"scientific_schema_version": 3, "data_mode": "tiny_shakespeare_char_reproduction", "dataset_name": "tiny_shakespeare", "source_text": "original Tiny Shakespeare text", "split_method": "first_90_percent_train_final_10_percent_validation", "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
+    data_manifest = {"scientific_schema_version": 4, "data_mode": "tiny_shakespeare_char_reproduction", "dataset_name": "tiny_shakespeare", "dataset_config": None, "dataset_revision": "karpathy-char-rnn-pinned-url", "split": "train", "source_text": "original Tiny Shakespeare text", "split_method": "first_90_percent_train_final_10_percent_validation", "train_tokens": len(train_tokens), "unique_training_corpus_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False}
     tokenizer_manifest = {"tokenizer_type": "character", "vocab_size": len(vocab), "vocabulary_size": len(vocab), "tokenizer_hash": vocab_hash, "hash": vocab_hash, "special_tokens": {}}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     return TokenData(train_tokens, val_tokens, len(vocab), corpus_hash, prep, data_manifest, tokenizer_manifest)
@@ -113,7 +170,7 @@ def prepare_fineweb_gpt2_reproduction(data_root: Path, cfg: ExperimentConfig, do
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64)); np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     corpus_hash = sha256_bytes("\n".join(corpus).encode())
     tok_hash = sha256_bytes(b"tiktoken:gpt2:eot:50256")
-    data_manifest = {"scientific_schema_version": 3, "data_mode": "fineweb_gpt2_reproduction", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, corpus), "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-with-configured-seed", "eot_between_documents": FINEWEB_GPT2_EOT, "train_document_count": train_docs, "validation_document_count": val_docs, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "repeated_stream": False}
+    data_manifest = {"scientific_schema_version": 4, "data_mode": "fineweb_gpt2_reproduction", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_subset or cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, corpus), "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-with-configured-seed", "eot_between_documents": FINEWEB_GPT2_EOT, "train_document_count": train_docs, "validation_document_count": val_docs, "train_tokens": len(train_tokens), "unique_training_corpus_tokens": len(train_tokens), "val_tokens": len(val_tokens), "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False}
     tokenizer_manifest = {"tokenizer_type": "tiktoken_gpt2", "tokenizer_name": cfg.tokenizer or "gpt2", "tokenizer_revision": cfg.tokenizer_revision or "builtin-tiktoken-gpt2", "vocab_size": n_vocab, "vocabulary_size": n_vocab, "vocabulary_hash": tok_hash, "tokenizer_hash": tok_hash, "special_token_ids": {"<|endoftext|>": FINEWEB_GPT2_EOT}, "dataset_revision": cfg.dataset_revision}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     return TokenData(train_tokens, val_tokens, n_vocab, corpus_hash, prep, data_manifest, tokenizer_manifest)
@@ -252,7 +309,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
     realized = budget.realized_tokens
     needed_train = realized + 1
-    prep = unique_dir(data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}", "prepared")
+    prep = unique_dir(_profile_mode_root(data_root, cfg) / f"level_{level:02d}" / f"multiplier_{token_multiplier}", "staging")
     _log_prepare_progress(f"starting level={level} token_multiplier={token_multiplier} requested_tokens={requested} realized_tokens={realized} output={prep}")
     dtype = token_dtype_for_vocab(cfg.model.vocab_size)
     source = docs if docs is not None else _iter_fineweb(cfg)
@@ -326,7 +383,7 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus_hashes).encode())
     splits_manifest = {sp: writers[sp].manifest() | {"documents": doc_counts[sp], "document_sha256": doc_hashes[sp]} for sp in ("train", "val", "test")}
-    data_manifest = {"scientific_schema_version": 4, "storage_format": "raw_memmap_v1", "dtype": dtype.name, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, None) | {"document_sha256": doc_hashes, "train_document_sha256": doc_hashes["train"], "validation_document_sha256": doc_hashes["val"], "test_document_sha256": doc_hashes["test"]}, "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-3way", "eot_between_documents": tok.token_to_id("<eos>"), "train_document_count": doc_counts["train"], "validation_document_count": doc_counts["val"], "test_document_count": doc_counts["test"], "unique_train_tokens": writers["train"].count, "validation_tokens": writers["val"].count, "test_tokens": writers["test"].count, "token_counts": {sp: writers[sp].count for sp in writers}, "shapes": {sp: [writers[sp].count] for sp in writers}, "splits": splits_manifest, "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "selected_parameter_count": param_count, "realized_tokens_per_selected_parameter": realized / max(param_count, 1), "sequence_count": realized // cfg.model.block_size, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "repeated_stream": False, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    data_manifest = {"scientific_schema_version": 4, "storage_format": "raw_memmap_v1", "dtype": dtype.name, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, None) | {"document_sha256": doc_hashes, "train_document_sha256": doc_hashes["train"], "validation_document_sha256": doc_hashes["val"], "test_document_sha256": doc_hashes["test"]}, "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-3way", "eot_between_documents": tok.token_to_id("<eos>"), "train_document_count": doc_counts["train"], "validation_document_count": doc_counts["val"], "test_document_count": doc_counts["test"], "unique_training_corpus_tokens": writers["train"].count, "validation_tokens": writers["val"].count, "test_tokens": writers["test"].count, "token_counts": {sp: writers[sp].count for sp in writers}, "shapes": {sp: [writers[sp].count] for sp in writers}, "splits": splits_manifest, "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "selected_parameter_count": param_count, "realized_tokens_per_selected_parameter": realized / max(param_count, 1), "sequence_count": realized // cfg.model.block_size, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
     tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "tokenizer_name": "tokenizers.ByteLevelBPE-trained-from-configured-training-split", "tokenizer_revision": "prepared-locally", "tokenizer_identity": {"type": "tokenizers", "model": "BPE", "pre_tokenizer": "ByteLevel", "hash": tokenizer_hash}, "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "vocabulary_hash": tokenizer_hash, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_split": cfg.dataset_split, "dataset_revision": cfg.dataset_revision, "preparation_code_git_commit": _preparation_git_commit()}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _validate_memmap_manifest(prep, data_manifest)
@@ -334,22 +391,79 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     train = _open_token_memmap(prep / "train_tokens.bin", dtype.name, writers["train"].count)
     val = _open_token_memmap(prep / "val_tokens.bin", dtype.name, writers["val"].count)
     test = _open_token_memmap(prep / "test_tokens.bin", dtype.name, writers["test"].count)
-    return TokenData(train, val, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest, test)
+    return _finalize_identity(
+        TokenData(train, val, cfg.model.vocab_size, corpus_hash, prep, data_manifest, tokenizer_manifest, test),
+        cfg, level, token_multiplier)
 
-def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier: int) -> TokenData:
-    roots = sorted((data_root / "fineweb_edu" / f"level_{level:02d}" / f"multiplier_{token_multiplier}").glob("prepared_*"))
+def prepare_data_for_mode(data_root: Path, level: int, token_multiplier: int,
+                          config_path: Path | None = None, docs: Iterable[str] | None = None,
+                          min_validation_tokens: int = 100_000) -> TokenData:
+    """Prepare using the resolved profile's data mode, then seal its identity."""
+    cfg = load_config(config_path, level)
+    if cfg.data_mode not in DATA_MODES:
+        raise ValueError(f"unsupported data_mode {cfg.data_mode!r}")
+    if cfg.data_mode == "fineweb_custom_bpe_scaling":
+        return prepare_scientific_data(data_root, level, token_multiplier, config_path, docs,
+                                       min_validation_tokens)
+    elif cfg.data_mode == "tiny_shakespeare_char_reproduction":
+        fixture_text = "\n".join(docs) if docs is not None else None
+        data = prepare_tiny_shakespeare_char_reproduction(
+            _profile_mode_root(data_root, cfg).parent, fixture_text)
+    else:
+        data = prepare_fineweb_gpt2_reproduction(
+            _profile_mode_root(data_root, cfg).parent, cfg, docs)
+    return _finalize_identity(data, cfg, level, token_multiplier)
+
+
+def _load_npy_prepared(prep: Path, dm: dict[str, object], tm: dict[str, object]) -> TokenData:
+    train = np.load(prep / "train_tokens.npy", mmap_mode="r")
+    val = np.load(prep / "val_tokens.npy", mmap_mode="r")
+    return TokenData(train, val, int(tm.get("vocabulary_size", tm["vocab_size"])),
+                     str(dm["corpus_hash"]), prep, dm, tm)
+
+
+def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier: int,
+                                  config_path: Path | None = None,
+                                  prepared_data_identity_hash: str | None = None) -> TokenData:
+    """Load one exact identity; never select a newest compatible preparation."""
+    cfg = load_config(config_path, level)
+    base = _profile_mode_root(data_root, cfg) / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
+    # Reproduction preparers historically add their mode themselves.
+    if cfg.data_mode != "fineweb_custom_bpe_scaling":
+        base = _profile_mode_root(data_root, cfg)
+    roots = [p for p in base.iterdir() if p.is_dir()] if base.exists() else []
+    if config_path is None and not roots:
+        roots = [p for p in data_root.glob(
+            f"*/{cfg.data_mode}/level_{level:02d}/multiplier_{token_multiplier}/*") if p.is_dir()]
+    legacy = list((data_root / "fineweb_edu" / f"level_{level:02d}" /
+                   f"multiplier_{token_multiplier}").glob("prepared_*"))
+    if not roots and legacy:
+        raise RuntimeError(f"obsolete prepared-data format found at {legacy[-1]}: rebuild with `wwgpt prepare-data`")
     obsolete: list[Path] = []
-    for prep in reversed(roots):
+    matches: list[tuple[Path, dict[str, object], dict[str, object]]] = []
+    requested = _budget_identity(cfg, level, token_multiplier)
+    for prep in roots:
+        if not (prep / "data_manifest.json").exists() or not (prep / "tokenizer_manifest.json").exists():
+            continue
         dm = json.loads((prep / "data_manifest.json").read_text()); tm = json.loads((prep / "tokenizer_manifest.json").read_text())
-        if dm.get("valid_for_science") is not True or dm.get("smoke_test") is not False:
+        identity = dm.get("prepared_data_identity")
+        digest = dm.get("prepared_data_identity_hash")
+        if not isinstance(identity, dict) or digest != sha256_bytes(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()):
             continue
-        if tm.get("tokenizer_type") not in {"BPE", "custom_bpe_scaling"}:
+        if prepared_data_identity_hash and digest != prepared_data_identity_hash:
             continue
-        if int(dm.get("scientific_schema_version", 2)) >= 3 and dm.get("model_architecture_version") != load_config(None, level).model.model_architecture_version:
+        # Request fields must match exactly; tokenizer fields are immutable output identity.
+        if any(identity.get(k) != v for k, v in requested.items() if k != "vocabulary_size"):
             continue
-        if dm.get("storage_format") != "raw_memmap_v1":
-            obsolete.append(prep)
-            continue
+        matches.append((prep, dm, tm))
+    if len(matches) != 1:
+        raise FileNotFoundError(f"expected exactly one prepared-data identity for {requested}; found {len(matches)}; pass prepared_data_identity_hash to disambiguate")
+    prep, dm, tm = matches[0]
+    if dm.get("storage_format") is None:
+        return _load_npy_prepared(prep, dm, tm)
+    if dm.get("storage_format") != "raw_memmap_v1":
+        obsolete.append(prep)
+    else:
         _validate_memmap_manifest(prep, dm)
         dtype = str(dm["dtype"]); splits = dm["splits"]
         train = _open_token_memmap(prep / splits["train"]["path"], dtype, int(splits["train"]["tokens"]))
