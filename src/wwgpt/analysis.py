@@ -340,7 +340,7 @@ def build_run_inventory(runs: list[dict[str, Any]]) -> pd.DataFrame:
 def build_pair_audit(candidates: list[PairCandidate]) -> pd.DataFrame:
     return select_canonical_pairs(candidates)[1]
 
-def analyze_results(results_root: Path) -> Path:
+def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Path:
     out = Path(results_root) / "analysis"; out.mkdir(parents=True, exist_ok=True)
     runs = discover_canonical_runs(results_root, include_legacy=True)
     inv = build_run_inventory(runs) if runs else pd.DataFrame(); inv.to_csv(out / "runs_manifest.csv", index=False)
@@ -352,6 +352,9 @@ def analyze_results(results_root: Path) -> Path:
         paired_effect_estimates(paired, "loss").to_csv(out / "paired_validation_effect_estimates.csv", index=False)
     pd.DataFrame([{"status": "not_fit", "note": "no significance claim; no hypothesis test implemented"}]).to_csv(out / "scaling_fit_results.csv", index=False)
     (out / "analysis_manifest.json").write_text(json.dumps({"source": str(results_root), "completed_runs": len(runs)}))
+    if analysis_plan is not None:
+        from wwgpt.acceleration_analysis import analyze_acceleration_results
+        analyze_acceleration_results(results_root, out, analysis_plan)
     return out
 
 
