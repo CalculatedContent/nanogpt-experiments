@@ -18,6 +18,7 @@ from wwgpt.config import (
     ModelConfig,
     TrainConfig,
     WWPGDConfig,
+    MeasurementConfig,
     load_config,
 )
 from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CachedLayerEndpoint, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index, resolve_endpoint_measurement_interval
@@ -36,9 +37,11 @@ from wwgpt.ww import (
     spectral_summary,
     composite_spectral_summary,
     weightwatcher_details,
+    nonmutating_weightwatcher_details,
     measured_projection_spectral_rows,
     weightwatcher_details,
     weightwatcher_run_aggregates,
+    alpha_measurement_rows,
     _ww_version,
     WWPGD_COMMIT,
     SCIENTIFIC_SCHEMA_VERSION,
@@ -998,7 +1001,7 @@ def run_scientific_single(
     wwpgd_interval = _resolve_wwpgd_interval(cfg, extension_name, ww_interval)
     expected_projection_optimizer_steps = _expected_projection_optimizer_steps(steps, wwpgd_interval, extension_name)
     cached_mode = extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
-    endpoint_measurement_interval = (resolve_endpoint_measurement_interval(cfg.wwpgd.adaptive, eval_interval or cfg.train.eval_interval)
+    endpoint_measurement_interval = (cfg.measurement.alpha_interval
                                      if cached_mode else None)
     expected_endpoint_measurement_steps = (list(range(endpoint_measurement_interval, steps + 1, endpoint_measurement_interval))
                                            if cached_mode else [])
@@ -1188,6 +1191,7 @@ def run_scientific_single(
     controller_rows = []
     immediate_spectral_rows = []
     lr_rows = []
+    alpha_rows = []
     best_validation_loss = float("inf")
     best_validation_step = 0
     latest_validation_loss = float("nan")
@@ -1214,6 +1218,7 @@ def run_scientific_single(
             reader.pos = int(loaded["training_reader_position"])
         metric_rows = list(loaded.get("metrics_rows", []))
         spectral_rows = list(loaded.get("periodic_weightwatcher_rows", []))
+        alpha_rows = list(loaded.get("alpha_measurement_rows", []))
         spectral_aggregate_rows = list(loaded.get("periodic_weightwatcher_aggregate_rows", []))
         proj_rows = list(loaded.get("wwpgd_projection_rows", []))
         controller_rows = list(loaded.get("wwpgd_controller_rows", []))
@@ -1268,7 +1273,8 @@ def run_scientific_single(
         optimizer_step_count = step
         loss = torch.tensor(train_loss_value / cfg.train.gradient_accumulation)
         ps = time.perf_counter()
-        pre_details, new_proj, new_controller = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step, collect_pre_details=immediate_projection_spectral, seed=seed, pair_id=pair_id, base_optimizer=base_optimizer, arm_name=optimizer_name, measurement_interval=(eval_interval or cfg.train.eval_interval))
+        alpha_due = step % cfg.measurement.alpha_interval == 0 or step == steps
+        pre_details, new_proj, new_controller = extension.after_optimizer_step(model=model, optimizer_step=step, total_optimizer_steps=steps, tokens_seen=step * tokens_per_step, collect_pre_details=(immediate_projection_spectral or alpha_due), seed=seed, pair_id=pair_id, base_optimizer=base_optimizer, arm_name=optimizer_name, measurement_interval=cfg.measurement.alpha_interval)
         cached_mode = extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
         if extension_name == "wwpgd" and new_proj and not cached_mode:
             wwpgd_call_count += 1
@@ -1285,10 +1291,10 @@ def run_scientific_single(
                 immediate_spectral_rows.extend(post)
         proj_time = time.perf_counter() - ps if new_proj else 0.0
         bundle.zero_grad()
-        measurement_interval = (cfg.wwpgd.adaptive.measurement_interval or (eval_interval or cfg.train.eval_interval))
+        measurement_interval = cfg.measurement.alpha_interval
         measurement_due = (extension_name == "wwpgd" and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
                            and (step % measurement_interval == 0 or (cfg.wwpgd.adaptive.refresh_at_final_step and step == steps)))
-        if step % (eval_interval or cfg.train.eval_interval) == 0 or step == steps or measurement_due:
+        if step % (eval_interval or cfg.train.eval_interval) == 0 or step == steps or measurement_due or alpha_due:
             eval_index = len(metric_rows)
             was_training = model.training
             model.eval()
@@ -1387,8 +1393,28 @@ def run_scientific_single(
                 controller_rows.extend(measurement_result.controller_rows)
                 if measurement_result.stock_wwpgd_invoked:
                     wwpgd_call_count += 1
+            if alpha_due:
+                # Cached WW-PGD details and event-projection stock details are
+                # authoritative.  Only arms without such a result make a call.
+                alpha_details = measured_details if measurement_due else pre_details
+                failure = ""
+                if alpha_details is None:
+                    saved_rng = rng_state()
+                    was_training_for_alpha = model.training
+                    try:
+                        model.eval()
+                        alpha_details = nonmutating_weightwatcher_details(model, randomize=False)
+                    except Exception as exc:
+                        failure = f"weightwatcher_error:{type(exc).__name__}:{exc}"
+                    finally:
+                        model.train(was_training_for_alpha)
+                        restore_rng_state(saved_rng)
+                alpha_rows.extend(alpha_measurement_rows(alpha_details, model, step=step,
+                    tokens_seen=step * tokens_per_step, seed=seed, pair_id=pair_id,
+                    base_optimizer=base_optimizer, extension=extension_name, arm_name=optimizer_name,
+                    failure_reason=failure))
             ws = time.perf_counter()
-            if step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps:
+            if step % cfg.measurement.trap_diagnostic_interval == 0 or step == steps:
                 new_spectral_rows = spectral_summary(
                     model,
                     step=step,
@@ -1396,6 +1422,7 @@ def run_scientific_single(
                     optimizer=optimizer_name,
                     seed=seed,
                     pair_id=pair_id,
+                    randomize=cfg.measurement.trap_randomize,
                 )
                 spectral_rows.extend(new_spectral_rows)
                 spectral_aggregate_rows.extend(weightwatcher_run_aggregates(new_spectral_rows))
@@ -1434,6 +1461,7 @@ def run_scientific_single(
                 "next_projection_event_index": next_projection_event_index,
                         "metrics_rows": metric_rows,
                 "periodic_weightwatcher_rows": spectral_rows,
+                "alpha_measurement_rows": alpha_rows,
                 "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows,
                 "wwpgd_projection_rows": proj_rows,
                 "wwpgd_controller_rows": controller_rows,
@@ -1489,6 +1517,7 @@ def run_scientific_single(
     torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
     _append_only_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
+    _write_csv(run_dir / "alpha_measurements.csv", alpha_rows, overwrite=resume)
     _write_csv(run_dir / "weightwatcher_aggregates.csv", spectral_aggregate_rows, overwrite=resume)
     if cfg.composite_spectral_analysis_enabled:
         _write_csv(run_dir / "composite_spectral.csv", composite_rows, overwrite=resume)
