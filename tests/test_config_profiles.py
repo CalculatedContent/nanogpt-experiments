@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from wwgpt.config import WWPGDConfig
+
 
 def test_default_yaml_loads_for_levels_0_through_4():
     from wwgpt.config import load_config
@@ -69,13 +73,30 @@ def test_resolved_wwpgd_defaults_are_exact():
     from wwgpt.config import load_config
 
     cfg = load_config(Path("configs/default.yaml"), level=0)
-    assert cfg.wwpgd.q == 1.0
+    assert cfg.wwpgd.target_alpha == 2.0
+    assert "q" not in cfg.wwpgd.__dataclass_fields__
     assert cfg.wwpgd.blend_eta == 0.5
     assert cfg.wwpgd.cayley_eta == 0.25
     assert cfg.wwpgd.min_tail == 5
     assert cfg.wwpgd.warmup_events == 0
     assert cfg.wwpgd.ramp_events == 0
     assert cfg.wwpgd.use_detx is True
+
+
+def test_q_is_rejected_as_an_experiment_configuration_key(tmp_path):
+    from wwgpt.config import load_config
+
+    path = tmp_path / "invalid.yaml"
+    path.write_text("wwpgd:\n  target_alpha: 2.0\n  q: 1.0\n")
+    with pytest.raises(ValueError, match=r"unknown configuration key.*wwpgd\.q"):
+        load_config(path)
+
+
+def test_target_alpha_is_fixed_for_current_experiment():
+    from wwgpt.config import validate_wwpgd_config
+
+    with pytest.raises(ValueError, match="fixed at 2.0"):
+        validate_wwpgd_config(WWPGDConfig(target_alpha=2.1))
 
 
 def test_required_profile_dependencies_import():

@@ -45,7 +45,7 @@ The interval schedule controls only event timing. Adaptive hardness controls per
 
 ### Adaptive WW-PGD metadata
 
-Schema v3 manifests record whether adaptive WW-PGD is enabled, the adaptive mode and direction, above-target and below-target side settings, controller version, override precedence, expected scheduled event steps, maximum blend/Cayley eta, trust-region configuration, target/q consistency, and the external WW_PGD commit/API version. `wwpgd_controller.csv` contains one decision row for every eligible layer at every scheduled event; `wwpgd_projection.csv` is reserved for actual changed projection rows. Requested and applied hardness/eta/displacement fields are separate so trust-region clipping is auditable.
+Schema v3 manifests record whether adaptive WW-PGD is enabled, the adaptive mode and direction, above-target and below-target side settings, controller version, override precedence, expected scheduled event steps, maximum blend/Cayley eta, trust-region configuration, the fixed spectral-target policy, and the external WW_PGD commit/API version. `wwpgd_controller.csv` contains one decision row for every eligible layer at every scheduled event; `wwpgd_projection.csv` is reserved for actual changed projection rows. Requested and applied hardness/eta/displacement fields are separate so trust-region clipping is auditable.
 
 ### Stock WW_PGD candidate-displacement adapter
 

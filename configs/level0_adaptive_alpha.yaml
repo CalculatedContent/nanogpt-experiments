@@ -60,7 +60,6 @@ wwpgd:
   enabled: true
   extension: wwpgd
   target_alpha: 2.0
-  q: 1.0
   blend_eta: 0.5
   cayley_eta: 0.25
   min_tail: 5

@@ -120,7 +120,7 @@ def _validate_side(side: AdaptiveAlphaSideConfig, prefix: str, *, piecewise: boo
         validate_piecewise_points(side.piecewise_points, prefix=f"{prefix}.piecewise_points", distance=True)
 
 
-def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float, q: float = 1.0) -> None:
+def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float) -> None:
     if cfg.apply_mode not in {"event_projection", "cached_endpoint_relaxation"}:
         raise ValueError("wwpgd.adaptive.apply_mode must be event_projection or cached_endpoint_relaxation")
     if cfg.measurement_source not in {"explicit_interval", "evaluation_interval"}:
@@ -157,9 +157,6 @@ def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float, q: f
         raise ValueError("wwpgd.adaptive.max_D must be nonnegative")
     if cfg.max_relative_frobenius_change is not None and cfg.max_relative_frobenius_change <= 0:
         raise ValueError("wwpgd.adaptive.max_relative_frobenius_change must be positive")
-    expected = 1.0 + 1.0 / float(q)
-    if abs(float(target_alpha) - expected) > 0.05:
-        raise ValueError("wwpgd.target_alpha is inconsistent with q; expected approximately 1 + 1/q")
     if cfg.mode == "alpha_linear" and not (cfg.full_strength_alpha > target_alpha + cfg.deadband_above_target):
         raise ValueError("wwpgd.adaptive.full_strength_alpha must exceed target_alpha + deadband")
     if cfg.mode == "alpha_piecewise":
@@ -233,7 +230,7 @@ def resolve_layer_config(global_cfg: AdaptiveWWPGDConfig, layer_name: str, targe
 
     def apply(ov: dict[str, Any]) -> None:
         if "target_alpha" in ov:
-            raise ValueError("per-layer target_alpha overrides are not supported without per-layer q")
+            raise ValueError("per-layer target_alpha overrides are not supported")
         for k, v in ov.items():
             if v is None:
                 continue

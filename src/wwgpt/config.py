@@ -94,9 +94,7 @@ class WWPGDConfig:
     enabled: bool = False
     extension: str = "none"
     target_alpha: float = 2.0
-    # Deprecated compatibility field for loading old artifacts; new scientific runs use q/eta scheduling.
     strength: float = 1.0
-    q: float = 1.0
     projection_schedule: list[float] = field(default_factory=lambda: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92])
     warmup_steps: int = 0
     ramp_steps: int = 0
@@ -222,9 +220,9 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
         raise ValueError("wwpgd.min_tail must be >= 1")
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
-    if cfg.q <= 0:
-        raise ValueError("wwpgd.q must be > 0")
-    validate_adaptive_config(cfg.adaptive, cfg.target_alpha, cfg.q)
+    if cfg.target_alpha != 2.0:
+        raise ValueError("wwpgd.target_alpha is fixed at 2.0 for the current experiment")
+    validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
 
 
 def validate_experiment_config(cfg: ExperimentConfig) -> None:
