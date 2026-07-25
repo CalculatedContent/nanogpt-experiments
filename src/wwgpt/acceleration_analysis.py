@@ -197,4 +197,153 @@ def analyze_acceleration_results(results_root: str | Path, output_dir: str | Pat
             pairs.append({"seed": seed, "base_optimizer": base,
                 "baseline": load_csv_file(Path(arms["none"]["run_dir"]) / "metrics.csv"),
                 "wwpgd": load_csv_file(Path(arms["wwpgd"]["run_dir"]) / "metrics.csv")})
-    return analyze_acceleration_pairs(pairs, output_dir, plan_path)
+    analyze_acceleration_pairs(pairs, output_dir, plan_path)
+    analyze_paired_alpha_validation(runs, output_dir)
+    return Path(output_dir)
+
+
+def _read_optional(run_dir: Path, names: tuple[str, ...]) -> pd.DataFrame:
+    for name in names:
+        path = run_dir / name
+        if path.exists():
+            return pd.read_csv(path)
+    return pd.DataFrame()
+
+
+def _backward_validation_join(alpha: pd.DataFrame, metrics: pd.DataFrame) -> pd.DataFrame:
+    """Attach the latest validation event no later than each alpha observation.
+
+    This deliberately uses a backward as-of join: interpolation and nearest-event
+    joins can leak a future validation outcome into an earlier alpha observation.
+    """
+    a = alpha.copy()
+    a["optimizer_step"] = pd.to_numeric(a["optimizer_step"], errors="coerce")
+    m = metrics.rename(columns={"step": "validation_step", "val_loss": "validation_loss"}).copy()
+    if "validation_step" not in m and "optimizer_step" in m:
+        m = m.rename(columns={"optimizer_step": "validation_step"})
+    if not {"validation_step", "validation_loss"} <= set(m):
+        a["validation_step"] = np.nan; a["validation_loss"] = np.nan
+        return a
+    m["validation_step"] = pd.to_numeric(m["validation_step"], errors="coerce")
+    m["validation_loss"] = pd.to_numeric(m["validation_loss"], errors="coerce")
+    m = m.dropna(subset=["validation_step", "validation_loss"]).sort_values("validation_step")
+    a = a.dropna(subset=["optimizer_step"]).sort_values("optimizer_step")
+    return pd.merge_asof(a, m[["validation_step", "validation_loss"]],
+                         left_on="optimizer_step", right_on="validation_step",
+                         direction="backward", allow_exact_matches=True)
+
+
+def _correlations(seed: pd.DataFrame) -> pd.DataFrame:
+    metrics = ["tokens_saved", "median_alpha_error_reduction",
+               "fraction_layers_entering_target_band", "cumulative_applied_wwpgd_displacement"]
+    if seed.empty:
+        seed = pd.DataFrame(columns=metrics)
+    rows = []
+    for i, left in enumerate(metrics):
+        for right in metrics[i + 1:]:
+            d = seed[[left, right]].dropna()
+            rows.append({"metric_x": left, "metric_y": right, "seed_count": len(d),
+                         "pearson_association": d[left].corr(d[right], method="pearson") if len(d) >= 2 else np.nan,
+                         "spearman_association": d[left].corr(d[right], method="spearman") if len(d) >= 2 else np.nan,
+                         "interpretation": "cross-seed association; not causal evidence"})
+    return pd.DataFrame(rows)
+
+
+def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str | Path) -> None:
+    """Relate paired seed trajectories in alpha distance to validation acceleration."""
+    out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
+    summary_path = out / "alpha_summary_by_step.csv"
+    columns = ["seed", "base_optimizer", "optimizer_step", "validation_step",
+               "alpha_distance_baseline", "alpha_distance_wwpgd", "delta_alpha_distance",
+               "validation_loss_baseline", "validation_loss_wwpgd", "delta_validation_loss",
+               "temporal_relationship"]
+    if not summary_path.exists() or pd.read_csv(summary_path).empty:
+        pd.DataFrame(columns=columns).to_csv(out / "alpha_validation_alignment_by_seed.csv", index=False)
+        pd.DataFrame().to_csv(out / "endpoint_event_study.csv", index=False)
+        pd.DataFrame().to_csv(out / "acceleration_alpha_association.csv", index=False)
+        fig, ax = plt.subplots(); ax.text(.5, .5, "No paired alpha trajectories", ha="center")
+        fig.savefig(out / "paired_alpha_and_validation_plot.png", dpi=160); plt.close(fig)
+        return
+    alpha = pd.read_csv(summary_path)
+    grouped: dict[tuple[Any, Any], dict[str, dict[str, Any]]] = {}
+    for run in runs:
+        ext = run.get("extension"); base = run.get("base_optimizer")
+        if ext in {"none", "wwpgd"}:
+            grouped.setdefault((run.get("seed"), base), {})[ext] = run
+    trajectories, events, seed_rows = [], [], []
+    acceleration = pd.read_csv(out / "acceleration_by_seed.csv") if (out / "acceleration_by_seed.csv").exists() else pd.DataFrame()
+    for (seed, base), arms in grouped.items():
+        if not {"none", "wwpgd"} <= set(arms): continue
+        joined = {}
+        for ext, suffix in (("none", "baseline"), ("wwpgd", "wwpgd")):
+            run = arms[ext]; path = Path(run["run_dir"]); arm_name = run.get("arm_name") or run.get("optimizer_raw")
+            aa = alpha[(alpha.seed == seed) & (alpha.arm_name.astype(str) == str(arm_name))]
+            joined[suffix] = _backward_validation_join(aa, pd.read_csv(path / "metrics.csv"))
+        p = joined["wwpgd"].merge(joined["baseline"], on="optimizer_step", suffixes=("_wwpgd", "_baseline"))
+        if p.empty: continue
+        p["seed"] = seed; p["base_optimizer"] = base
+        p["alpha_distance_wwpgd"] = p["median_absolute_alpha_error_wwpgd"]
+        p["alpha_distance_baseline"] = p["median_absolute_alpha_error_baseline"]
+        p["delta_alpha_distance"] = p.alpha_distance_wwpgd - p.alpha_distance_baseline
+        p["delta_validation_loss"] = p.validation_loss_wwpgd - p.validation_loss_baseline
+        # Both arm joins must refer only to outcomes observed by the alpha step.
+        p["validation_step"] = p[["validation_step_wwpgd", "validation_step_baseline"]].min(axis=1)
+        alpha_first = p.loc[p.delta_alpha_distance.lt(0), "validation_step"].min()
+        val_first = p.loc[p.delta_validation_loss.lt(0), "validation_step"].min()
+        relation = ("alpha-distance reduction temporally precedes validation improvement" if alpha_first < val_first
+                    else "alpha-distance reduction occurs during validation improvement" if alpha_first == val_first
+                    else "alpha-distance reduction occurs only after validation improvement") if pd.notna(alpha_first) and pd.notna(val_first) else "relationship not observed"
+        p["temporal_relationship"] = relation
+        trajectories.append(p[columns])
+
+        decisions = _read_optional(Path(arms["wwpgd"]["run_dir"]), ("wwpgd_endpoint_measurements.csv", "endpoint_measurements.csv", "adaptive_wwpgd_measurements.csv", "adaptive_wwpgd_decisions.csv"))
+        active_step = np.nan
+        if not decisions.empty and {"optimizer_step", "cache_activated"} <= set(decisions):
+            active = decisions[decisions.cache_activated.astype(str).str.lower().isin(["true", "1"])]
+            if len(active): active_step = pd.to_numeric(active.optimizer_step, errors="coerce").min()
+        ordered = p.sort_values(["validation_step", "optimizer_step"]).drop_duplicates("validation_step", keep="last").reset_index(drop=True)
+        if pd.notna(active_step) and len(ordered):
+            after = np.flatnonzero(ordered.validation_step.to_numpy() >= active_step)
+            if len(after):
+                origin = int(after[0])
+                for offset, label in [(-1, "one evaluation before activation"), (0, "activation"), (1, "one evaluation after activation"), (2, "two evaluations after activation"), (3, "three evaluations after activation")]:
+                    if 0 <= origin + offset < len(ordered):
+                        row = ordered.iloc[origin + offset]
+                        events.append({"seed": seed, "base_optimizer": base, "event_time": offset,
+                                       "event_label": label, "first_active_endpoint_step": active_step,
+                                       "evaluation_step": row.validation_step, "delta_alpha_distance": row.delta_alpha_distance,
+                                       "delta_validation_loss": row.delta_validation_loss,
+                                       "observed": True, "interpretation": relation + "; associated with, not causal evidence"})
+                    else:
+                        events.append({"seed": seed, "base_optimizer": base, "event_time": offset,
+                                       "event_label": label, "first_active_endpoint_step": active_step,
+                                       "evaluation_step": np.nan, "delta_alpha_distance": np.nan,
+                                       "delta_validation_loss": np.nan, "observed": False,
+                                       "interpretation": "evaluation interval outside observed trajectory"})
+        projections = _read_optional(Path(arms["wwpgd"]["run_dir"]), ("wwpgd_projection.csv", "adaptive_wwpgd_applications.csv"))
+        displacement_col = next((c for c in ("applied_relative_frobenius_change", "relative_frobenius_change_applied",
+                                              "relative_frobenius_change", "relative_frobenius_weight_change")
+                                 if c in projections), None)
+        displacement = pd.to_numeric(projections[displacement_col], errors="coerce").abs().sum() if displacement_col else 0.0
+        ordered_p = p.sort_values("optimizer_step")
+        first, last = ordered_p.iloc[0], ordered_p.iloc[-1]
+        entering = max(0.0, float(last.fraction_inside_configured_target_deadband_wwpgd - first.fraction_inside_configured_target_deadband_wwpgd))
+        ar = acceleration[(acceleration.seed == seed) & (acceleration.base_optimizer == base)] if not acceleration.empty else pd.DataFrame()
+        seed_rows.append({"seed": seed, "base_optimizer": base,
+                          "tokens_saved": pd.to_numeric(ar.get("tokens_saved"), errors="coerce").median() if len(ar) else np.nan,
+                          "median_alpha_error_reduction": float(first.alpha_distance_wwpgd - last.alpha_distance_wwpgd),
+                          "fraction_layers_entering_target_band": entering,
+                          "cumulative_applied_wwpgd_displacement": displacement})
+    aligned = pd.concat(trajectories, ignore_index=True) if trajectories else pd.DataFrame(columns=columns)
+    aligned.to_csv(out / "alpha_validation_alignment_by_seed.csv", index=False)
+    pd.DataFrame(events).to_csv(out / "endpoint_event_study.csv", index=False)
+    _correlations(pd.DataFrame(seed_rows)).to_csv(out / "acceleration_alpha_association.csv", index=False)
+    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    for (seed, base), d in aligned.groupby(["seed", "base_optimizer"]):
+        label=f"{base}, seed {seed}"; axes[0].plot(d.optimizer_step, d.delta_alpha_distance, marker="o", label=label)
+        axes[1].plot(d.optimizer_step, d.delta_validation_loss, marker="o", label=label)
+    axes[0].axhline(0, color="black", lw=.8); axes[1].axhline(0, color="black", lw=.8)
+    axes[0].set_ylabel("Delta alpha distance"); axes[1].set(ylabel="Delta validation loss", xlabel="Optimizer step")
+    if len(aligned): axes[0].legend(fontsize=7)
+    fig.suptitle("Paired per-seed alpha and validation trajectories (association, not causation)")
+    fig.tight_layout(); fig.savefig(out / "paired_alpha_and_validation_plot.png", dpi=160); plt.close(fig)
