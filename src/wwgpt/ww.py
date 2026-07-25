@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 from dataclasses import dataclass
@@ -507,6 +508,7 @@ def apply_external_wwpgd(
     global_event_hardness: float | None = None,
     layer_max_relative_change: dict[str, float | None] | None = None,
     stock_candidate: StockWWPGDCandidate | None = None,
+    sham_seed: int | None = None,
 ) -> list[dict[str, object]]:
     if precomputed_details is not None:
         raise TypeError("stock WW_PGD adapter does not accept precomputed_details")
@@ -532,7 +534,31 @@ def apply_external_wwpgd(
             req_h = max(0.0, min(1.0, float(layer_hardness.get(name, 0.0)) * geh))
             cand = candidate.candidate_weights[name]
             weight = live[name]
-            disp = cand.to(orig.device, dtype=orig.dtype) - orig
+            real_disp = cand.to(orig.device, dtype=orig.dtype) - orig
+            disp = real_disp
+            displacement_cosine = 1.0 if float(torch.linalg.norm(real_disp.float())) > 0 else float("nan")
+            displacement_kind = "target_directed"
+            if sham_seed is not None:
+                # Generate on CPU so the scientific control stream is independent
+                # of accelerator type and does not consume the training RNG.
+                digest = hashlib.sha256(f"{int(sham_seed)}:{event_index}:{name}".encode()).digest()
+                generator = torch.Generator(device="cpu")
+                generator.manual_seed(int.from_bytes(digest[:8], "little") & ((1 << 63) - 1))
+                d32 = real_disp.detach().float().cpu()
+                random = torch.randn(d32.shape, generator=generator, dtype=torch.float32)
+                d2 = torch.sum(d32 * d32)
+                if float(d2) > 0.0:
+                    random = random - (torch.sum(random * d32) / d2) * d32
+                random_norm = torch.linalg.norm(random)
+                dnorm = torch.linalg.norm(d32)
+                if float(random_norm) > 0.0 and float(dnorm) > 0.0:
+                    random = random * (dnorm / random_norm)
+                else:
+                    random.zero_()
+                disp = random.to(orig.device, dtype=orig.dtype)
+                denom = float(torch.linalg.norm(random) * dnorm)
+                displacement_cosine = float(torch.sum(random * d32) / denom) if denom > 0.0 else float("nan")
+                displacement_kind = "norm_matched_sham"
             requested = orig + req_h * disp
             req_rel = float(torch.linalg.norm((requested - orig).float()) / max(float(torch.linalg.norm(orig.float())), 1e-12))
             limit = (layer_max_relative_change or {}).get(name, cfg.max_relative_frobenius_change)
@@ -556,6 +582,9 @@ def apply_external_wwpgd(
                 "combined_hardness_requested": req_h, "combined_hardness_applied": req_h * scale, "trust_region_limit": limit, "trust_region_scale": scale,
                 "relative_frobenius_change_requested": req_rel, "relative_frobenius_change_applied": app_rel, "relative_frobenius_change": app_rel,
                 "relative_frobenius_weight_change": app_rel, "changed": changed, "projection_attempted": req_h > 0.0, "projected": changed})
+            rows[-1].update({"displacement_kind": displacement_kind,
+                             "real_candidate_displacement_cosine": displacement_cosine,
+                             "sham_seed": int(sham_seed) if sham_seed is not None else None})
     return rows
 
 def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 0):
