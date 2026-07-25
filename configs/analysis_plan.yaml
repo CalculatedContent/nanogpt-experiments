@@ -11,3 +11,4 @@ fixed_token_budgets: [1000000, 5000000, 10000000]
 sustained_evaluation_events: 2
 experimental_unit: seed
 pairing: within_base_optimizer
+confirmatory_paired_seeds: 10
