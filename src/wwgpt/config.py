@@ -12,7 +12,7 @@ TOKEN_MULTIPLIERS = [20, 40, 80, 160]
 SCIENTIFIC_SCHEMA_VERSION = 3
 MODEL_ARCHITECTURE_VERSION = "nanogpt_separate_qkv_tied_head_v2"
 VALID_BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
-VALID_EXTENSIONS = {"none", "wwpgd"}
+VALID_EXTENSIONS = {"none", "wwpgd", "measurement_only", "norm_matched_sham", "delayed_onset"}
 
 
 
@@ -100,6 +100,7 @@ class WWPGDConfig:
     use_detx: bool = True
     warmup_events: int = 0
     ramp_events: int = 0
+    delayed_onset_step: int | None = None
     adaptive: AdaptiveWWPGDConfig = field(default_factory=AdaptiveWWPGDConfig)
 
 
@@ -218,6 +219,8 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
     validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
+    if cfg.extension == "delayed_onset" and (cfg.delayed_onset_step is None or cfg.delayed_onset_step < 1):
+        raise ValueError("wwpgd.delayed_onset_step must be a positive predeclared step for delayed_onset")
 
 
 def validate_experiment_config(cfg: ExperimentConfig) -> None:

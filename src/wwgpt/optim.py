@@ -27,7 +27,7 @@ MANUAL_LAYER_LR_MULTIPLIERS = {
 }
 
 BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw", "stable_adamw"}
-EXTENSIONS = {"none", "wwpgd"}
+EXTENSIONS = {"none", "wwpgd", "measurement_only", "norm_matched_sham", "delayed_onset"}
 ADAMW_IMPLEMENTATION = "torch.optim.AdamW"
 MUON_IMPLEMENTATION = "KellerJordan/modded-nanogpt Muon"
 MUON_IMPLEMENTATION_VERSION = "source:KellerJordan/modded-nanogpt/train_gpt2.py:Muon:zeropower_via_newtonschulz5_coefficients_3.4445_-4.7750_2.0315"
