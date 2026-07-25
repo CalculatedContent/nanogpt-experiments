@@ -25,10 +25,10 @@ class CausalSelfAttention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
-        q = self.query(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
+        query = self.query(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         k = self.key(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
         v = self.value(x).view(b, t, self.n_head, self.head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.attn_dropout.p if self.training else 0.0, is_causal=True, scale=self.head_dim ** -0.5)
+        y = F.scaled_dot_product_attention(query, k, v, attn_mask=None, dropout_p=self.attn_dropout.p if self.training else 0.0, is_causal=True, scale=self.head_dim ** -0.5)
         return self.resid_dropout(self.proj(y.transpose(1, 2).contiguous().view(b, t, c)))
 
 

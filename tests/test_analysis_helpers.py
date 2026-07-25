@@ -31,6 +31,17 @@ def _write_run(parent: Path, opt: str, seed: int, complete: bool = True, offset:
     return run
 
 
+def test_legacy_manifest_with_rank_exponent_remains_readable(tmp_path: Path):
+    run = _write_run(tmp_path, "adamw_wwpgd", 1)
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["q"] = 1.0
+    manifest_path.write_text(json.dumps(manifest))
+
+    artifacts = load_run_artifacts(run)
+    assert artifacts["manifest"]["q"] == 1.0
+
+
 def _fixture(root: Path) -> Path:
     pair = root / "pair_11_fixture"
     pair.mkdir()

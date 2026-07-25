@@ -50,12 +50,9 @@ wwpgd:
   enabled: true
   extension: wwpgd
   target_alpha: 2.0
-  strength: 1.0
   blend_eta: 0.5
   cayley_eta: 0.25
   min_tail: 5
   use_detx: true
   warmup_events: 0
   ramp_events: 0
-  project_embeddings: false
-  project_output_head: false

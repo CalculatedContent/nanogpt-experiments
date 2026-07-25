@@ -19,6 +19,7 @@ from wwgpt.ww import (
     projected_matrix_modules,
     resolved_external_wwpgd_config,
     weightwatcher_details,
+    target_alpha_to_external_rank_exponent,
 )
 
 
@@ -66,13 +67,27 @@ def test_external_rank_exponent_is_derived_only_from_target_alpha():
     cfg = external_wwpgd_config_from_experiment(SimpleNamespace(
         target_alpha=3.0, cayley_eta=0.25, min_tail=5, use_detx=True
     ))
-    assert cfg.internal_rank_exponent == 0.5
+    assert cfg.target_alpha == 3.0
+    assert target_alpha_to_external_rank_exponent(cfg.target_alpha) == 0.5
+
+
+@pytest.mark.parametrize(("target_alpha", "expected"), [(2.0, 1.0), (3.0, 0.5), (1.5, 2.0)])
+def test_target_alpha_rank_exponent_derivation(target_alpha, expected):
+    assert target_alpha_to_external_rank_exponent(target_alpha) == expected
+
+
+@pytest.mark.parametrize("target_alpha", [1.0, 0.0, -1.0, float("nan"), float("inf")])
+def test_invalid_target_alpha_is_rejected(target_alpha):
+    from wwgpt.config import validate_wwpgd_config
+
+    with pytest.raises(ValueError, match="finite and greater than 1"):
+        validate_wwpgd_config(WWPGDConfig(target_alpha=target_alpha))
 
 
 def test_resolved_external_configuration_exact_values():
     cfg = resolved_external_wwpgd_config()
     assert cfg.enable_tail_pgd is True
-    assert cfg.internal_rank_exponent == 1.0
+    assert cfg.target_alpha == 2.0
     assert cfg.blend_eta == 0.5
     assert cfg.cayley_eta == 0.25
     assert cfg.min_tail == 5
@@ -189,8 +204,10 @@ def test_manifest_records_requested_and_resolved_external_config():
 
     assert fields["blend_eta"] == 0.5
     assert fields["target_alpha"] == 2.0
-    assert fields["internal_rank_exponent_derivation"] == "1 / (target_alpha - 1)"
-    assert "q" not in fields
+    assert fields["derived_external_rank_exponent"] == 1.0
+    assert fields["derivation_formula"] == "1 / (target_alpha - 1)"
+    assert fields["external_parameter_name"] == "q"
+    assert fields["external_rank_exponent_was_configured"] is False
     assert fields["cayley_eta"] == 0.25
     assert fields["min_tail"] == 5
     assert fields["warmup"] == 0
@@ -199,6 +216,7 @@ def test_manifest_records_requested_and_resolved_external_config():
     assert fields["requested_external_wwpgd_config"]["ramp_events"] == 0
     assert fields["resolved_external_wwpgd_config"] == {
         "enable_tail_pgd": True,
+        "target_alpha": 2.0,
         "blend_eta": 0.5,
         "cayley_eta": 0.25,
         "min_tail": 5,
@@ -239,7 +257,7 @@ def test_real_extension_passes_resolved_experiment_config_to_installed_package(m
     assert all(row["blend_eta"] == 0.5 and row["ramp"] == 0 for row in rows)
 
 
-def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):
+def test_configured_blend_eta_controls_projector(monkeypatch):
     calls = []
     install_fake_ww_pgd(monkeypatch, calls)
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
@@ -254,10 +272,10 @@ def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):
             tokens_seen=step * 8,
         )
         external_cfg = calls[-1]["args"][1]
-        assert external_cfg.blend_eta == 0.5
+        assert external_cfg.blend_eta == 0.9
         assert external_cfg.warmup_epochs == 0
         assert external_cfg.ramp_epochs == 0
-        assert all(row["blend_eta"] == 0.5 for row in rows)
+        assert all(row["blend_eta"] == 0.9 for row in rows)
 
 
 def test_standard_wwpgd_smoke_path_does_not_use_repository_visible_svd(monkeypatch, tmp_path):

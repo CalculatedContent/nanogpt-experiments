@@ -31,7 +31,7 @@ def format_strength_label(v: float) -> str:
     return 'strength_'+s.replace('.','p').replace('-','m')
 
 def strength_config(cfg, strength: float):
-    return replace(cfg, wwpgd=replace(cfg.wwpgd, enabled=True, strength=strength))
+    return replace(cfg, wwpgd=replace(cfg.wwpgd, enabled=True, blend_eta=strength))
 
 def _git():
     import subprocess
@@ -103,7 +103,7 @@ def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multip
     scan_root=resolve_scan_root(base) if resume and list(base.rglob('scan_manifest.json')) else unique_dir(base, 'scan_'+time.strftime('%Y%m%d-%H%M%S'))
     scan_id=scan_root.name
     (results_root/'latest_scan_root.txt').write_text(str(scan_root))
-    manifest={'scan_id':scan_id,'scan_name':scan_name,'created_at':time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),'git_commit':_git(),'scientific_schema_version':SCIENTIFIC_SCHEMA_VERSION,'level':level,'token_multiplier':token_multiplier,'seeds':seeds,'strengths':strengths,'data_root':str(data_root),'results_root':str(results_root),'base_config_path':str(config) if config else None,'resolved_model_config':asdict(cfg.model),'resolved_train_config':asdict(cfg.train),'resolved_wwpgd_config':asdict(cfg.wwpgd),'projection_schedule':cfg.wwpgd.projection_schedule,'target_alpha':cfg.wwpgd.target_alpha,'device':device or 'auto','eval_interval':eval_interval or cfg.train.eval_interval,'spectral_interval':spectral_interval or cfg.train.spectral_interval,'checkpoint_interval':checkpoint_interval or cfg.train.checkpoint_interval,'immediate_projection_spectral':immediate_projection_spectral,'continue_on_error':continue_on_error,'weightwatcher_version':'unknown','torch_version':torch.__version__,'python_version':platform.python_version(),'hardware':environment(),'wwpgd_reference_commit':WWPGD_COMMIT}
+    manifest={'scan_id':scan_id,'scan_name':scan_name,'created_at':time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),'git_commit':_git(),'scientific_schema_version':SCIENTIFIC_SCHEMA_VERSION,'level':level,'token_multiplier':token_multiplier,'seeds':seeds,'strengths':strengths,'data_root':str(data_root),'results_root':str(results_root),'base_config_path':str(config) if config else None,'resolved_model_config':asdict(cfg.model),'resolved_train_config':asdict(cfg.train),'resolved_wwpgd_config':asdict(cfg.wwpgd),'target_alpha':cfg.wwpgd.target_alpha,'device':device or 'auto','eval_interval':eval_interval or cfg.train.eval_interval,'spectral_interval':spectral_interval or cfg.train.spectral_interval,'checkpoint_interval':checkpoint_interval or cfg.train.checkpoint_interval,'immediate_projection_spectral':immediate_projection_spectral,'continue_on_error':continue_on_error,'weightwatcher_version':'unknown','torch_version':torch.__version__,'python_version':platform.python_version(),'hardware':environment(),'wwpgd_reference_commit':WWPGD_COMMIT}
     if not (scan_root/'scan_manifest.json').exists(): write_json(scan_root/'scan_manifest.json', manifest)
     status={'scan_id':scan_id,'arms':{}}
     for seed in seeds:

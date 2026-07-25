@@ -94,15 +94,6 @@ class WWPGDConfig:
     enabled: bool = False
     extension: str = "none"
     target_alpha: float = 2.0
-    strength: float = 1.0
-    projection_schedule: list[float] = field(default_factory=lambda: [0.10, 0.20, 0.30, 0.40, 0.55, 0.70, 0.82, 0.92])
-    warmup_steps: int = 0
-    ramp_steps: int = 0
-    layer_scope: str = "blocks"
-    include_embeddings: bool = False
-    include_output: bool = False
-    project_embeddings: bool = False
-    project_output_head: bool = False
     min_tail: int = 5
     blend_eta: float = 0.5
     cayley_eta: float = 0.25
@@ -208,10 +199,6 @@ def validate_train_config(cfg: TrainConfig) -> None:
 def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
     if not 0.0 <= cfg.blend_eta <= 1.0:
         raise ValueError("wwpgd.blend_eta must satisfy 0.0 <= blend_eta <= 1.0")
-    if cfg.warmup_steps < 0:
-        raise ValueError("wwpgd.warmup_steps must be >= 0")
-    if cfg.ramp_steps < 0:
-        raise ValueError("wwpgd.ramp_steps must be >= 0")
     if cfg.warmup_events < 0:
         raise ValueError("wwpgd.warmup_events must be >= 0")
     if cfg.ramp_events < 0:
@@ -220,8 +207,6 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
         raise ValueError("wwpgd.min_tail must be >= 1")
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
-    if cfg.target_alpha != 2.0:
-        raise ValueError("wwpgd.target_alpha is fixed at 2.0 for the current experiment")
     validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
 
 
@@ -269,6 +254,8 @@ def load_config(path: Path | None = None, level: int = 0) -> ExperimentConfig:
     for section in ("model", "train", "wwpgd"):
         if section in data and not isinstance(data[section], dict):
             raise ValueError(f"configuration section {section} must be a mapping")
+    if "q" in data.get("wwpgd", {}):
+        raise ValueError("q is not a configurable experiment parameter; set target_alpha only.")
     _reject_unknown_keys("model", data.get("model", {}), model_keys)
     _reject_unknown_keys("train", data.get("train", {}), train_keys)
     _reject_unknown_keys("wwpgd", data.get("wwpgd", {}), wwpgd_keys)

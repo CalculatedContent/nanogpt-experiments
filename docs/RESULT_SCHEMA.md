@@ -14,7 +14,7 @@ This document describes the nanoGPT AdamW vs WW-PGD framework.
 
 ## Scientific schema version 2
 
-New valid runs include these manifest fields: `spectral_estimator`, `spectral_estimator_version`, `wwpgd_implementation`, `wwpgd_commit`, `projection_schedule`, `validation_probe_hash`, `training_probe_hash`, and `scientific_schema_version`.
+Legacy schema-v2 manifests may include a `projection_schedule` field and remain readable. New runs record `projection_schedule_type: optimizer_step_interval`, `wwpgd_interval`, and expected optimizer steps instead of exposing the obsolete token-fraction schedule.
 
 Valid spectral rows must have `spectral_estimator == "weightwatcher"`. Rows labeled `fallback_non_scientific`, or legacy rows without `spectral_estimator`, are invalid for WeightWatcher alpha analysis.
 
