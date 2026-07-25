@@ -202,7 +202,9 @@ def prepare_local_text(data_root: Path, texts: list[str], min_train_tokens: int 
     np.save(prep / "train_tokens.npy", np.array(train_tokens, dtype=np.int64))
     np.save(prep / "val_tokens.npy", np.array(val_tokens, dtype=np.int64))
     corpus_hash = sha256_bytes("\n".join(texts).encode())
-    manifest = {"dataset": "local_text", "dataset_name": "local_text", "corpus_hash": corpus_hash, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "smoke_test": True, "valid_for_science": False, "repeated_stream": False}
+    # Sampling semantics belong to a training run, not to the prepared corpus.
+    # In particular random-window training may repeat and overlap this data.
+    manifest = {"dataset": "local_text", "dataset_name": "local_text", "corpus_hash": corpus_hash, "train_tokens": len(train_tokens), "val_tokens": len(val_tokens), "smoke_test": True, "valid_for_science": False}
     tok = {"tokenizer": "char-smoke", "tokenizer_type": "char-smoke", "vocab_size": len(vocab), "hash": sha256_bytes(json.dumps(vocab, sort_keys=True).encode()), "special_tokens": {}}
     write_json(prep / "data_manifest.json", manifest); write_json(prep / "tokenizer_manifest.json", tok)
     return TokenData(train_tokens, val_tokens, len(vocab), corpus_hash, prep, manifest, tok)
@@ -449,6 +451,15 @@ def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier:
         identity = dm.get("prepared_data_identity")
         digest = dm.get("prepared_data_identity_hash")
         if not isinstance(identity, dict) or digest != sha256_bytes(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()):
+            continue
+        # The identity is not merely a directory label: all realized
+        # tokenizer properties must agree with the independently stored
+        # tokenizer manifest before this corpus is eligible for training.
+        if identity.get("tokenizer_type") != tm.get("tokenizer_type"):
+            continue
+        if identity.get("tokenizer_hash") != tm.get("tokenizer_hash"):
+            continue
+        if identity.get("vocabulary_size") != int(tm.get("vocabulary_size", tm.get("vocab_size", -1))):
             continue
         if prepared_data_identity_hash and digest != prepared_data_identity_hash:
             continue
