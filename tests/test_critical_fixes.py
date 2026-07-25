@@ -1,3 +1,4 @@
+import json
 import math
 
 import numpy as np
@@ -130,7 +131,15 @@ def test_test_evaluation_runs_once_on_final_selected_checkpoint(tmp_path, monkey
     monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *a, **k: [])
     run_dir = run_scientific_single(tmp_path, "adamw", 7, cfg, data, "pair", init_state, sha256_bytes(b"init"), 0, 1)
     rows = list(__import__("csv").DictReader((run_dir / "metrics.csv").open()))
-    assert calls == {"train": 2, "val": 2, "test": 1}
+    assert calls == {"train": 4, "val": 4, "test": 1}
     assert rows[0]["test_loss"] == "nan"
-    assert float(rows[-1]["test_loss"]) == pytest.approx(0.7)
-    assert int(float(rows[-1]["selected_checkpoint_step"])) == 1
+    assert rows[-1]["test_loss"] == "nan"
+    selected = json.loads((run_dir / "selected_checkpoint_metrics.json").read_text())
+    final = json.loads((run_dir / "final_checkpoint_metrics.json").read_text())
+    assert selected["selected_step"] == 1
+    assert selected["test_loss"] == pytest.approx(0.7)
+    assert selected["checkpoint_path"].endswith("best_val_step_000001_7.pt")
+    assert final["selected_step"] == 2
+    assert final["checkpoint_path"].endswith("final_step_000002_7.pt")
+    assert final["test_evaluated"] is False
+    assert (run_dir / "selected_checkpoint_metrics.csv").exists()

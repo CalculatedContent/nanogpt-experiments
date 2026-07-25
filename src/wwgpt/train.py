@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import sys
@@ -629,6 +630,43 @@ def _append_only_csv(path: Path, rows: list[dict[str, object]]) -> None:
         if existing == 0 and not existing_fields:
             w.writeheader()
         w.writerows(pending)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _checkpoint_metric_row(*, checkpoint_path: Path, checkpoint_hash: str, step: int,
+                           selection_metric: str, train_metrics: dict, validation_metrics: dict,
+                           test_metrics: dict | None, probe_hashes: dict[str, str]) -> dict[str, object]:
+    """Build a self-contained metric record for exactly one model artifact."""
+    row: dict[str, object] = {
+        "checkpoint_path": str(checkpoint_path), "checkpoint_hash": checkpoint_hash,
+        "checkpoint_sha256": checkpoint_hash, "selected_step": step,
+        "selected_checkpoint_path": str(checkpoint_path), "selected_checkpoint_hash": checkpoint_hash,
+        "selected_checkpoint_step": step, "selection_metric": selection_metric,
+        "train_loss": train_metrics["loss"], "train_perplexity": train_metrics["perplexity"],
+        "train_accuracy": train_metrics["top1_accuracy"], "train_top1_accuracy": train_metrics["top1_accuracy"],
+        "validation_loss": validation_metrics["loss"],
+        "validation_perplexity": validation_metrics["perplexity"],
+        "validation_accuracy": validation_metrics["top1_accuracy"],
+        "validation_top1_accuracy": validation_metrics["top1_accuracy"],
+        "train_validation_gap": validation_metrics["loss"] - train_metrics["loss"], **probe_hashes,
+    }
+    if test_metrics is None:
+        row.update({"test_loss": None, "test_perplexity": None, "test_accuracy": None,
+                    "test_top1_accuracy": None, "train_test_gap": None, "test_evaluated": False})
+    else:
+        row.update({"test_loss": test_metrics["loss"], "test_perplexity": test_metrics["perplexity"],
+                    "test_accuracy": test_metrics["top1_accuracy"],
+                    "test_top1_accuracy": test_metrics["top1_accuracy"],
+                    "train_test_gap": test_metrics["loss"] - train_metrics["loss"],
+                    "test_evaluated": True})
+    return row
 
 
 def _perplexity_from_cross_entropy(loss: float) -> float:
@@ -1487,36 +1525,59 @@ def run_scientific_single(
             _log_train_progress(
                 f"checkpoint saved pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} dir={ckpt}"
             )
-    if data.test is not None and metric_rows:
-        final_model_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
-        best_paths = sorted(ckpt.glob(f"best_val_step_*_{seed}.pt"))
-        selected_path = best_paths[-1] if best_paths else None
-        if selected_path is not None:
-            selected_state = torch.load(selected_path, map_location=selected_device, weights_only=False)
-            model.load_state_dict(selected_state)
-        was_training = model.training
-        model.eval()
-        test_x, test_y, test_probe_hash = fixed_probe(data.test, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
-        with torch.no_grad():
-            test_metrics, test_loss = _evaluate_probe_batches(model, test_x, test_y, selected_device)
-        model.train(was_training)
-        metric_rows[-1].update({
-            "selected_checkpoint_step": best_validation_step or steps,
-            "selected_checkpoint_metric": "validation_loss",
-            "test_evaluation_mode": cfg.train.test_evaluation_mode,
-            "test_eval_batch_hash": test_probe_hash,
-            "test_loss": test_loss,
-            "test_cross_entropy": test_loss,
-            "test_perplexity": test_metrics["perplexity"],
-            "test_top1_accuracy": test_metrics["top1_accuracy"],
-            "test_top5_accuracy": test_metrics["top5_accuracy"],
-            "test_token_error": test_metrics["token_error"],
-            "train_test_gap": test_loss - metric_rows[-1]["train_loss"],
-        })
-        model.load_state_dict(final_model_state)
     final_elapsed = elapsed_prior + time.perf_counter() - start
     save_checkpoint(run_dir, {"model_state_dict": model.state_dict(), "optimizer_state_dict": bundle.state_dict(), "base_optimizer_state_dict": bundle.state_dict(), "scheduler_state_dict": None, "gradient_scaler_state_dict": None, "current_step": steps, "next_step": steps + 1, "optimizer_step_count": optimizer_step_count, "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "wwpgd_state": {"extension": extension_name, "call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count, "completed_projection_event_indexes": list(completed_projection_event_indexes), "next_projection_event_index": next_projection_event_index, "wwpgd_interval": wwpgd_interval}, "tokens_processed": steps * tokens_per_step, "training_reader_position": reader.pos, "reader_position": reader.pos, "training_reader_state": reader.state_dict() if hasattr(reader, "state_dict") else {"pos": reader.pos}, "seed": seed, **rng_state(), "device_type": selected_device.type, "precision_policy": precision or "torch_default", "gradient_accumulation_position": 0, "best_validation_loss": best_validation_loss, "best_validation_step": best_validation_step, "latest_validation_loss": latest_validation_loss, "completed_projection_event_indexes": completed_projection_event_indexes, "next_projection_event_index": next_projection_event_index, "metrics_rows": metric_rows, "periodic_weightwatcher_rows": spectral_rows, "periodic_weightwatcher_aggregate_rows": spectral_aggregate_rows, "wwpgd_projection_rows": proj_rows, "wwpgd_controller_rows": controller_rows, "wwpgd_adaptive_controller_state": extension.state_dict() if hasattr(extension, "state_dict") else {}, "immediate_projection_weightwatcher_rows": immediate_spectral_rows, "lr_rows": lr_rows, "composite_spectral_rows": composite_rows, "elapsed_training_time": final_elapsed, "initialization_hash": init_hash, "resolved_stochastic_seeds": resolved_seeds, "compatibility": compatibility, "resolved_config": cfgd, "optimizer_fingerprint": man["optimizer_fingerprint"], "data_hash": data.corpus_hash, "tokenizer_hash": data.tokenizer_manifest["tokenizer_hash"], "scientific_schema_version": SCIENTIFIC_SCHEMA_VERSION, "lr_schedule": cfg.train.lr_schedule, "scheduler_implementation": SCHEDULER_IMPLEMENTATION, "layer_lr": cfg.train.layer_lr, "warmup_steps_requested": cfg.train.warmup_steps, "warmup_ratio": cfg.train.warmup_ratio, "resolved_warmup_steps": resolved_warmup_steps, "lr_decay_steps_requested": cfg.train.lr_decay_steps, "resolved_lr_decay_steps": resolved_lr_decay_steps, "min_lr_ratio": cfg.train.min_lr_ratio, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name == "wwpgd" else "", "git_commit": man.get("git_commit", "unknown"), "optimizer_name": optimizer_name, "pair_id": pair_id, "level": level, "token_multiplier": token_multiplier, "realized_tokens": realized_tokens, "requested_tokens": budget_target_tokens, "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps, "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step, "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source, "immediate_projection_spectral": immediate_projection_spectral, "run_directory": str(run_dir)})
-    torch.save(model.state_dict(), ckpt / f"final_step_{steps:06d}_{seed}.pt")
+    final_path = ckpt / f"final_step_{steps:06d}_{seed}.pt"
+    torch.save(model.state_dict(), final_path)
+
+    # Checkpoint comparisons never mutate metrics.csv; it is the live-model time series.
+    if metric_rows:
+        final_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        train_x, train_y, final_train_hash = fixed_probe(data.train[cfg.train.batch_size * cfg.model.block_size * 2:], cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+        val_x, val_y, final_val_hash = fixed_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            final_train_metrics, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)
+            final_val_metrics, _ = _evaluate_probe_batches(model, val_x, val_y, selected_device)
+        final_record = _checkpoint_metric_row(
+            checkpoint_path=final_path, checkpoint_hash=_file_sha256(final_path), step=steps,
+            selection_metric="final_training_step", train_metrics=final_train_metrics,
+            validation_metrics=final_val_metrics, test_metrics=None,
+            probe_hashes={"train_probe_hash": final_train_hash, "validation_probe_hash": final_val_hash, "test_probe_hash": ""})
+        final_record["final_checkpoint_path"] = final_record["checkpoint_path"]
+        final_record["final_checkpoint_hash"] = final_record["checkpoint_hash"]
+        final_record["training_probe_hash"] = final_record["train_probe_hash"]
+        write_json(run_dir / "final_checkpoint_metrics.json", final_record)
+
+        # Selection depends solely on validation loss. All three selected metrics are
+        # then recomputed together after loading that exact immutable artifact.
+        selected_step = best_validation_step or steps
+        selected_path = ckpt / f"best_val_step_{selected_step:06d}_{seed}.pt"
+        if not selected_path.exists():
+            selected_path = final_path
+        model.load_state_dict(torch.load(selected_path, map_location=selected_device, weights_only=False))
+        selected_train_x, selected_train_y, train_hash = fixed_probe(data.train[cfg.train.batch_size * cfg.model.block_size * 2:], cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+        selected_val_x, selected_val_y, val_hash = fixed_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+        test_hash = ""
+        selected_test_metrics = None
+        with torch.no_grad():
+            selected_train_metrics, _ = _evaluate_probe_batches(model, selected_train_x, selected_train_y, selected_device)
+            selected_val_metrics, _ = _evaluate_probe_batches(model, selected_val_x, selected_val_y, selected_device)
+            if data.test is not None:
+                test_x, test_y, test_hash = fixed_probe(data.test, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
+                selected_test_metrics, _ = _evaluate_probe_batches(model, test_x, test_y, selected_device)
+        selected_record = _checkpoint_metric_row(
+            checkpoint_path=selected_path, checkpoint_hash=_file_sha256(selected_path), step=selected_step,
+            selection_metric="validation_loss", train_metrics=selected_train_metrics,
+            validation_metrics=selected_val_metrics, test_metrics=selected_test_metrics,
+            probe_hashes={"train_probe_hash": train_hash, "validation_probe_hash": val_hash, "test_probe_hash": test_hash})
+        selected_record["selection_metric_value"] = best_validation_loss
+        selected_record["training_probe_hash"] = selected_record["train_probe_hash"]
+        write_json(run_dir / "selected_checkpoint_metrics.json", selected_record)
+        _write_csv(run_dir / "selected_checkpoint_metrics.csv", [selected_record], overwrite=True)
+        model.load_state_dict(final_state)
+        model.train(was_training)
     _append_only_csv(run_dir / "metrics.csv", metric_rows)
     _write_csv(run_dir / "spectral.csv", spectral_rows, overwrite=resume)
     _write_csv(run_dir / "alpha_measurements.csv", alpha_rows, overwrite=resume)
