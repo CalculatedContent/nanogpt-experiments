@@ -29,9 +29,57 @@ def test_known_two_x_speedup_and_artifacts(tmp_path):
     assert pd.isna(row["baseline_loss_at_75_tokens"]) is False
     expected = {"acceleration_by_seed.csv", "acceleration_summary.csv", "validation_auc_by_seed.csv",
                 "threshold_crossing_audit.csv", "paired_learning_curves.png", "tokens_saved_by_seed.png",
-                "analysis_plan_manifest.json"}
+                "analysis_plan_manifest.json", "paired_effects_by_seed.csv", "paired_effect_estimates.csv",
+                "statistical_power_warning.json", "missing_pair_audit.csv"}
     assert expected <= {p.name for p in (tmp_path / "out").iterdir()}
     assert json.loads((tmp_path / "out/analysis_plan_manifest.json").read_text())["analysis_mode"] == "confirmatory"
+
+
+def test_seed_level_inference_and_five_pair_power_warning(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: confirmatory\nthresholds: [2.0]\nprimary_outcomes: [tokens_saved]\n")
+    effects = [10, 20, 30, 40, 50]
+    pairs = [{"seed": seed, "base_optimizer": "adamw",
+              "baseline": curve([0, 100, 200], [3, 2, 1]),
+              "wwpgd": curve([0, 100 - effect, 200], [3, 2, 1])}
+             for seed, effect in enumerate(effects)]
+    analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+    estimate = pd.read_csv(tmp_path / "out/paired_effect_estimates.csv").iloc[0]
+    assert estimate.n_complete_pairs == 5
+    assert json.loads(estimate.individual_paired_effects) == effects
+    assert estimate["mean"] == 30 and estimate["median"] == 30
+    assert estimate.sample_standard_deviation == pytest.approx(15.8113883)
+    assert estimate.standard_error == pytest.approx(15.8113883 / 5 ** .5)
+    assert estimate.exact_sign_flip_p_value_two_sided == .0625
+    assert estimate.power_label == "pilot, limited paired power"
+    warning = json.loads((tmp_path / "out/statistical_power_warning.json").read_text())
+    assert warning["minimum_attainable_two_sided_p_value"] == .0625
+    assert warning["can_attain_p_below_0_05"] is False
+
+
+def test_threshold_missingness_is_explicit_and_not_imputed(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: confirmatory\nthresholds: [2.0]\nprimary_outcomes: [tokens_saved]\n")
+    pairs = [
+        {"seed": 1, "base_optimizer": "adamw", "baseline": curve([0, 10], [3, 2.5]),
+         "wwpgd": curve([0, 10, 20], [3, 1.9, 1.8])},
+        {"seed": 2, "base_optimizer": "adamw", "baseline": curve([0, 10], [3, 2.5]),
+         "wwpgd": curve([0, 10], [3, 2.4])},
+        {"seed": 3, "base_optimizer": "adamw", "baseline": curve([0, 10], [3, 2.5]),
+         "wwpgd": None},
+    ]
+    analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+    audit = pd.read_csv(tmp_path / "out/missing_pair_audit.csv")
+    assert audit.missingness_pattern.tolist() == ["wwpgd_only_reached", "neither_reached", "wwpgd_arm_missing"]
+    estimate = pd.read_csv(tmp_path / "out/paired_effect_estimates.csv").iloc[0]
+    assert estimate.n_complete_pairs == 0
+
+
+def test_confirmatory_seed_configuration_requires_ten_or_justification(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: confirmatory\nthresholds: [2]\nprimary_outcomes: [tokens_saved]\nconfirmatory_paired_seeds: 5\n")
+    with pytest.raises(ValueError, match="at least 10 paired seeds"):
+        analyze_acceleration_pairs([], tmp_path / "out", plan)
 
 
 def test_identical_curves_and_unequal_grids_auc():

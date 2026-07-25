@@ -7,6 +7,7 @@ uses evaluation rows as independent samples.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,10 @@ def load_analysis_plan(path: str | Path) -> tuple[dict[str, Any], str]:
         raise ValueError("analysis plan mode must be exploratory or confirmatory")
     if mode == "confirmatory" and (not plan.get("thresholds") or not plan.get("primary_outcomes")):
         raise ValueError("confirmatory plans require non-empty thresholds and primary_outcomes")
+    planned_seeds = plan.get("confirmatory_paired_seeds")
+    if mode == "confirmatory" and planned_seeds is not None and int(planned_seeds) < 10 \
+            and not plan.get("paired_seed_count_justification"):
+        raise ValueError("confirmatory plans require at least 10 paired seeds or an explicit justification")
     return plan, hashlib.sha256(raw).hexdigest()
 
 
@@ -109,6 +114,57 @@ def _exploratory_thresholds(pairs: list[dict[str, Any]]) -> list[float]:
     return [float(x) for x in np.linspace(lo, hi, 5)[1:-1]] if hi > lo else [float(lo)]
 
 
+def _percentile_bootstrap(values: np.ndarray, *, samples: int = 10_000) -> tuple[float, float]:
+    """Deterministic seed-level percentile bootstrap interval for the mean."""
+    if not len(values):
+        return np.nan, np.nan
+    rng = np.random.default_rng(20260725)
+    means = rng.choice(values, size=(samples, len(values)), replace=True).mean(axis=1)
+    low, high = np.percentile(means, [2.5, 97.5])
+    return float(low), float(high)
+
+
+def _sign_flip_pvalue(values: np.ndarray) -> tuple[float, int, str]:
+    """Return an exact, two-sided paired sign-flip p-value when enumeration is practical."""
+    nonzero = values[np.isfinite(values) & (values != 0)]
+    n = len(nonzero)
+    if not n:
+        return 1.0, 0, "applicable; no nonzero effects"
+    if n > 20:
+        return np.nan, n, "not applicable; more than 20 nonzero pairs"
+    observed = abs(float(nonzero.mean()))
+    extreme = 0
+    for signs in itertools.product((-1.0, 1.0), repeat=n):
+        if abs(float(np.mean(nonzero * np.asarray(signs)))) >= observed - 1e-15:
+            extreme += 1
+    return extreme / (2 ** n), n, "applicable; exact enumeration"
+
+
+def _paired_inference(effects: pd.DataFrame, mode: str) -> pd.DataFrame:
+    rows = []
+    keys = ["base_optimizer", "metric", "threshold", "token_budget"]
+    for key, group in effects.groupby(keys, dropna=False, sort=True):
+        values = pd.to_numeric(group["paired_effect"], errors="coerce").dropna().to_numpy(float)
+        low, high = _percentile_bootstrap(values)
+        pvalue, nonzero, applicability = _sign_flip_pvalue(values)
+        n = len(values)
+        seeds_observed = group["seed"].nunique(dropna=True)
+        rows.append(dict(zip(keys, key)) | {
+            "analysis_mode": mode, "n_seeds_observed": seeds_observed, "n_complete_pairs": n,
+            "individual_paired_effects": json.dumps(values.tolist()),
+            "mean": float(np.mean(values)) if n else np.nan,
+            "median": float(np.median(values)) if n else np.nan,
+            "sample_standard_deviation": float(np.std(values, ddof=1)) if n >= 2 else np.nan,
+            "standard_error": float(np.std(values, ddof=1) / np.sqrt(n)) if n >= 2 else np.nan,
+            "percentile_bootstrap_ci_low": low, "percentile_bootstrap_ci_high": high,
+            "bootstrap_resamples": 10_000, "exact_sign_flip_p_value_two_sided": pvalue,
+            "sign_flip_nonzero_pairs": nonzero, "sign_flip_test_status": applicability,
+            "power_label": "pilot, limited paired power" if seeds_observed == 5 else "",
+            "interpretation_warning": "An interval excluding zero is not, by itself, a causal claim."
+        })
+    return pd.DataFrame(rows)
+
+
 def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Path,
                                plan_path: str | Path) -> Path:
     """Analyze dictionaries containing seed, base_optimizer, baseline, and wwpgd curves."""
@@ -117,12 +173,26 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
     if mode == "exploratory" and not thresholds: thresholds = _exploratory_thresholds(pairs)
     budgets = [float(x) for x in plan.get("fixed_token_budgets", [])]
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
-    accel, aucs, audits = [], [], []
+    accel, aucs, audits, effects, missing = [], [], [], [], []
     for p in pairs:
         seed, base = p.get("seed"), p.get("base_optimizer")
+        if p.get("baseline") is None or p.get("wwpgd") is None:
+            pattern = "both_arms_missing" if p.get("baseline") is None and p.get("wwpgd") is None else (
+                "baseline_arm_missing" if p.get("baseline") is None else "wwpgd_arm_missing")
+            for threshold in thresholds:
+                missing.append({"seed": seed, "base_optimizer": base, "threshold": threshold,
+                                "baseline_status": "arm missing" if p.get("baseline") is None else "arm observed",
+                                "wwpgd_status": "arm missing" if p.get("wwpgd") is None else "arm observed",
+                                "missingness_pattern": pattern, "complete_pair": False})
+            continue
         a, w = _curve(p["baseline"]), _curve(p["wwpgd"])
-        aucs.append({"seed": seed, "base_optimizer": base, "analysis_mode": mode,
-                     "exploratory": mode == "exploratory", **paired_auc(a, w)})
+        auc = {"seed": seed, "base_optimizer": base, "analysis_mode": mode,
+               "exploratory": mode == "exploratory", **paired_auc(a, w)}
+        aucs.append(auc)
+        if "paired_validation_loss_auc" in plan.get("primary_outcomes", []):
+            effects.append({"seed": seed, "base_optimizer": base, "metric": "paired_validation_loss_auc",
+                            "threshold": np.nan, "token_budget": np.nan,
+                            "paired_effect": auc["paired_auc_difference"], "effect_definition": "baseline minus wwpgd"})
         for threshold in thresholds:
             ac, wc = threshold_crossing(a, threshold), threshold_crossing(w, threshold)
             au, wu = threshold_crossing(a, threshold, sustained=False), threshold_crossing(w, threshold, sustained=False)
@@ -146,6 +216,36 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
                 row[f"baseline_loss_at_{key}_tokens"] = _at_budget(a, budget)
                 row[f"wwpgd_loss_at_{key}_tokens"] = _at_budget(w, budget)
             accel.append(row)
+            pattern = ("both_reached" if ac["reached"] and wc["reached"] else
+                       "baseline_only_reached" if ac["reached"] else
+                       "wwpgd_only_reached" if wc["reached"] else "neither_reached")
+            missing.append({"seed": seed, "base_optimizer": base, "threshold": threshold,
+                            "baseline_status": ac["status"], "wwpgd_status": wc["status"],
+                            "missingness_pattern": pattern, "complete_pair": bool(ac["reached"] and wc["reached"])})
+            primary = set(plan.get("primary_outcomes", []))
+            if "sustained_tokens_to_threshold" in primary:
+                effects.append({"seed": seed, "base_optimizer": base, "metric": "sustained_tokens_to_threshold",
+                                "threshold": threshold, "token_budget": np.nan, "paired_effect": saved,
+                                "effect_definition": "baseline tokens minus wwpgd tokens"})
+            if "tokens_saved" in primary:
+                effects.append({"seed": seed, "base_optimizer": base, "metric": "tokens_saved",
+                                "threshold": threshold, "token_budget": np.nan, "paired_effect": saved,
+                                "effect_definition": "baseline tokens minus wwpgd tokens"})
+            if "speedup_ratio" in primary:
+                effects.append({"seed": seed, "base_optimizer": base, "metric": "speedup_ratio",
+                                "threshold": threshold, "token_budget": np.nan,
+                                "paired_effect": ratio - 1 if ratio is not None else None,
+                                "effect_definition": "baseline/wwpgd ratio minus null value 1"})
+            # Fixed-budget outcomes do not vary by threshold; emit exactly one
+            # seed-level effect rather than pseudoreplicating it across thresholds.
+            if "validation_loss_at_fixed_token_budgets" in primary and threshold == thresholds[0]:
+                for budget in budgets:
+                    av, wv = _at_budget(a, budget), _at_budget(w, budget)
+                    effects.append({"seed": seed, "base_optimizer": base,
+                                    "metric": "validation_loss_at_fixed_token_budget", "threshold": np.nan,
+                                    "token_budget": budget,
+                                    "paired_effect": av - wv if av is not None and wv is not None else None,
+                                    "effect_definition": "baseline loss minus wwpgd loss"})
             for arm, sustained, first in (("baseline", ac, au), ("wwpgd", wc, wu)):
                 audits.append({"seed": seed, "base_optimizer": base, "arm": arm, "threshold": threshold,
                                "analysis_mode": mode, "exploratory": mode == "exploratory",
@@ -161,6 +261,26 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
         mean_tokens_saved=("tokens_saved", "mean"), median_tokens_saved=("tokens_saved", "median"),
         mean_speedup_ratio=("speedup_ratio", "mean")).reset_index() if not adf.empty else pd.DataFrame()
     summary.to_csv(out / "acceleration_summary.csv", index=False)
+    effect_columns = ["seed", "base_optimizer", "metric", "threshold", "token_budget",
+                      "paired_effect", "effect_definition"]
+    edf = pd.DataFrame(effects, columns=effect_columns)
+    edf.to_csv(out / "paired_effects_by_seed.csv", index=False)
+    _paired_inference(edf, mode).to_csv(out / "paired_effect_estimates.csv", index=False)
+    pd.DataFrame(missing, columns=["seed", "base_optimizer", "threshold", "baseline_status",
+        "wwpgd_status", "missingness_pattern", "complete_pair"]).to_csv(out / "missing_pair_audit.csv", index=False)
+    warning = {
+        "warning_code": "FIVE_PAIR_EXACT_SIGN_FLIP_LIMIT",
+        "applies_when_nonzero_complete_pairs": 5,
+        "label": "pilot, limited paired power",
+        "test": "exact two-sided paired sign-flip randomization test",
+        "can_attain_p_below_0_05": False,
+        "minimum_attainable_two_sided_p_value": 2 / 32,
+        "calculation": "2/32 = 0.0625",
+        "experimental_unit": "seed",
+        "independence_warning": "Layers, evaluations, tokens, and thresholds are not independent replicates.",
+        "causal_interpretation_warning": "A confidence interval excluding zero does not automatically establish causality."
+    }
+    (out / "statistical_power_warning.json").write_text(json.dumps(warning, indent=2, sort_keys=True) + "\n")
     _plots(pairs, adf, out)
     (out / "analysis_plan_manifest.json").write_text(json.dumps({"analysis_plan_sha256": digest,
         "analysis_plan_path": str(Path(plan_path)), "analysis_mode": mode, "exploratory": mode == "exploratory",
@@ -172,6 +292,8 @@ def _plots(pairs: list[dict[str, Any]], results: pd.DataFrame, out: Path) -> Non
     fig, ax = plt.subplots(figsize=(8, 5))
     for p in pairs:
         for arm, style in (("baseline", "--"), ("wwpgd", "-")):
+            if p.get(arm) is None:
+                continue
             d = _curve(p[arm]); ax.plot(d.tokens_seen, d.validation_loss, style, alpha=.65,
                 label=f"{p.get('base_optimizer')} {arm} seed {p.get('seed')}")
     ax.set(xlabel="Tokens", ylabel="Validation loss");
@@ -193,10 +315,9 @@ def analyze_acceleration_results(results_root: str | Path, output_dir: str | Pat
         grouped.setdefault((r.get("seed"), r.get("base_optimizer")), {})[r.get("extension")] = r
     pairs = []
     for (seed, base), arms in grouped.items():
-        if "none" in arms and "wwpgd" in arms:
-            pairs.append({"seed": seed, "base_optimizer": base,
-                "baseline": load_csv_file(Path(arms["none"]["run_dir"]) / "metrics.csv"),
-                "wwpgd": load_csv_file(Path(arms["wwpgd"]["run_dir"]) / "metrics.csv")})
+        pairs.append({"seed": seed, "base_optimizer": base,
+            "baseline": load_csv_file(Path(arms["none"]["run_dir"]) / "metrics.csv") if "none" in arms else None,
+            "wwpgd": load_csv_file(Path(arms["wwpgd"]["run_dir"]) / "metrics.csv") if "wwpgd" in arms else None})
     analyze_acceleration_pairs(pairs, output_dir, plan_path)
     analyze_paired_alpha_validation(runs, output_dir)
     return Path(output_dir)
