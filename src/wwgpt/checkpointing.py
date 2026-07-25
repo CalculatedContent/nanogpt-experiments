@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 import torch
 
-SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION = 2
+SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION = 3
 CODE_VERSION_COMPAT = ("git_commit", "git_dirty", "weightwatcher_version", "wwpgd_commit", "torch_version", "optimizer_implementation_version")
 REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version","optimizer_fingerprint", *CODE_VERSION_COMPAT)
 
@@ -31,8 +31,7 @@ REQUIRED_CHECKPOINT_KEYS = (
     "model_state_dict","optimizer_state_dict","base_optimizer_state_dict","scheduler_state_dict","gradient_scaler_state_dict",
     "current_step","next_step","tokens_processed","training_reader_position","seed",
     "wwpgd_state","python_random_state","numpy_random_state","torch_cpu_rng_state","torch_cuda_rng_states","accelerator_rng_states",
-    "device_type","precision_policy","gradient_accumulation_position","metrics_rows",
-    "periodic_weightwatcher_rows","wwpgd_projection_rows","immediate_projection_weightwatcher_rows",
+    "device_type","precision_policy","gradient_accumulation_position","artifact_commits",
     "resolved_config","optimizer_fingerprint","data_hash","tokenizer_hash",
     "scientific_schema_version","checkpoint_schema_version","created_at",
 )
@@ -48,6 +47,58 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024*1024), b''):
             h.update(chunk)
     return h.hexdigest()
+
+def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Durably append records. A flush boundary is a transaction boundary."""
+    import csv
+    if not rows:
+        return
+    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    fields = list(rows[0])
+    if path.exists() and path.stat().st_size:
+        with path.open(newline="") as f:
+            existing = next(csv.reader(f))
+        if existing != fields:
+            raise ValueError(f"CSV schema changed while appending {path}: {existing} != {fields}")
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="raise")
+        if f.tell() == 0:
+            writer.writeheader()
+        writer.writerows(rows)
+        f.flush(); os.fsync(f.fileno())
+
+def csv_commit(path: Path) -> dict[str, Any]:
+    """Describe the exact durable prefix referenced by a checkpoint."""
+    import csv
+    path = Path(path)
+    if not path.exists():
+        return {"rows": 0, "sha256": None, "size_bytes": 0}
+    with path.open(newline="") as f:
+        rows = sum(1 for _ in csv.DictReader(f))
+    return {"rows": rows, "sha256": _sha256_file(path), "size_bytes": path.stat().st_size}
+
+def reconcile_csv_artifacts(run_dir: Path, commits: dict[str, dict[str, Any]]) -> None:
+    """Verify committed prefixes and discard only bytes appended after them."""
+    run_dir = Path(run_dir)
+    for name, commit in commits.items():
+        path = run_dir / name
+        size = int(commit.get("size_bytes", 0)); expected = commit.get("sha256")
+        if not path.exists():
+            if size: raise RuntimeError(f"committed artifact is missing: {name}")
+            continue
+        if path.stat().st_size < size:
+            raise RuntimeError(f"committed artifact was shortened: {name}")
+        with path.open("rb") as f:
+            prefix = f.read(size)
+        actual = hashlib.sha256(prefix).hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"committed artifact hash mismatch: {name}")
+        if path.stat().st_size > size:
+            with path.open("r+b") as f:
+                f.truncate(size); f.flush(); os.fsync(f.fileno())
+        verified = csv_commit(path)
+        if int(verified["rows"]) != int(commit.get("rows", 0)):
+            raise RuntimeError(f"committed artifact row-count mismatch: {name}")
 
 def validate_checkpoint_keys(obj: dict) -> None:
     missing=[k for k in REQUIRED_CHECKPOINT_KEYS if k not in obj]
@@ -111,8 +162,7 @@ def complete_test_checkpoint_state(**overrides) -> dict:
         "tokens_processed": 0, "training_reader_position": 0, "reader_position": 0,
         "seed": 0, "wwpgd_state": {}, **rng_state(), "device_type": "cpu",
         "precision_policy": "torch_default", "gradient_accumulation_position": 0,
-        "metrics_rows": [], "periodic_weightwatcher_rows": [],
-        "wwpgd_projection_rows": [], "immediate_projection_weightwatcher_rows": [],
+        "artifact_commits": {},
         "scientific_schema_version": 0, "compatibility": {}, "resolved_config": {}, "optimizer_fingerprint": "", "data_hash": "", "tokenizer_hash": "",
     }
     state.update(overrides)

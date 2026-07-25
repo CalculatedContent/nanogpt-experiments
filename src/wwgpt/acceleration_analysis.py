@@ -52,7 +52,8 @@ def _curve(frame: pd.DataFrame) -> pd.DataFrame:
     required = {"tokens_seen", "validation_loss"}
     if not required <= set(d):
         raise ValueError(f"curve is missing columns: {sorted(required - set(d))}")
-    for col in ("tokens_seen", "validation_loss", "step", "elapsed_seconds"):
+    for col in ("tokens_seen", "validation_loss", "step", "elapsed_seconds",
+                "base_optimizer_seconds", "total_elapsed_seconds"):
         if col in d: d[col] = pd.to_numeric(d[col], errors="coerce")
     d = d.dropna(subset=["tokens_seen", "validation_loss"]).sort_values("tokens_seen")
     return d.drop_duplicates("tokens_seen", keep="last").reset_index(drop=True)
@@ -71,7 +72,10 @@ def threshold_crossing(curve: pd.DataFrame, threshold: float, *, sustained: bool
                 token = float(x[i])
             result = {"reached": True, "tokens": token, "event_index": i,
                       "event_tokens": float(x[i]), "status": "reached"}
-            for source, name in (("step", "optimizer_steps"), ("elapsed_seconds", "wall_clock_seconds")):
+            for source, name in (("step", "optimizer_steps"),
+                                 ("base_optimizer_seconds", "base_optimization_seconds"),
+                                 ("total_elapsed_seconds", "total_wall_clock_seconds"),
+                                 ("elapsed_seconds", "wall_clock_seconds")):
                 if source in d:
                     result[name] = float(np.interp(token, x, d[source].to_numpy()))
             return result
@@ -81,6 +85,12 @@ def threshold_crossing(curve: pd.DataFrame, threshold: float, *, sustained: bool
 
 def sustained_tokens_to_threshold(curve: pd.DataFrame, threshold: float) -> float | None:
     return threshold_crossing(curve, threshold, sustained=True)["tokens"]
+
+def wall_clock_acceleration(baseline: dict[str, Any], intervention: dict[str, Any]) -> bool:
+    """Only total elapsed time, including analysis/intervention, supports this claim."""
+    left = baseline.get("total_wall_clock_seconds")
+    right = intervention.get("total_wall_clock_seconds")
+    return left is not None and right is not None and float(right) < float(left)
 
 
 def paired_auc(baseline: pd.DataFrame, wwpgd: pd.DataFrame) -> dict[str, Any]:
