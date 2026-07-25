@@ -16,7 +16,7 @@ def test_strength_parse_labels_validation():
 
 def test_strength_config_is_immutable():
     cfg=ExperimentConfig(); new=strength_config(cfg,0.5)
-    assert cfg.wwpgd.strength == 1.0 and new.wwpgd.strength == 0.5 and new is not cfg
+    assert cfg.wwpgd.blend_eta == 0.5 and new.wwpgd.blend_eta == 0.5 and new is not cfg
 
 def test_strength_scan_uses_external_layer_selector():
     m=GPT(ModelConfig(n_layer=1,n_head=1,n_embd=64,block_size=4,vocab_size=10))

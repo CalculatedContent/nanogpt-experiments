@@ -65,21 +65,15 @@ DATA_ROOT=/tmp/wwpgd_v2/data RESULTS_ROOT=/tmp/wwpgd_level0_wwpgd_0p5 ./scripts/
 
 ## WW-PGD Strength Scan
 
-The strength scan is a secondary ablation for AdamW + WW-PGD. It is not run by default and does not change `wwgpt run-multiseed` or the default WW-PGD strength of `0.02`. The runner creates one shared initialization per seed, runs one immutable AdamW control, and reuses that control for every fixed WW-PGD strength arm. Every arm resets the deterministic token reader and fixed probes so only `wwpgd.strength` differs.
+The historical strength-scan runner is retired because its nominal strength did not control a documented projector parameter. Existing scan artifacts remain readable for analysis, but new scientific runs expose only functional controls. A deliberate blend ablation can vary `wwpgd.blend_eta`, which is passed to the external projector.
 
-Run a scan:
-
-```bash
-wwgpt run-strength-scan --level 0 --data-root /tmp/wwpgd_v2/data --results-root /tmp/wwpgd_strength_scan --token-multiplier 20 --seeds 1337 --strengths 0.1,0.25,0.5,1.0 --device mps --eval-interval 25 --spectral-interval 100 --checkpoint-interval 500 --immediate-projection-spectral --resume
-```
-
-Analyze without notebooks:
+Analyze an existing legacy scan without notebooks:
 
 ```bash
 wwgpt analyze-strength-scan --scan-root /tmp/wwpgd_strength_scan
 ```
 
-Outputs are under `experiments/strength_scan/level_<NN>/multiplier_<M>/scan_<timestamp>_*`, with `seeds/`, one `adamw_control/`, per-strength run directories, and `analysis/strength_scan_*.csv`. Resume skips compatible completed arms and writes new append-only run directories for reruns. Immediate alpha before/after logging is written to `wwpgd_projection_spectral.csv`; it matches WeightWatcher layer names by `longname`/`name` and reports alpha-error changes, projection norms, and WeightWatcher overhead.
+Legacy outputs are under `experiments/strength_scan/level_<NN>/multiplier_<M>/scan_<timestamp>_*`. Immediate alpha before/after records in `wwpgd_projection_spectral.csv` remain supported by analysis.
 
 Open notebooks after setting `WWGPT_STRENGTH_SCAN_ROOT` to either a scan directory or parent results directory:
 
@@ -93,7 +87,7 @@ Pull requests should require the separate `quality`, `tests`, and `analysis-note
 
 ### Fixed spectral target
 
-`wwpgd.target_alpha` is the only researcher-facing spectral target and is fixed at `2.0` for the current experiment. The pinned external package's required rank exponent is derived privately at the adapter boundary as `1 / (target_alpha - 1)` and cannot be configured or scanned independently. Manifests retain the target and derivation rule for provenance.
+`wwpgd.target_alpha` is the only researcher-facing spectral target. It must be finite and greater than one. The pinned external package's required rank exponent is derived privately at the adapter boundary as `1 / (target_alpha - 1)` and cannot be configured or scanned independently. Manifests record `target_alpha`, the derived value, its formula, and the external parameter name so that provenance clearly distinguishes configuration from derivation.
 
 ### Adaptive layerwise WW-PGD alpha controller
 

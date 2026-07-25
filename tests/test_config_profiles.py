@@ -88,15 +88,14 @@ def test_q_is_rejected_as_an_experiment_configuration_key(tmp_path):
 
     path = tmp_path / "invalid.yaml"
     path.write_text("wwpgd:\n  target_alpha: 2.0\n  q: 1.0\n")
-    with pytest.raises(ValueError, match=r"unknown configuration key.*wwpgd\.q"):
+    with pytest.raises(ValueError, match=r"q is not a configurable experiment parameter; set target_alpha only\."):
         load_config(path)
 
 
-def test_target_alpha_is_fixed_for_current_experiment():
+def test_target_alpha_accepts_any_valid_spectral_target():
     from wwgpt.config import validate_wwpgd_config
 
-    with pytest.raises(ValueError, match="fixed at 2.0"):
-        validate_wwpgd_config(WWPGDConfig(target_alpha=2.1))
+    validate_wwpgd_config(WWPGDConfig(target_alpha=2.1))
 
 
 def test_required_profile_dependencies_import():

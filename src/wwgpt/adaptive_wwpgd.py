@@ -121,6 +121,8 @@ def _validate_side(side: AdaptiveAlphaSideConfig, prefix: str, *, piecewise: boo
 
 
 def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float) -> None:
+    if not math.isfinite(target_alpha) or target_alpha <= 1.0:
+        raise ValueError("wwpgd.target_alpha must be finite and greater than 1")
     if cfg.apply_mode not in {"event_projection", "cached_endpoint_relaxation"}:
         raise ValueError("wwpgd.adaptive.apply_mode must be event_projection or cached_endpoint_relaxation")
     if cfg.measurement_source not in {"explicit_interval", "evaluation_interval"}:

@@ -8,4 +8,4 @@ Earlier strength-scan code generated `wwpgd_projection_spectral.csv` with fabric
 
 ## Spectral target ownership
 
-`target_alpha` is the only researcher-facing spectral target and is fixed at `2.0` for the current experiment. The external WW-PGD dependency's private rank exponent is derived only inside the adapter as `1 / (target_alpha - 1)`; it is not a configurable, scannable, or tunable research parameter. Manifests record the target and derivation rule without exposing a second target control.
+`target_alpha` is the only researcher-facing spectral target and must be finite and greater than one. The external WW-PGD dependency's private rank exponent is derived only inside the adapter as `1 / (target_alpha - 1)`; it is not a configurable, scannable, or tunable research parameter. Manifests record the target, derived value, formula, and external parameter name without exposing a second target control.
