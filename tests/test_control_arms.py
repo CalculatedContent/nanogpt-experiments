@@ -93,3 +93,11 @@ def test_delayed_onset_requires_a_predeclared_positive_step():
         extensions=["delayed_onset"],
         wwpgd=WWPGDConfig(extension="delayed_onset", enabled=True, delayed_onset_step=100),
     ))
+
+
+def test_delayed_onset_in_arm_list_cannot_silently_default_to_step_one():
+    with pytest.raises(ValueError, match="predeclared step"):
+        validate_experiment_config(ExperimentConfig(
+            extensions=["none", "measurement_only", "norm_matched_sham", "delayed_onset", "wwpgd"],
+            wwpgd=WWPGDConfig(extension="wwpgd", enabled=True),
+        ))
