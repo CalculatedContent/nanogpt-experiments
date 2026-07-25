@@ -6,6 +6,7 @@ import json
 import math
 import sys
 import time
+import subprocess
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from wwgpt.model import GPT
 from wwgpt.utils import environment, sha256_bytes, unique_dir, write_json
 from wwgpt.scaling import resolve_optimizer_steps
 from wwgpt.device import autocast_context, device_summary, memory_stats, optimizer_step, precision_policy, synchronize_device
-from wwgpt.checkpointing import assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash
+from wwgpt.checkpointing import CODE_VERSION_COMPAT, assert_checkpoint_compatible, load_latest_checkpoint, rng_state, restore_rng_state, save_checkpoint, stable_hash, compatibility_mismatches
 from wwgpt.ww import (
     apply_external_wwpgd,
     build_stock_wwpgd_candidate,
@@ -81,12 +82,23 @@ def _initial_minibatch_indices(tokens, block_size: int, batch_size: int, samplin
         return [int(x) for x in rng.integers(0, len(tokens) - block_size, size=batch_size)]
     return list(range(0, batch_size * block_size, block_size))
 
-def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
+def _repository_version() -> dict[str, object]:
+    """Return the exact source-tree identity used by checkpoint compatibility."""
+    root = Path(__file__).resolve().parents[2]
+    def git(*args: str) -> str:
+        try:
+            return subprocess.check_output(["git", "-C", str(root), *args], text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return "unknown"
+    return {"git_commit": git("rev-parse", "HEAD"), "git_dirty": bool(git("status", "--porcelain"))}
+
+
+def _select_resume_run(arm_dir: Path, expected_identity: dict[str, object], expected_compatibility: dict[str, object], *, allow_code_version_mismatch: bool = False) -> tuple[str, Path, dict]:
     if not arm_dir.exists():
-        raise FileNotFoundError(f"no runs exist for resume arm directory: {arm_dir}")
-    candidates=[]; incompatible=[]
+        return "new", arm_dir, {"incompatible_runs": []}
+    incomplete=[]; completed=[]; incompatible=[]
     for run in sorted([p for p in arm_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
-        if not (run / "checkpoints" / "latest.json").exists() or (run / "run_complete.json").exists():
+        if not (run / "checkpoints" / "latest.json").exists():
             continue
         try:
             manifest=json.loads((run / "manifest.json").read_text())
@@ -108,16 +120,39 @@ def _select_resume_run(arm_dir: Path, expected: dict[str, object]) -> Path:
             "immediate_projection_spectral": manifest.get("immediate_projection_spectral"),
             "resolved_optimizer_steps": manifest.get("resolved_optimizer_steps", manifest.get("optimizer_steps")),
         }
-        mm={k:{"expected": v, "found": observed.get(k)} for k,v in expected.items() if observed.get(k) != v}
-        if mm:
-            incompatible.append({"run": str(run), "mismatches": mm})
+        identity_mm={k:{"expected": v, "found": observed.get(k)} for k,v in expected_identity.items() if observed.get(k) != v}
+        try:
+            checkpoint = load_latest_checkpoint(run)
+            checkpoint_mm = compatibility_mismatches(checkpoint, expected_compatibility)
+        except Exception as exc:
+            incompatible.append({"run": str(run), "error": f"checkpoint verification failed: {exc}"}); continue
+        blocking = {k: v for k, v in checkpoint_mm.items() if not (allow_code_version_mismatch and k in CODE_VERSION_COMPAT)}
+        if identity_mm or blocking:
+            incompatible.append({"run": str(run), "identity_mismatches": identity_mm, "checkpoint_mismatches": checkpoint_mm})
+            continue
+        item=(run, checkpoint_mm)
+        if (run / "run_complete.json").exists():
+            try:
+                completion = json.loads((run / "run_complete.json").read_text())
+                expected_steps = int(expected_identity.get("resolved_optimizer_steps", 0))
+                checkpoint_step = int(checkpoint.get("current_step", checkpoint.get("step", -1)))
+                if checkpoint_step < expected_steps or int(completion.get("optimizer_step_count", expected_steps)) < expected_steps:
+                    raise ValueError(f"completion step mismatch: checkpoint={checkpoint_step}, expected={expected_steps}")
+            except Exception as exc:
+                incompatible.append({"run": str(run), "error": f"completion verification failed: {exc}"})
+                continue
+            completed.append(item)
         else:
-            candidates.append(run)
-    if len(candidates)==1:
-        return candidates[0]
-    if not candidates:
-        raise RuntimeError("no compatible resume run found; mismatches=" + json.dumps(incompatible, sort_keys=True, default=str))
-    raise RuntimeError("multiple compatible resume runs found; refusing ambiguous resume: " + json.dumps([str(p) for p in candidates]))
+            incomplete.append(item)
+    if len(incomplete)>1:
+        raise RuntimeError("multiple compatible incomplete runs found; refusing ambiguous resume: " + json.dumps([str(p) for p, _ in incomplete]))
+    if completed:
+        if len(completed)>1:
+            raise RuntimeError("multiple compatible completed runs found; refusing ambiguous selection: " + json.dumps([str(p) for p, _ in completed]))
+        return "complete", *completed[0]
+    if incomplete:
+        return "resume", *incomplete[0]
+    return "new", arm_dir, {"incompatible_runs": incompatible}
 
 
 class TrainingExtension:
@@ -1026,6 +1061,7 @@ def run_scientific_single(
     resume: bool = False,
     immediate_projection_spectral: bool = False,
     allow_code_version_mismatch: bool = False,
+    audit_override_code_version_mismatch: bool = False,
 ) -> Path:
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
@@ -1201,6 +1237,14 @@ def run_scientific_single(
         "weightwatcher_diagnostic_configuration": {"detX": True, "randomize": True, "plot": False},
         "weightwatcher_diagnostic_outputs": {"per_layer_long_form": "spectral.csv", "run_level_aggregates": "weightwatcher_aggregates.csv"},
     }
+    code_version = _repository_version()
+    code_version.update({
+        "weightwatcher_version": _ww_version(),
+        "wwpgd_commit": WWPGD_COMMIT,
+        "torch_version": torch.__version__,
+        "optimizer_implementation_version": bundle.implementation_versions,
+    })
+    man.update(code_version)
     man.update(external_wwpgd_manifest_fields(extension_name in INTERVENTION_EXTENSIONS, cfg.wwpgd if extension_name in INTERVENTION_EXTENSIONS else None))
     if cached_mode:
         adaptive = cfg.wwpgd.adaptive
@@ -1240,9 +1284,21 @@ def run_scientific_single(
         "immediate_projection_spectral": immediate_projection_spectral,
         "resolved_optimizer_steps": steps,
     }
+    compatibility = _compatibility(cfg, data, init_hash, validation_probe_hash, training_probe_hash)
+    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": budget_target_tokens, "realized_tokens": realized_tokens, "resolved_optimizer_steps": steps, "optimizer_step_limit_source": optimizer_step_limit_source, "optimizer_fingerprint": man["optimizer_fingerprint"], **code_version})
+    resume_mismatches = {}
     if resume:
-        run_dir = _select_resume_run(run_parent / optimizer_name, expected_identity)
-        ckpt = run_dir / "checkpoints"
+        action, selected, resume_mismatches = _select_resume_run(run_parent / optimizer_name, expected_identity, compatibility, allow_code_version_mismatch=allow_code_version_mismatch)
+        if action == "complete":
+            _log_train_progress(f"verified and skipped completed run pair={pair_id} optimizer={optimizer_name} seed={seed} output={selected}")
+            return selected
+        if action == "resume":
+            run_dir = selected
+            ckpt = run_dir / "checkpoints"
+        else:
+            run_dir = unique_dir(run_parent / optimizer_name, "run")
+            ckpt = run_dir / "checkpoints"; ckpt.mkdir(parents=True, exist_ok=True)
+            resume = False
     else:
         run_dir = unique_dir(run_parent / optimizer_name, "run")
         ckpt = run_dir / "checkpoints"
@@ -1274,15 +1330,16 @@ def run_scientific_single(
     optimizer_step_count = 0
     wwpgd_call_count = 0
     projected_matrix_count = 0
-    compatibility = _compatibility(cfg, data, init_hash, validation_probe_hash, training_probe_hash)
-    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_version": _ww_version(), "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "wwpgd_commit": WWPGD_COMMIT if extension_name in INTERVENTION_EXTENSIONS else "", "git_commit": man.get("git_commit", "unknown"), "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": budget_target_tokens, "realized_tokens": realized_tokens, "resolved_optimizer_steps": steps, "optimizer_step_limit_source": optimizer_step_limit_source, "optimizer_fingerprint": man["optimizer_fingerprint"]})
     _log_train_progress(
         f"starting run level={level} token_multiplier={token_multiplier} pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} device={selected_device} output={run_dir}"
     )
     start_step = 1
     if resume:
         loaded = load_latest_checkpoint(run_dir)
-        assert_checkpoint_compatible(loaded, compatibility)
+        resume_mismatches = assert_checkpoint_compatible(loaded, compatibility, allow_code_version_mismatch=allow_code_version_mismatch)
+        if resume_mismatches:
+            audit = {"mismatches": resume_mismatches, "allowed": True, "audit_override": audit_override_code_version_mismatch, "publication_eligible": bool(audit_override_code_version_mismatch)}
+            write_json(run_dir / f"code_version_mismatch_{int(time.time_ns())}.json", audit)
         model.load_state_dict(loaded["model_state_dict"])
         bundle.load_state_dict(loaded.get("optimizer_state_dict", loaded.get("base_optimizer_state_dict")))
         if "training_reader_state" in loaded and hasattr(reader, "load_state_dict"):
@@ -1721,7 +1778,7 @@ def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, 
         manifest.update(plan_manifest(analysis_plan_path))
     return manifest
 
-def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False, analysis_plan_path: Path | None = None) -> Path:
+def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False, analysis_plan_path: Path | None = None, audit_override_code_version_mismatch: bool = False) -> Path:
     from wwgpt.data import load_prepared_scientific_data
     cfg = load_config(config_path, level)
     data = load_prepared_scientific_data(data_root, level, token_multiplier)
@@ -1740,7 +1797,7 @@ def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_
         for base in CANONICAL_TRIAL_BASES:
             for ext in ("none", "wwpgd"):
                 arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))
-                run_scientific_single(trial, make_arm_name(base, ext), seed, arm_cfg, data, trial_id, init_state, init_hash, level, token_multiplier, device, ww_interval, eval_interval, checkpoint_interval, spectral_interval, precision, resume, immediate_projection_spectral, allow_code_version_mismatch)
+                run_scientific_single(trial, make_arm_name(base, ext), seed, arm_cfg, data, trial_id, init_state, init_hash, level, token_multiplier, device, ww_interval, eval_interval, checkpoint_interval, spectral_interval, precision, resume, immediate_projection_spectral, allow_code_version_mismatch, audit_override_code_version_mismatch)
     return exp_root
 
 def run_multiseed_scientific(
@@ -1761,6 +1818,7 @@ def run_multiseed_scientific(
     extensions: list[str] | None = None,
     immediate_projection_spectral: bool = False,
     allow_code_version_mismatch: bool = False,
+    audit_override_code_version_mismatch: bool = False,
 ) -> Path:
     from wwgpt.data import load_prepared_scientific_data
 
@@ -1840,6 +1898,7 @@ def run_multiseed_scientific(
                 resume,
                 immediate_projection_spectral,
                 allow_code_version_mismatch,
+                audit_override_code_version_mismatch,
             )
         _log_train_progress(
             f"completed seed {seed_index}/{len(run_seeds)} seed={seed} pair={pair_id}"
