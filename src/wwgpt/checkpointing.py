@@ -6,7 +6,8 @@ import numpy as np
 import torch
 
 SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION = 2
-REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version","optimizer_fingerprint")
+CODE_VERSION_COMPAT = ("git_commit", "git_dirty", "weightwatcher_version", "wwpgd_commit", "torch_version", "optimizer_implementation_version")
+REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version","optimizer_fingerprint", *CODE_VERSION_COMPAT)
 
 
 def stable_hash(obj: Any) -> str:
@@ -134,10 +135,12 @@ def compatibility_mismatches(checkpoint: dict, expected: dict):
     got=checkpoint.get("compatibility",{})
     return {k:{"checkpoint":got.get(k),"expected":expected.get(k)} for k in REQUIRED_COMPAT if expected.get(k) is not None and got.get(k)!=expected.get(k)}
 
-def assert_checkpoint_compatible(checkpoint: dict, expected: dict) -> None:
+def assert_checkpoint_compatible(checkpoint: dict, expected: dict, *, allow_code_version_mismatch: bool = False) -> dict:
     mm=compatibility_mismatches(checkpoint, expected)
-    if mm:
+    blocking = {k: v for k, v in mm.items() if not (allow_code_version_mismatch and k in CODE_VERSION_COMPAT)}
+    if blocking:
         raise RuntimeError("checkpoint compatibility validation failed: "+json.dumps(mm, sort_keys=True, default=str))
+    return mm
 
 def inspect_checkpoint(path: Path):
     path=Path(path)

@@ -84,6 +84,9 @@ def _selected_checkpoint_ok(run: Path, man: dict, metrics: pd.DataFrame, complet
 
 def audit_arm(run: Path, required_arm: str | None = None) -> dict:
     run = Path(run); reasons = []
+    mismatch_audits = [json.loads(p.read_text()) for p in run.glob("code_version_mismatch_*.json")]
+    if any(not a.get("audit_override", False) for a in mismatch_audits):
+        reasons.append("unaudited_code_version_mismatch")
     man, err = _load_json(run / "manifest.json") if (run / "manifest.json").exists() else ({}, "missing_manifest")
     if err: reasons.append(err)
     complete, err = _load_json(run / "run_complete.json") if (run / "run_complete.json").exists() else ({}, "run_incomplete")
@@ -158,6 +161,8 @@ def audit_run(run: Path):
     if (run/'manifest.json').exists(): man=json.loads((run/'manifest.json').read_text())
     fixture=not man.get('valid_for_science', False) or man.get('dataset_name')=='local_fixture'
     if fixture: reasons.append('fixture_or_invalid_for_science')
+    mismatch_audits=[json.loads(p.read_text()) for p in run.glob('code_version_mismatch_*.json')]
+    if any(not a.get('audit_override', False) for a in mismatch_audits): reasons.append('unaudited_code_version_mismatch')
     imm=run/'wwpgd_projection_spectral.csv'
     valid_immediate=False
     if imm.exists():
