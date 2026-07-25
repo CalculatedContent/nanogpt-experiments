@@ -352,6 +352,8 @@ def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Pa
         paired_effect_estimates(paired, "loss").to_csv(out / "paired_validation_effect_estimates.csv", index=False)
     pd.DataFrame([{"status": "not_fit", "note": "no significance claim; no hypothesis test implemented"}]).to_csv(out / "scaling_fit_results.csv", index=False)
     (out / "analysis_manifest.json").write_text(json.dumps({"source": str(results_root), "completed_runs": len(runs)}))
+    from wwgpt.alpha_analysis import analyze_alpha_trajectories
+    analyze_alpha_trajectories(runs, out)
     if analysis_plan is not None:
         from wwgpt.acceleration_analysis import analyze_acceleration_results
         analyze_acceleration_results(results_root, out, analysis_plan)
