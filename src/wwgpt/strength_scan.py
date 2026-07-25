@@ -30,10 +30,6 @@ def format_strength_label(v: float) -> str:
     if '.' not in s: s += '.0'
     return 'strength_'+s.replace('.','p').replace('-','m')
 
-def target_alpha_to_q(target_alpha: float) -> float:
-    if target_alpha <= 1.0: raise ValueError('target_alpha must be > 1')
-    return 1.0/(target_alpha-1.0)
-
 def strength_config(cfg, strength: float):
     return replace(cfg, wwpgd=replace(cfg.wwpgd, enabled=True, strength=strength))
 
@@ -96,7 +92,7 @@ def run_strength_arm(seed_dir: Path, seed:int, strength:float, cfg, data, init_s
     return run
 
 def run_strength_scan(level:int, data_root:Path, results_root:Path, token_multiplier:int, seeds=None, strengths=None, config:Path|None=None, device=None, eval_interval=None, spectral_interval=None, checkpoint_interval=None, immediate_projection_spectral=True, resume=False, continue_on_error=True, scan_name='strength_scan', instability_loss_threshold=20.0, include_adamw_control=True, optimizer: str = "adamw"):
-    raise ValueError('run-strength-scan is retired: repository strength did not map to a documented external WW_PGD parameter, so scanning it would repeat identical projector settings under different labels. Use standard WWPGD or add an explicit ablation over a documented external parameter such as q or blend_eta.')
+    raise ValueError('run-strength-scan is retired: repository strength did not map to a documented external WW_PGD parameter, so scanning it would repeat identical projector settings under different labels. Use standard WWPGD or an explicitly documented intervention-strength ablation.')
     strengths=parse_strengths(strengths if isinstance(strengths,str) or strengths is None else ','.join(map(str,strengths))); seeds=seeds or [1337]
     cfg=load_config(config, level)
     try:

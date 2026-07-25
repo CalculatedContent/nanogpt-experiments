@@ -151,7 +151,7 @@ def fallback_spectral_summary(model: nn.Module, *, step: int = 0, tokens_seen: i
 @dataclass(frozen=True)
 class ExternalWWTailConfigSpec:
     enable_tail_pgd: bool = True
-    q: float = 1.0
+    internal_rank_exponent: float = 1.0
     blend_eta: float = 0.5
     cayley_eta: float = 0.25
     min_tail: int = 5
@@ -171,9 +171,12 @@ STANDARD_WWPGD_RAMP_EVENTS = 0
 
 
 def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSpec:
+    target_alpha = float(getattr(cfg, "target_alpha"))
+    if target_alpha <= 1.0:
+        raise ValueError("target_alpha must be greater than 1")
     return ExternalWWTailConfigSpec(
         enable_tail_pgd=True,
-        q=float(getattr(cfg, "q")),
+        internal_rank_exponent=1.0 / (target_alpha - 1.0),
         blend_eta=STANDARD_WWPGD_BLEND_ETA,
         cayley_eta=float(getattr(cfg, "cayley_eta")),
         min_tail=int(getattr(cfg, "min_tail")),
@@ -202,7 +205,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
     cfg = external_wwpgd_config_from_experiment(requested_cfg) if requested_cfg is not None else resolved_external_wwpgd_config()
     from dataclasses import asdict as _asdict
     requested = _asdict(requested_cfg) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
-    resolved = {k: v for k, v in vars(cfg).items() if not (k == "max_relative_frobenius_change" and v is None)}
+    resolved = {k: v for k, v in vars(cfg).items() if k != "internal_rank_exponent" and not (k == "max_relative_frobenius_change" and v is None)}
     return {
         "wwpgd_package": "ww_pgd",
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
@@ -210,7 +213,8 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
         "wwpgd_implementation": "ww_pgd",
         "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
         "wwpgd_adaptive_implementation": "nanogpt-experiments scales stock WW_PGD candidate displacements per layer",
-        "q": cfg.q,
+        "target_alpha": float(getattr(requested_cfg, "target_alpha", 2.0)),
+        "internal_rank_exponent_derivation": "1 / (target_alpha - 1)",
         "blend_eta": cfg.blend_eta,
         "cayley_eta": cfg.cayley_eta,
         "min_tail": cfg.min_tail,
@@ -235,7 +239,8 @@ def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
     config_cls = getattr(ww_pgd_module, "WWTailConfig")
     kwargs = {
         "enable_tail_pgd": cfg.enable_tail_pgd,
-        "q": cfg.q,
+        # The pinned dependency names this private adapter argument `q`.
+        "q": cfg.internal_rank_exponent,
         "blend_eta": cfg.blend_eta,
         "cayley_eta": cfg.cayley_eta,
         "min_tail": cfg.min_tail,
@@ -317,7 +322,7 @@ def build_stock_wwpgd_candidate(
     cfg = cfg or resolved_external_wwpgd_config()
     full_cfg = ExternalWWTailConfigSpec(
         enable_tail_pgd=cfg.enable_tail_pgd,
-        q=cfg.q,
+        internal_rank_exponent=cfg.internal_rank_exponent,
         blend_eta=cfg.blend_eta,
         cayley_eta=cfg.cayley_eta,
         min_tail=cfg.min_tail,
@@ -422,7 +427,7 @@ def apply_external_wwpgd(
             rows.append({"layer_name": name, "matrix_type": matrix_type(name), "block": block_index(name), "projection_event": event_index,
                 "scheduled_token_fraction": scheduled_token_fraction, "actual_step": actual_step, "actual_tokens_seen": actual_tokens_seen,
                 "projection_runtime": candidate.runtime / max(1, len(candidate.original_weights)), "wwpgd_implementation": "ww_pgd", "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
-                "wwpgd_package": "ww_pgd", "wwpgd_commit": WWPGD_COMMIT, "q": cfg.q, "blend_eta": cfg.blend_eta, "cayley_eta": cfg.cayley_eta, "min_tail": cfg.min_tail,
+                "wwpgd_package": "ww_pgd", "wwpgd_commit": WWPGD_COMMIT, "target_alpha": 1.0 + 1.0 / cfg.internal_rank_exponent, "blend_eta": cfg.blend_eta, "cayley_eta": cfg.cayley_eta, "min_tail": cfg.min_tail,
                 "warmup": 0, "ramp": 0, "use_detx": cfg.use_detx, "stock_candidate_changed": candidate.stock_candidate_changed.get(name, False),
                 "stock_candidate_relative_frobenius_change": candidate.original_to_candidate_relative_change.get(name, 0.0),
                 "combined_hardness_requested": req_h, "combined_hardness_applied": req_h * scale, "trust_region_limit": limit, "trust_region_scale": scale,

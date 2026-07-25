@@ -59,10 +59,20 @@ def tiny_model():
     return GPT(ModelConfig(n_layer=1, n_head=1, n_embd=64, block_size=8, vocab_size=32))
 
 
+def test_external_rank_exponent_is_derived_only_from_target_alpha():
+    from types import SimpleNamespace
+    from wwgpt.ww import external_wwpgd_config_from_experiment
+
+    cfg = external_wwpgd_config_from_experiment(SimpleNamespace(
+        target_alpha=3.0, cayley_eta=0.25, min_tail=5, use_detx=True
+    ))
+    assert cfg.internal_rank_exponent == 0.5
+
+
 def test_resolved_external_configuration_exact_values():
     cfg = resolved_external_wwpgd_config()
     assert cfg.enable_tail_pgd is True
-    assert cfg.q == 1.0
+    assert cfg.internal_rank_exponent == 1.0
     assert cfg.blend_eta == 0.5
     assert cfg.cayley_eta == 0.25
     assert cfg.min_tail == 5
@@ -174,11 +184,13 @@ def test_src_wwgpt_has_no_wwpgd_svd_calls():
 def test_manifest_records_requested_and_resolved_external_config():
     from wwgpt.ww import external_wwpgd_manifest_fields
 
-    cfg = WWPGDConfig(q=1.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
+    cfg = WWPGDConfig(target_alpha=2.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
     fields = external_wwpgd_manifest_fields(True, cfg)
 
     assert fields["blend_eta"] == 0.5
-    assert fields["q"] == 1.0
+    assert fields["target_alpha"] == 2.0
+    assert fields["internal_rank_exponent_derivation"] == "1 / (target_alpha - 1)"
+    assert "q" not in fields
     assert fields["cayley_eta"] == 0.25
     assert fields["min_tail"] == 5
     assert fields["warmup"] == 0
@@ -187,7 +199,6 @@ def test_manifest_records_requested_and_resolved_external_config():
     assert fields["requested_external_wwpgd_config"]["ramp_events"] == 0
     assert fields["resolved_external_wwpgd_config"] == {
         "enable_tail_pgd": True,
-        "q": 1.0,
         "blend_eta": 0.5,
         "cayley_eta": 0.25,
         "min_tail": 5,
@@ -213,19 +224,19 @@ def test_real_extension_passes_resolved_experiment_config_to_installed_package(m
 
     monkeypatch.setattr(ww_pgd, "ww_pgd_project", capture_projector)
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pd.DataFrame())
-    cfg = WWPGDConfig(q=1.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
+    cfg = WWPGDConfig(target_alpha=2.0, blend_eta=0.5, cayley_eta=0.25, min_tail=5, use_detx=True, warmup_events=0, ramp_events=0)
     ext = WWPGDExtension(cfg=cfg, interval=1)
     details, rows, _controller = ext.after_optimizer_step(model=tiny_model(), optimizer_step=1, total_optimizer_steps=1, tokens_seen=8)
 
     external_cfg = captured["cfg"]
     assert external_cfg.__class__ is ww_pgd.WWTailConfig
     assert external_cfg.blend_eta == 0.5
-    assert external_cfg.q == 1.0
+    assert external_cfg.q == 1.0  # private argument required by the pinned dependency
     assert external_cfg.cayley_eta == 0.25
     assert external_cfg.min_tail == 5
     assert external_cfg.warmup_epochs == 0
     assert external_cfg.ramp_epochs == 0
-    assert all(row["blend_eta"] == 0.5 and row["q"] == 1.0 and row["ramp"] == 0 for row in rows)
+    assert all(row["blend_eta"] == 0.5 and row["ramp"] == 0 for row in rows)
 
 
 def test_first_five_standard_wwpgd_calls_use_fixed_blend_eta(monkeypatch):

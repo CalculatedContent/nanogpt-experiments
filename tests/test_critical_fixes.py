@@ -14,7 +14,7 @@ from wwgpt.checkpointing import save_checkpoint, complete_test_checkpoint_state
 
 
 class DummyCfg:
-    q=1.0; target_alpha=2.0; strength=0.1; min_tail=1; blend_eta=.5; cayley_eta=.25; use_detx=True; warmup_events=0; ramp_events=0
+    target_alpha=2.0; strength=0.1; min_tail=1; blend_eta=.5; cayley_eta=.25; use_detx=True; warmup_events=0; ramp_events=0
 
 
 def test_immediate_projection_pairing_uses_layer_specific_pre_rows(monkeypatch):

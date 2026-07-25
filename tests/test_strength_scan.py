@@ -1,7 +1,7 @@
 from pathlib import Path
 import json, subprocess, sys
 import nbformat, pytest, torch, pandas as pd
-from wwgpt.strength_scan import parse_strengths, format_strength_label, target_alpha_to_q, strength_config, run_strength_scan, validate_scan_pairing
+from wwgpt.strength_scan import parse_strengths, format_strength_label, strength_config, run_strength_scan, validate_scan_pairing
 from wwgpt.config import ExperimentConfig
 from wwgpt.ww import external_projected_layer_names
 from wwgpt.model import GPT
@@ -14,11 +14,9 @@ def test_strength_parse_labels_validation():
     for bad in ['nan','inf','-0.1','1.1','0.1,0.10']:
         with pytest.raises(ValueError): parse_strengths(bad)
 
-def test_strength_config_immutable_and_q():
+def test_strength_config_is_immutable():
     cfg=ExperimentConfig(); new=strength_config(cfg,0.5)
     assert cfg.wwpgd.strength == 1.0 and new.wwpgd.strength == 0.5 and new is not cfg
-    assert target_alpha_to_q(2.0)==1.0
-    with pytest.raises(ValueError): target_alpha_to_q(1.0)
 
 def test_strength_scan_uses_external_layer_selector():
     m=GPT(ModelConfig(n_layer=1,n_head=1,n_embd=64,block_size=4,vocab_size=10))
