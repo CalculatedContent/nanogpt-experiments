@@ -238,6 +238,18 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
     invalid_extensions = [ext for ext in cfg.extensions if ext not in VALID_EXTENSIONS]
     if invalid_extensions:
         raise ValueError(f"unknown extension(s): {', '.join(invalid_extensions)}")
+    # ``run-multiseed`` selects arms from ExperimentConfig.extensions and only
+    # replaces wwpgd.extension immediately before launching each arm.  Validate
+    # the predeclared onset here as well as in validate_wwpgd_config(), otherwise
+    # a delayed arm listed alongside the other controls could silently fall back
+    # to step 1.
+    if "delayed_onset" in cfg.extensions and (
+        cfg.wwpgd.delayed_onset_step is None or cfg.wwpgd.delayed_onset_step < 1
+    ):
+        raise ValueError(
+            "wwpgd.delayed_onset_step must be a positive predeclared step "
+            "when extensions includes delayed_onset"
+        )
     if not cfg.dataset_revision:
         raise ValueError("dataset_revision must be configured; refusing unpinned dataset revision")
     if not cfg.dataset_split:
