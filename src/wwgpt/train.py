@@ -82,6 +82,19 @@ def _initial_minibatch_indices(tokens, block_size: int, batch_size: int, samplin
         return [int(x) for x in rng.integers(0, len(tokens) - block_size, size=batch_size)]
     return list(range(0, batch_size * block_size, block_size))
 
+
+def _expected_unique_sampled_positions(corpus_tokens: int, block_size: int,
+                                       processed_tokens: int) -> float:
+    """Expected corpus positions covered by independent random-window draws."""
+    windows = corpus_tokens - block_size
+    draws = processed_tokens // block_size
+    if windows <= 0 or draws <= 0:
+        return 0.0
+    # Position i is covered by this many legal window starts. Linearity of
+    # expectation avoids incorrectly treating overlapping samples as unique.
+    return float(sum(1.0 - (1.0 - min(i + 1, block_size, corpus_tokens - i, windows) / windows) ** draws
+                     for i in range(corpus_tokens)))
+
 def _repository_version() -> dict[str, object]:
     """Return the exact source-tree identity used by checkpoint compatibility."""
     root = Path(__file__).resolve().parents[2]
@@ -1196,6 +1209,15 @@ def run_scientific_single(
         "resolved_stochastic_seeds": resolved_seeds,
         "initial_minibatch_indices": initial_minibatch_indices,
         "training_sampling": cfg.train.training_sampling,
+        "sampling_with_replacement": cfg.train.training_sampling == "random_window",
+        "unique_training_token_guarantee": ("none" if cfg.train.training_sampling == "random_window"
+                                              else "non_repeating_sequential_positions"),
+        "window_overlap_possible": cfg.train.training_sampling == "random_window",
+        "actual_tokens_processed": realized_tokens,
+        "unique_prepared_corpus_tokens": len(data.train),
+        "expected_unique_sampled_positions": (_expected_unique_sampled_positions(
+            len(data.train), cfg.model.block_size, realized_tokens)
+            if cfg.train.training_sampling == "random_window" else min(realized_tokens, len(data.train))),
         "evaluation_sampling": cfg.train.evaluation_sampling,
         "evaluation_schedule_version": "random_per_eval_v1",
         "lr_schedule": cfg.train.lr_schedule,
@@ -1799,7 +1821,7 @@ def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, 
 def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False, analysis_plan_path: Path | None = None, audit_override_code_version_mismatch: bool = False) -> Path:
     from wwgpt.data import load_prepared_scientific_data
     cfg = load_config(config_path, level)
-    data = load_prepared_scientific_data(data_root, level, token_multiplier)
+    data = load_prepared_scientific_data(data_root, level, token_multiplier, config_path) if config_path is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
     exp_root.mkdir(parents=True, exist_ok=True)
     for seed in (seeds or cfg.seeds):
@@ -1841,7 +1863,7 @@ def run_multiseed_scientific(
     from wwgpt.data import load_prepared_scientific_data
 
     cfg = load_config(config_path, level)
-    data = load_prepared_scientific_data(data_root, level, token_multiplier)
+    data = load_prepared_scientific_data(data_root, level, token_multiplier, config_path) if config_path is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = (
         results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
     )

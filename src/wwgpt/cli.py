@@ -9,7 +9,7 @@ import yaml
 
 from wwgpt.analysis import analyze_results
 from wwgpt.config import DEFAULT_SEEDS
-from wwgpt.data import prepare_scientific_data
+from wwgpt.data import prepare_data_for_mode
 from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
 from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
 from wwgpt.strength_scan import run_strength_scan, parse_strengths
@@ -294,11 +294,11 @@ def main() -> None:
     elif args.cmd=="prepare-data":
         docs = args.docs_file.read_text().splitlines() if args.docs_file else None
         cfg = _resolved_config(args)
-        prep_dir = args.data_root / "fineweb_edu" / f"level_{args.level:02d}" / f"multiplier_{args.token_multiplier}"
+        prep_dir = args.data_root / (cfg.model.profile_name or "default") / cfg.data_mode
         _print_resolved_execution(args, arms=["prepare-data"], seeds=cfg.seeds, trials=1, output_dirs=[prep_dir], dry_run=args.dry_run)
         if args.dry_run:
             return
-        print(prepare_scientific_data(args.data_root, args.level, args.token_multiplier, _resolve_config_path(args), docs=docs, min_validation_tokens=1 if docs is not None else 100_000).root, flush=True)
+        print(prepare_data_for_mode(args.data_root, args.level, args.token_multiplier, _resolve_config_path(args), docs=docs, min_validation_tokens=1 if docs is not None else 100_000).root, flush=True)
         sys.stderr.flush()
         sys.stdout.flush()
         # Some streaming dataset backends can leave non-daemon workers alive after all artifacts

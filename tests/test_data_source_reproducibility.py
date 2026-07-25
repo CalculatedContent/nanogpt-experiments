@@ -70,7 +70,7 @@ def test_cli_prepare_data_propagates_configured_revision_without_full_download(t
         cwd=Path.cwd(),
         env={**os.environ, "PYTHONPATH": str(Path.cwd() / "src")},
     )
-    manifest_path = next(data_root.glob("fineweb_edu/level_00/multiplier_1/prepared_*/data_manifest.json"))
+    manifest_path = next(data_root.glob("*/fineweb_custom_bpe_scaling/level_00/multiplier_1/*/data_manifest.json"))
     assert json.loads(manifest_path.read_text())["dataset_revision"] == "cli-rev"
 
 
