@@ -13,6 +13,13 @@ SCIENTIFIC_SCHEMA_VERSION = 3
 MODEL_ARCHITECTURE_VERSION = "nanogpt_separate_qkv_tied_head_v2"
 VALID_BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
 VALID_EXTENSIONS = {"none", "wwpgd", "measurement_only", "norm_matched_sham", "delayed_onset"}
+VALID_LR_SCALE_RULES = {"fixed", "linear_batch", "sqrt_batch"}
+VALID_WWPGD_CANDIDATE_DEVICES = {"auto", "live", "cpu"}
+VALID_MATRIX_LR_ROLES = {
+    "token_embedding", "position_embedding", "attention_key", "attention_query",
+    "attention_value", "attention_projection", "mlp_input", "mlp_output",
+    "block_layernorm", "final_layernorm", "lm_head", "other", "block_other",
+}
 
 
 
@@ -59,6 +66,10 @@ class TrainConfig:
     llrd_gamma: float | None = None
     llrd_min_multiplier: float = 0.50
     matrix_lr_multipliers: dict[str, float] = field(default_factory=dict)
+    # Standard batch-size scaling heuristics. The default preserves the
+    # configured learning rate exactly. No automatic width scaling is applied.
+    lr_scale_rule: str = "fixed"
+    lr_reference_tokens_per_step: int = 4096
     muon_learning_rate: float = 2e-2
     muon_momentum: float = 0.95
     newton_schulz_steps: int = 5
@@ -77,6 +88,15 @@ class TrainConfig:
             raise ValueError(f"unknown lr_schedule {self.lr_schedule}")
         if self.layer_lr not in {"flat", "llrd", "manual"}:
             raise ValueError(f"unknown layer_lr {self.layer_lr}")
+        if self.lr_scale_rule not in VALID_LR_SCALE_RULES:
+            raise ValueError(f"unknown lr_scale_rule {self.lr_scale_rule}")
+        if self.lr_reference_tokens_per_step < 1:
+            raise ValueError("lr_reference_tokens_per_step must be positive")
+        unknown_roles = sorted(set(self.matrix_lr_multipliers) - VALID_MATRIX_LR_ROLES)
+        if unknown_roles:
+            raise ValueError(f"unknown matrix_lr_multipliers roles: {unknown_roles}")
+        if any(float(value) <= 0 for value in self.matrix_lr_multipliers.values()):
+            raise ValueError("matrix_lr_multipliers values must be positive")
         if self.test_evaluation_mode not in {"final_checkpoint", "diagnostic_periodic"}:
             raise ValueError(f"unknown test_evaluation_mode {self.test_evaluation_mode}")
         if not 0.0 <= self.warmup_ratio < 1.0:
@@ -98,6 +118,8 @@ class WWPGDConfig:
     blend_eta: float = 0.5
     cayley_eta: float = 0.25
     use_detx: bool = True
+    # auto uses CPU candidate generation on MPS/XLA and the live device on CPU/CUDA.
+    candidate_device: str = "auto"
     warmup_events: int = 0
     ramp_events: int = 0
     delayed_onset_step: int | None = None
@@ -193,6 +215,15 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError(f"unknown lr_schedule {cfg.lr_schedule}")
     if cfg.layer_lr not in {"flat", "llrd", "manual"}:
         raise ValueError(f"unknown layer_lr {cfg.layer_lr}")
+    if cfg.lr_scale_rule not in VALID_LR_SCALE_RULES:
+        raise ValueError(f"unknown lr_scale_rule {cfg.lr_scale_rule}")
+    if cfg.lr_reference_tokens_per_step < 1:
+        raise ValueError("train.lr_reference_tokens_per_step must be positive")
+    unknown_roles = sorted(set(cfg.matrix_lr_multipliers) - VALID_MATRIX_LR_ROLES)
+    if unknown_roles:
+        raise ValueError(f"unknown train.matrix_lr_multipliers roles: {unknown_roles}")
+    if any(float(value) <= 0 for value in cfg.matrix_lr_multipliers.values()):
+        raise ValueError("train.matrix_lr_multipliers values must be positive")
     if cfg.test_evaluation_mode not in {"final_checkpoint", "diagnostic_periodic"}:
         raise ValueError(f"unknown test_evaluation_mode {cfg.test_evaluation_mode}")
     if not 0.0 <= cfg.warmup_ratio < 1.0:
@@ -218,6 +249,10 @@ def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
         raise ValueError("wwpgd.min_tail must be >= 1")
     if cfg.extension not in VALID_EXTENSIONS:
         raise ValueError(f"unknown wwpgd.extension {cfg.extension}")
+    if cfg.candidate_device not in VALID_WWPGD_CANDIDATE_DEVICES:
+        raise ValueError(
+            "wwpgd.candidate_device must be auto, live, or cpu"
+        )
     validate_adaptive_config(cfg.adaptive, cfg.target_alpha)
     if cfg.extension == "delayed_onset" and (cfg.delayed_onset_step is None or cfg.delayed_onset_step < 1):
         raise ValueError("wwpgd.delayed_onset_step must be a positive predeclared step for delayed_onset")

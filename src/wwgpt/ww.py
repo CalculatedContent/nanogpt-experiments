@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import math
@@ -287,6 +288,7 @@ class ExternalWWTailConfigSpec:
     ramp_epochs: int = 0
     verbose: bool = False
     max_relative_frobenius_change: float | None = None
+    candidate_device: str = "auto"
 
 
 WWTailConfig = ExternalWWTailConfigSpec
@@ -317,6 +319,7 @@ def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSp
         ramp_epochs=STANDARD_WWPGD_RAMP_EVENTS,
         verbose=bool(getattr(cfg, "verbose", False)),
         max_relative_frobenius_change=getattr(cfg, "max_relative_frobenius_change", None),
+        candidate_device=str(getattr(cfg, "candidate_device", "auto")),
     )
 
 
@@ -360,6 +363,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
         "warmup": cfg.warmup_epochs,
         "ramp": cfg.ramp_epochs,
         "use_detx": cfg.use_detx,
+        "candidate_device": cfg.candidate_device,
         "requested_external_wwpgd_config": requested,
         "resolved_external_wwpgd_config": resolved,
     }
@@ -397,6 +401,9 @@ class StockWWPGDCandidate:
     stock_config: ExternalWWTailConfigSpec
     internal_diagnostics: list[dict[str, object]] = dataclasses.field(default_factory=list)
     stock_commit: str = WWPGD_COMMIT
+    candidate_execution_device: str = "live"
+    live_model_device: str = "cpu"
+    candidate_offloaded: bool = False
 
 
 def _module_by_name(model: nn.Module, layer_name: str) -> nn.Module | None:
@@ -417,6 +424,33 @@ def _selected_layer_selector(selected_names: set[str]):
             return None
         return _module_by_name(mm, layer_name)
     return layer_selector
+
+
+def _model_device(model: nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def resolve_candidate_execution_device(model: nn.Module, requested: str) -> str:
+    requested = str(requested or "auto").lower()
+    if requested not in {"auto", "live", "cpu"}:
+        raise ValueError("candidate_device must be auto, live, or cpu")
+    if requested == "cpu":
+        return "cpu"
+    if requested == "live":
+        return "live"
+    return "cpu" if _model_device(model).type in {"mps", "xla"} else "live"
+
+
+def _cpu_candidate_model(model: nn.Module) -> nn.Module:
+    clone = copy.deepcopy(model).to(torch.device("cpu"))
+    clone.load_state_dict(
+        {name: tensor.detach().cpu() for name, tensor in model.state_dict().items()}
+    )
+    clone.train(model.training)
+    return clone
 
 
 def build_stock_wwpgd_candidate(
@@ -440,45 +474,71 @@ def build_stock_wwpgd_candidate(
         ramp_epochs=cfg.ramp_epochs,
         verbose=cfg.verbose,
         max_relative_frobenius_change=cfg.max_relative_frobenius_change,
+        candidate_device=cfg.candidate_device,
     )
     ww_pgd_module = _external_wwpgd_module()
     projector = getattr(ww_pgd_module, "ww_pgd_project")
     _assert_stock_wwpgd_api(projector)
     selected_names = selected_names or set(external_projected_layer_names(model))
+    originals = {name: weight.detach().clone() for name, weight in projected_matrix_modules(model)}
+    live_device = _model_device(model)
+    execution_mode = resolve_candidate_execution_device(model, full_cfg.candidate_device)
+    execution_model = model if execution_mode == "live" else _cpu_candidate_model(model)
     selector = layer_selector or _selected_layer_selector(set(selected_names))
-    originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     start = time.perf_counter()
     candidates: dict[str, torch.Tensor] = {}
     result: dict[str, object] = {}
     try:
         with torch.no_grad():
             result = run_pip_wwpgd_candidate(
-                model, _external_config_object(ww_pgd_module, full_cfg),
-                epoch=event_index, num_epochs=max(event_index + 1, 1),
-                global_step=actual_step, layer_selector=selector,
+                execution_model,
+                _external_config_object(ww_pgd_module, full_cfg),
+                epoch=event_index,
+                num_epochs=max(event_index + 1, 1),
+                global_step=actual_step,
+                layer_selector=selector,
             )
-            candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
+            candidates = {
+                name: weight.detach().clone().cpu()
+                for name, weight in projected_matrix_modules(execution_model)
+            }
     finally:
-        with torch.no_grad():
-            for name, weight in projected_matrix_modules(model):
-                weight.copy_(originals[name].to(weight.device, dtype=weight.dtype))
-                if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
-                    raise RuntimeError(f"failed to restore original WW_PGD weight bitwise for {name}")
+        if execution_mode == "live":
+            with torch.no_grad():
+                for name, weight in projected_matrix_modules(model):
+                    weight.copy_(originals[name].to(weight.device, dtype=weight.dtype))
+                    if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
+                        raise RuntimeError(
+                            f"failed to restore original WW_PGD weight bitwise for {name}"
+                        )
     runtime = time.perf_counter() - start
+    missing_candidates = sorted(set(originals) - set(candidates))
+    if missing_candidates:
+        raise RuntimeError(f"WWPGD candidate is missing projected matrices: {missing_candidates}")
     ww_logs = result.get("ww_logs", [])
-    diagnostic_logs = result.get("diagnostic_logs", [])
-    usable = [x for x in ww_logs if isinstance(x, pd.DataFrame) and not x.empty]
+    diagnostic_logs = list(result.get("diagnostic_logs", []))
+    usable = [item for item in ww_logs if isinstance(item, pd.DataFrame) and not item.empty]
     if len(usable) != 1:
-        raise RuntimeError(f"stock WW_PGD candidate generation expected exactly one usable ww_logs DataFrame, got {len(usable)}")
-    rel: dict[str, float] = {}
+        raise RuntimeError(
+            "stock WW_PGD candidate generation expected exactly one usable "
+            f"ww_logs DataFrame, got {len(usable)}"
+        )
+    relative_change: dict[str, float] = {}
     changed: dict[str, bool] = {}
     with torch.no_grad():
-        for name, weight in projected_matrix_modules(model):
-            orig = originals[name].to(weight.device, dtype=weight.dtype)
-            cand = candidates[name].to(weight.device, dtype=weight.dtype)
-            disp = (cand - orig).float()
-            rel[name] = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
-            changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
+        for name, original in originals.items():
+            candidate = candidates[name].to(original.device, dtype=original.dtype)
+            displacement = (candidate - original).float()
+            relative_change[name] = float(
+                torch.linalg.norm(displacement)
+                / max(float(torch.linalg.norm(original.float())), 1e-12)
+            )
+            changed[name] = not torch.equal(candidates[name].cpu(), original.cpu())
+    common = {
+        "candidate_execution_device": execution_mode,
+        "live_model_device": str(live_device),
+        "candidate_offloaded": execution_mode != "live",
+    }
     if result.get("native_internal_diagnostics"):
         for row in diagnostic_logs:
             row.setdefault("diagnostics_schema_version", 1)
@@ -486,6 +546,7 @@ def build_stock_wwpgd_candidate(
             row.setdefault("native_internal_diagnostics", True)
             row.setdefault("valid_observable_diagnostic", True)
             row.setdefault("unsupported_internal_fields", json.dumps([]))
+            row.update(common)
     else:
         unsupported = [
             "k_pl", "k_detx", "k_star", "selected_lambda_threshold",
@@ -497,33 +558,55 @@ def build_stock_wwpgd_candidate(
         by_name = {str(row.get(name_column, "")): row for _, row in frame.iterrows()}
         for name, original in originals.items():
             observed = by_name.get(name, {})
-            diagnostic_logs.append({
-                "diagnostics_schema_version": 1,
-                "diagnostics_mode": "compatibility",
-                "native_internal_diagnostics": False,
-                "valid_observable_diagnostic": bool(math.isfinite(rel[name])),
-                "status": "unsupported_internal_fields",
-                "unsupported_internal_fields": json.dumps(unsupported),
-                "layer_name": name,
-                "layer_shape": list(original.shape),
-                "alpha": observed.get("alpha"), "D": observed.get("D"),
-                "xmin": observed.get("xmin"), "detX_num": observed.get("detX_num"),
-                "num_evals": observed.get("num_evals"),
-                "candidate_changed": changed[name],
-                "original_to_candidate_relative_frobenius_change": rel[name],
-                "original_frobenius_norm": float(original.float().norm()),
-                "candidate_frobenius_norm": float(candidates[name].float().norm()),
-                "target_alpha": full_cfg.target_alpha,
-                "candidate_relative_frobenius_change": rel[name],
-                "configured_blend_eta": full_cfg.blend_eta,
-                "configured_cayley_eta": full_cfg.cayley_eta,
-                "configured_min_tail": full_cfg.min_tail,
-                "configured_use_detx": full_cfg.use_detx,
-                "projection_runtime": runtime,
-                "warning_message": "private WWPGD internals are unsupported by the installed package",
-                **_WWPGD_PROVENANCE,
-            })
-    return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg, diagnostic_logs)
+            diagnostic_logs.append(
+                {
+                    "diagnostics_schema_version": 1,
+                    "diagnostics_mode": "compatibility",
+                    "native_internal_diagnostics": False,
+                    "valid_observable_diagnostic": bool(
+                        math.isfinite(relative_change[name])
+                    ),
+                    "status": "unsupported_internal_fields",
+                    "unsupported_internal_fields": json.dumps(unsupported),
+                    "layer_name": name,
+                    "layer_shape": list(original.shape),
+                    "alpha": observed.get("alpha"),
+                    "D": observed.get("D"),
+                    "xmin": observed.get("xmin"),
+                    "detX_num": observed.get("detX_num"),
+                    "num_evals": observed.get("num_evals"),
+                    "candidate_changed": changed[name],
+                    "original_to_candidate_relative_frobenius_change": relative_change[name],
+                    "original_frobenius_norm": float(original.float().norm()),
+                    "candidate_frobenius_norm": float(candidates[name].float().norm()),
+                    "target_alpha": full_cfg.target_alpha,
+                    "candidate_relative_frobenius_change": relative_change[name],
+                    "configured_blend_eta": full_cfg.blend_eta,
+                    "configured_cayley_eta": full_cfg.cayley_eta,
+                    "configured_min_tail": full_cfg.min_tail,
+                    "configured_use_detx": full_cfg.use_detx,
+                    "projection_runtime": runtime,
+                    "warning_message": (
+                        "private WWPGD internals are unsupported by the installed package"
+                    ),
+                    **common,
+                    **_WWPGD_PROVENANCE,
+                }
+            )
+    return StockWWPGDCandidate(
+        usable[0].copy(),
+        originals,
+        candidates,
+        relative_change,
+        changed,
+        runtime,
+        full_cfg,
+        diagnostic_logs,
+        WWPGD_COMMIT,
+        execution_mode,
+        str(live_device),
+        execution_mode != "live",
+    )
 
 
 def apply_external_wwpgd(

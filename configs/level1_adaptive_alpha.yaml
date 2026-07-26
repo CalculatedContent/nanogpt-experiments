@@ -60,6 +60,8 @@ train:
   min_lr_ratio: 0.1
   layer_lr: flat
   llrd_min_multiplier: 0.5
+  lr_scale_rule: fixed
+  lr_reference_tokens_per_step: 4096
   wwpgd_interval: 250
 wwpgd:
   enabled: true
@@ -69,6 +71,7 @@ wwpgd:
   cayley_eta: 0.25
   min_tail: 5
   use_detx: true
+  candidate_device: auto
   warmup_events: 0
   ramp_events: 0
   adaptive:

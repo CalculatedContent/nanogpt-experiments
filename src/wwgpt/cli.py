@@ -231,6 +231,8 @@ def _config_with_run_overrides(args):
         ("layer_lr", "layer_lr", train_updates),
         ("llrd_gamma", "llrd_gamma", train_updates),
         ("llrd_min_multiplier", "llrd_min_multiplier", train_updates),
+        ("lr_scale_rule", "lr_scale_rule", train_updates),
+        ("lr_reference_tokens_per_step", "lr_reference_tokens_per_step", train_updates),
         ("max_train_tokens", "max_train_tokens", train_updates),
         ("max_steps", "max_steps", train_updates),
         ("wwpgd_interval", "wwpgd_interval", train_updates),
@@ -257,6 +259,12 @@ def _config_with_run_overrides(args):
         if "=" not in item:
             raise SystemExit("--matrix-lr-multiplier requires ROLE=VALUE")
         role, value = item.split("=", 1)
+        from wwgpt.optim import VALID_PARAMETER_ROLES
+        if role not in VALID_PARAMETER_ROLES:
+            raise SystemExit(
+                f"unknown matrix learning-rate role {role!r}; "
+                f"expected one of {sorted(VALID_PARAMETER_ROLES)}"
+            )
         if not role or role in cli_matrix_roles:
             raise SystemExit(f"duplicate or empty matrix role: {role!r}")
         cli_matrix_roles.add(role)
@@ -265,7 +273,8 @@ def _config_with_run_overrides(args):
     if getattr(args, "matrix_lr_multiplier", []): train_updates["matrix_lr_multipliers"] = matrix
     for arg, key in [("target_alpha", "target_alpha"), ("wwpgd_blend_eta", "blend_eta"),
                      ("wwpgd_cayley_eta", "cayley_eta"), ("wwpgd_min_tail", "min_tail"),
-                     ("wwpgd_use_detx", "use_detx")]:
+                     ("wwpgd_use_detx", "use_detx"),
+                     ("wwpgd_candidate_device", "candidate_device")]:
         value = getattr(args, arg, None)
         if value is not None: wwpgd_updates[key] = value
     for arg, key in [("alpha_interval", "alpha_interval"),
@@ -273,7 +282,7 @@ def _config_with_run_overrides(args):
                      ("trap_randomize", "trap_randomize")]:
         value = getattr(args, arg, None)
         if value is not None: measurement_updates[key] = value
-    for arg, key in [("wwpgd_adaptive_mode","mode"),("wwpgd_alpha_response","response_curve"),("wwpgd_alpha_start_step","start_step"),("wwpgd_alpha_deadband","deadband_above_target"),("wwpgd_alpha_full_strength","full_strength_alpha"),("wwpgd_alpha_ema_beta","alpha_ema_beta"),("wwpgd_alpha_min_observations","min_observations"),("wwpgd_alpha_max_d","max_D"),("wwpgd_max_relative_change","max_relative_frobenius_change"),("wwpgd_alpha_max_hardness","max_hardness"),("wwpgd_apply_mode","apply_mode"),("wwpgd_apply_interval","apply_interval"),("wwpgd_max_per_step_gain","max_per_step_gain"),("wwpgd_per_step_max_relative_change","max_relative_frobenius_change_per_step"),("wwpgd_endpoint_stop_distance","endpoint_stop_relative_distance"),("wwpgd_max_endpoint_age","max_endpoint_age_steps"),("wwpgd_stale_distance_multiplier","stale_distance_multiplier"),("wwpgd_skip_fast_apply_on_measurement_step","skip_fast_apply_on_measurement_step"),("wwpgd_log_every_fast_step","log_every_fast_step")]:
+    for arg, key in [("wwpgd_adaptive_mode","mode"),("wwpgd_alpha_response","response_curve"),("wwpgd_alpha_start_step","start_step"),("wwpgd_alpha_deadband","deadband_above_target"),("wwpgd_alpha_full_strength","full_strength_alpha"),("wwpgd_alpha_ema_beta","alpha_ema_beta"),("wwpgd_alpha_min_observations","min_observations"),("wwpgd_alpha_max_d","max_D"),("wwpgd_max_relative_change","max_relative_frobenius_change"),("wwpgd_alpha_max_hardness","max_hardness"),("wwpgd_apply_mode","apply_mode"),("wwpgd_apply_interval","apply_interval"),("wwpgd_max_per_step_gain","max_per_step_gain"),("wwpgd_per_step_max_relative_change","max_relative_frobenius_change_per_step"),("wwpgd_endpoint_stop_distance","endpoint_stop_relative_distance"),("wwpgd_max_endpoint_age","max_endpoint_age_steps"),("wwpgd_stale_distance_multiplier","stale_distance_multiplier"),("wwpgd_skip_fast_apply_on_measurement_step","skip_fast_apply_on_measurement_step"),("wwpgd_log_every_fast_step","log_every_fast_step"),("wwpgd_dose_schedule","dose_schedule"),("wwpgd_max_endpoint_fraction_per_refresh","max_endpoint_fraction_per_refresh"),("wwpgd_max_cumulative_relative_change_per_refresh","max_cumulative_relative_frobenius_change_per_refresh")]:
         value = getattr(args, arg, None)
         if value is not None:
             adaptive_updates[key] = value
@@ -327,6 +336,8 @@ def main() -> None:
         parser.add_argument("--beta1", type=float); parser.add_argument("--beta2", type=float)
         parser.add_argument("--epsilon", type=float)
         parser.add_argument("--matrix-lr-multiplier", action="append", default=[])
+        parser.add_argument("--lr-scale-rule", choices=["fixed","linear_batch","sqrt_batch"])
+        parser.add_argument("--lr-reference-tokens-per-step", type=int)
         parser.add_argument("--muon-learning-rate", type=float); parser.add_argument("--muon-momentum", type=float)
         parser.add_argument("--muon-newton-schulz-steps", type=int)
         parser.add_argument("--stable-learning-rate", type=float); parser.add_argument("--stable-beta1", type=float)
@@ -335,6 +346,7 @@ def main() -> None:
         parser.add_argument("--target-alpha", type=float); parser.add_argument("--wwpgd-blend-eta", type=float)
         parser.add_argument("--wwpgd-cayley-eta", type=float); parser.add_argument("--wwpgd-min-tail", type=int)
         parser.add_argument("--wwpgd-use-detx", action=argparse.BooleanOptionalAction, default=None)
+        parser.add_argument("--wwpgd-candidate-device", choices=["auto","live","cpu"])
         parser.add_argument("--alpha-interval", type=int); parser.add_argument("--trap-diagnostic-interval", type=int)
         parser.add_argument("--trap-randomize", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--wwpgd-apply-mode", choices=["event_projection", "cached_endpoint_relaxation"])
@@ -346,9 +358,18 @@ def main() -> None:
         parser.add_argument("--wwpgd-stale-distance-multiplier", type=float)
         parser.add_argument("--wwpgd-skip-fast-apply-on-measurement-step", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--wwpgd-log-every-fast-step", action=argparse.BooleanOptionalAction, default=None)
+        parser.add_argument("--wwpgd-dose-schedule", choices=["bounded_refresh_fraction","fixed_per_step_gain"])
+        parser.add_argument("--wwpgd-max-endpoint-fraction-per-refresh", type=float)
+        parser.add_argument("--wwpgd-max-cumulative-relative-change-per-refresh", type=float)
     ic=sub.add_parser("inspect-checkpoint"); ic.add_argument("--checkpoint", type=Path, required=True)
     vr=sub.add_parser("validate-resume"); vr.add_argument("--run-dir", type=Path, required=True)
     dp=sub.add_parser("device-preflight"); dp.add_argument("--device", default="auto"); dp.add_argument("--output", type=Path, default=Path("."))
+    lr=sub.add_parser("local-readiness", help="validate a local Mac/CPU/CUDA environment with real pip-installed WeightWatcher and WWPGD")
+    lr.add_argument("--device", default="auto")
+    lr.add_argument("--levels", default="0,1,2")
+    lr.add_argument("--optimizers", default="adamw,stableadamw,muon")
+    lr.add_argument("--output", type=Path, default=Path("local-readiness"))
+    lr.add_argument("--skip-package-smoke", action="store_true")
     ae=sub.add_parser("audit-experiment"); ae.add_argument("--experiment-root", type=Path, required=True)
     gr=sub.add_parser("generate-reproducibility-report"); gr.add_argument("--experiment-root", type=Path, required=True); gr.add_argument("--strict", action="store_true")
     rn=sub.add_parser("run-notebooks"); rn.add_argument("--results-root", type=Path, required=True); rn.add_argument("--output-root", type=Path, required=True); rn.add_argument("--analysis-plan", type=Path); rn.add_argument("--profile", default=""); rn.add_argument("--level", type=int); rn.add_argument("--token-multiplier", type=int); rn.add_argument("--base-optimizer", default="adamw"); rn.add_argument("--notebooks", default="all"); rn.add_argument("--strict", action="store_true"); rn.add_argument("--run-analysis", action="store_true"); rn.add_argument("--reuse-existing-analysis", action=argparse.BooleanOptionalAction, default=True)
@@ -399,6 +420,14 @@ def main() -> None:
         import json; res=validate_resume(args.run_dir); print(json.dumps(res, indent=2, sort_keys=True, default=str)); raise SystemExit(0 if res.get("compatible") else 1)
     elif args.cmd=="device-preflight":
         import json; print(json.dumps(run_device_preflight(args.output, args.device), indent=2, sort_keys=True, default=str))
+    elif args.cmd=="local-readiness":
+        import json
+        from wwgpt.local_readiness import run_local_readiness
+        levels=[int(value) for value in args.levels.split(",") if value]
+        optimizers=[value for value in args.optimizers.split(",") if value]
+        report=run_local_readiness(args.output,args.device,levels,optimizers,not args.skip_package_smoke)
+        print(json.dumps(report,indent=2,sort_keys=True,default=str))
+        raise SystemExit(0 if report.get("ready") else 1)
     elif args.cmd=="audit-experiment": print(audit_experiment(args.experiment_root))
     elif args.cmd=="generate-reproducibility-report": print(write_reproducibility_report(args.experiment_root))
     elif args.cmd=="run-notebooks":
