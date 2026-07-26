@@ -1,0 +1,2 @@
+optimizer_step,tokens_seen,trap_layer_count,trap_layer_fraction
+10,1000,1,0.1666666667

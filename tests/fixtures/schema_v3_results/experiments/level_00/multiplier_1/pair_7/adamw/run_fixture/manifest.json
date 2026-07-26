@@ -1,0 +1,1 @@
+{"scientific_schema_version":3,"valid_for_science":false,"pair_id":"pair_7","seed":7,"optimizer":"adamw","arm_name":"adamw","base_optimizer":"adamw","extension":"none","measurement":{"alpha_interval":10}}

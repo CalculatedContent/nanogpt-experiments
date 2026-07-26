@@ -11,6 +11,21 @@ application, cumulative movement, counters, controller version, and adapter mode
 distance, physical relative movement, trust-region scale, convergence, and
 invalidation for fast actions. `num_evals` is never labeled as tail size.
 
+`wwpgd_fast_control_steps.csv` is the append-only step-level schedule ledger. It
+contains exactly one row for every scheduled cached-control attempt, including
+measurement-step status, active endpoint count, changed layer count, whether any
+change occurred, and an explicit skip reason. Schedule integrity uses this file,
+not the optional per-layer relaxation rows. The run manifest records the actual
+top-level `measurement.alpha_interval` used to audit slow measurements.
+
+An analysis plan supplied to `run-multiseed` or `run-canonical-trials` is hashed
+from its exact bytes before training. Its path, SHA-256, mode, paired-seed
+requirement, thresholds, and primary outcomes are copied into pair/trial and arm
+manifests. Confirmatory analysis writes `analysis_eligibility.json` and refuses
+to proceed unless the supplied hash matches and every analyzed optimizer has the
+required number of complete seed pairs. Exploratory analysis requires only one
+positive complete pair.
+
 Schema v3 composes a base optimizer (`adamw`, `muon`, `stableadamw`) with an extension (`none`, `wwpgd`). Canonical arms are `adamw`, `adamw_wwpgd`, `muon`, `muon_wwpgd`, `stableadamw`, and `stableadamw_wwpgd`; paired effects compare the same base optimizer with and without WW-PGD.
 
 Base optimizers are authoritative and pairable. `adamw` uses standard `torch.optim.AdamW` with one documented parameter group per trainable parameter. `muon` uses the repository implementation matching the KellerJordan/modded-nanogpt Muon update with the Newton-Schulz coefficients recorded in `MUON_IMPLEMENTATION_VERSION`. `stableadamw` uses `optimi.StableAdamW` from the `torch-optimi` package, and run manifests record the installed package version. A requested optimizer construction failure is fatal; runs must not silently substitute AdamW for Muon or StableAdamW.
@@ -32,6 +47,12 @@ Every schema-v3 run manifest records a normalized base `optimizer_fingerprint` c
 Spectral diagnostics run independently of evaluation. Raw matrices include W_K, W_Q, W_V, W_O, W_MLP_IN, and W_MLP_OUT. Composite diagnostics include `KQ=W_K@W_Q`, `QK=W_Q@W_K`, `QK_effective=W_Q.T@W_K`, `KQ_effective=W_K.T@W_Q`, `OV=sum_h W_O,h@W_V,h`, `VO=W_V@W_O`, and `MLP_IO=W_MLP_OUT@W_MLP_IN`. Composite matrices are diagnostics only.
 
 Schema-v2 and schema-v3 runs remain readable, but analysis must not pool them in statistical comparisons because optimizer arms, architecture, evaluation sampling, and projection schedules differ.
+
+Schema-v3 reporting sources alpha trajectories from `alpha_measurements.csv`,
+selected-checkpoint test loss/perplexity/accuracy from
+`selected_checkpoint_metrics.json` (or its CSV twin), and normalized correlation
+trap counts/fractions from `weightwatcher_aggregates.csv`. Missing WeightWatcher
+fields stay missing; `detX_num` is not a correlation-trap metric.
 
 ## `wwpgd.adaptive`
 

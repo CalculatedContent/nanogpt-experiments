@@ -59,7 +59,7 @@ CONTROL_EXTENSIONS = {"measurement_only", "norm_matched_sham", "delayed_onset"}
 INCREMENTAL_ARTIFACTS = (
     "metrics.csv", "alpha_measurements.csv", "wwpgd_controller.csv",
     "wwpgd_endpoint_measurements.csv", "wwpgd_endpoint_relaxation.csv",
-    "wwpgd_projection.csv",
+    "wwpgd_fast_control_steps.csv", "wwpgd_projection.csv",
 )
 
 def artifact_commits(run_dir: Path) -> dict[str, dict[str, object]]:
@@ -268,6 +268,7 @@ class WWPGDExtension(TrainingExtension):
         self.endpoint_cache: dict[str, CachedLayerEndpoint] = {}
         self.measurement_rows: list[dict[str, object]] = []
         self.relaxation_rows: list[dict[str, object]] = []
+        self.fast_step_rows: list[dict[str, object]] = []
         self.counters = {"measurement_count": 0, "candidate_generation_count": 0,
                          "fast_control_step_count": 0, "changed_fast_control_step_count": 0,
                          "endpoint_convergence_count": 0, "endpoint_invalidation_count": 0,
@@ -285,6 +286,7 @@ class WWPGDExtension(TrainingExtension):
         self.endpoint_cache = dict(state.get("endpoint_cache", {}))
         self.measurement_rows = []
         self.relaxation_rows = []
+        self.fast_step_rows = []
         self.counters.update(state.get("counters", {}))
 
     def after_optimizer_step(
@@ -407,11 +409,15 @@ class WWPGDExtension(TrainingExtension):
         cfg = self.cfg.adaptive
         if cfg.apply_mode != "cached_endpoint_relaxation" or optimizer_step % cfg.apply_interval:
             return FastRelaxationResult([], [], 0, False)
-        cadence = resolve_endpoint_measurement_interval(cfg, measurement_interval or self.interval)
+        cadence = measurement_interval or resolve_endpoint_measurement_interval(cfg, self.interval)
         measurement_step = optimizer_step % cadence == 0 or (cfg.refresh_at_final_step and optimizer_step == total_optimizer_steps)
         if cfg.skip_fast_apply_on_measurement_step and measurement_step:
+            self.fast_step_rows.append({"optimizer_step": optimizer_step, "measurement_step": True,
+                "active_endpoint_count": sum(ep.active for ep in self.endpoint_cache.values()),
+                "changed_layer_count": 0, "any_change": False, "skip_reason": "measurement_step"})
             return FastRelaxationResult([], [], 0, False)
         self.counters["fast_control_step_count"] += 1
+        active_before = sum(ep.active for ep in self.endpoint_cache.values())
         live = dict(__import__("wwgpt.ww", fromlist=["projected_matrix_modules"]).projected_matrix_modules(model))
         rows = []
         changed_step = False
@@ -483,6 +489,10 @@ class WWPGDExtension(TrainingExtension):
             self.relaxation_rows.extend(r for r in rows if r.get("converged") or r.get("invalidated"))
         self.decision_rows.extend(rows)
         changed_rows = [row for row in rows if bool(row.get("changed"))]
+        self.fast_step_rows.append({"optimizer_step": optimizer_step, "measurement_step": measurement_step,
+            "active_endpoint_count": active_before, "changed_layer_count": len(changed_rows),
+            "any_change": changed_step,
+            "skip_reason": "no_active_endpoint" if active_before == 0 else ""})
         return FastRelaxationResult(rows, changed_rows, len(changed_rows), changed_step)
 
     def _terminal_fast_row(self, name, ep, step, reason, *, before=math.nan, converged=False):
@@ -500,7 +510,7 @@ class WWPGDExtension(TrainingExtension):
         """Refresh sample-and-hold alpha state and endpoints after reporting metrics."""
         cfg = self.cfg.adaptive
         if cfg.apply_mode != "cached_endpoint_relaxation": return EndpointMeasurementResult(None, [], [], False, 0, -1)
-        interval = resolve_endpoint_measurement_interval(cfg, measurement_interval or self.interval)
+        interval = measurement_interval or resolve_endpoint_measurement_interval(cfg, self.interval)
         due = optimizer_step % interval == 0 or (cfg.refresh_at_final_step and optimizer_step == total_optimizer_steps)
         if not (due or force): return EndpointMeasurementResult(None, [], [], False, 0, -1)
         from wwgpt.ww import _module_by_name
@@ -1131,6 +1141,7 @@ def run_scientific_single(
     immediate_projection_spectral: bool = False,
     allow_code_version_mismatch: bool = False,
     audit_override_code_version_mismatch: bool = False,
+    analysis_plan_manifest: dict[str, object] | None = None,
 ) -> Path:
     if optimizer_name in {"adamw_wwpgd_reference", "adamw_wwpgd"}:
         base_optimizer, extension_name = "adamw", "wwpgd"
@@ -1177,10 +1188,8 @@ def run_scientific_single(
                                            if cached_mode else [])
     if cached_mode and cfg.wwpgd.adaptive.refresh_at_final_step and steps not in expected_endpoint_measurement_steps:
         expected_endpoint_measurement_steps.append(steps)
-    expected_fast_apply_steps = ([step for step in range(cfg.wwpgd.adaptive.apply_interval, steps + 1,
-                                                         cfg.wwpgd.adaptive.apply_interval)
-                                  if not (cfg.wwpgd.adaptive.skip_fast_apply_on_measurement_step
-                                          and step in expected_endpoint_measurement_steps)] if cached_mode else [])
+    expected_fast_apply_steps = (list(range(cfg.wwpgd.adaptive.apply_interval, steps + 1,
+                                            cfg.wwpgd.adaptive.apply_interval)) if cached_mode else [])
     control_seed = stable_seed("wwgpt_control_seed_v1", seed, level, token_multiplier, base_optimizer, extension_name)
     if extension_name == "measurement_only":
         extension = MeasurementOnlyExtension(wwpgd_interval)
@@ -1316,7 +1325,10 @@ def run_scientific_single(
         "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False},
         "weightwatcher_diagnostic_configuration": {"detX": True, "randomize": True, "plot": False},
         "weightwatcher_diagnostic_outputs": {"per_layer_long_form": "spectral.csv", "run_level_aggregates": "weightwatcher_aggregates.csv"},
+        "measurement": {"alpha_interval": cfg.measurement.alpha_interval},
     }
+    if analysis_plan_manifest is not None:
+        man.update(analysis_plan_manifest)
     code_version = _repository_version()
     code_version.update({
         "weightwatcher_version": _ww_version(),
@@ -1415,7 +1427,7 @@ def run_scientific_single(
     lr_rows = []
     alpha_rows = []
     artifact_cursors = {"metrics": 0, "alpha": 0, "projection": 0, "controller": 0,
-                        "measurement": 0, "relaxation": 0}
+                        "measurement": 0, "relaxation": 0, "fast_steps": 0}
     best_validation_loss = float("inf")
     best_validation_step = 0
     latest_validation_loss = float("nan")
@@ -1475,6 +1487,7 @@ def run_scientific_single(
             "controller": ("wwpgd_controller.csv", controller_rows),
             "measurement": ("wwpgd_endpoint_measurements.csv", getattr(extension, "measurement_rows", [])),
             "relaxation": ("wwpgd_endpoint_relaxation.csv", getattr(extension, "relaxation_rows", [])),
+            "fast_steps": ("wwpgd_fast_control_steps.csv", getattr(extension, "fast_step_rows", [])),
         }
         for key, (name, rows) in streams.items():
             new = rows[artifact_cursors[key]:]
@@ -1907,10 +1920,12 @@ def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, 
 
 def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_multiplier: int, seeds: list[int] | None = None, config_path: Path | None = None, device: str | None = None, ww_interval: int | None = None, eval_interval: int | None = None, checkpoint_interval: int | None = None, spectral_interval: int | None = None, precision: str | None = None, resume: bool = False, immediate_projection_spectral: bool = False, allow_code_version_mismatch: bool = False, analysis_plan_path: Path | None = None, audit_override_code_version_mismatch: bool = False) -> Path:
     from wwgpt.data import load_prepared_scientific_data
+    from wwgpt.acceleration_analysis import plan_manifest
     cfg = load_config(config_path, level)
     data = load_prepared_scientific_data(data_root, level, token_multiplier, config_path) if config_path is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
     exp_root.mkdir(parents=True, exist_ok=True)
+    frozen_plan = plan_manifest(analysis_plan_path) if analysis_plan_path is not None else None
     for seed in (seeds or cfg.seeds):
         existing_trials = sorted(exp_root.glob(f"trial_{seed}*")) if resume else []
         trial = existing_trials[0] if existing_trials else unique_dir(exp_root, f"trial_{seed}")
@@ -1924,7 +1939,7 @@ def run_canonical_trials(level: int, data_root: Path, results_root: Path, token_
         for base in CANONICAL_TRIAL_BASES:
             for ext in ("none", "wwpgd"):
                 arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext == "wwpgd")))
-                run_scientific_single(trial, make_arm_name(base, ext), seed, arm_cfg, data, trial_id, init_state, init_hash, level, token_multiplier, device, ww_interval, eval_interval, checkpoint_interval, spectral_interval, precision, resume, immediate_projection_spectral, allow_code_version_mismatch, audit_override_code_version_mismatch)
+                run_scientific_single(trial, make_arm_name(base, ext), seed, arm_cfg, data, trial_id, init_state, init_hash, level, token_multiplier, device, ww_interval, eval_interval, checkpoint_interval, spectral_interval, precision, resume, immediate_projection_spectral, allow_code_version_mismatch, audit_override_code_version_mismatch, frozen_plan)
     return exp_root
 
 def run_multiseed_scientific(
@@ -1946,10 +1961,13 @@ def run_multiseed_scientific(
     immediate_projection_spectral: bool = False,
     allow_code_version_mismatch: bool = False,
     audit_override_code_version_mismatch: bool = False,
+    analysis_plan_path: Path | None = None,
 ) -> Path:
     from wwgpt.data import load_prepared_scientific_data
 
     cfg = load_config(config_path, level)
+    from wwgpt.acceleration_analysis import plan_manifest
+    frozen_plan = plan_manifest(analysis_plan_path) if analysis_plan_path is not None else None
     data = load_prepared_scientific_data(data_root, level, token_multiplier, config_path) if config_path is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = (
         results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
@@ -2001,7 +2019,7 @@ def run_multiseed_scientific(
                 "base_optimizer": optimizer,
                 "extensions": extensions or ["none", "wwpgd"],
                 "arms": [make_arm_name(optimizer, e) for e in (extensions or ["none", "wwpgd"])],
-                },
+                } | (frozen_plan or {}),
             )
         for ext in (extensions or ["none", "wwpgd"]):
             arm_cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, extension=ext, enabled=(ext in INTERVENTION_EXTENSIONS)))
@@ -2026,6 +2044,7 @@ def run_multiseed_scientific(
                 immediate_projection_spectral,
                 allow_code_version_mismatch,
                 audit_override_code_version_mismatch,
+                frozen_plan,
             )
         _log_train_progress(
             f"completed seed {seed_index}/{len(run_seeds)} seed={seed} pair={pair_id}"

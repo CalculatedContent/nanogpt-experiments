@@ -135,8 +135,8 @@ def _identity(man: dict) -> dict:
         "training_reader_seed": seeds.get("train_reader_seed", man.get("training_reader_seed")),
         "evaluation_schedule": (man.get("evaluation_sampling"), man.get("evaluation_schedule_version"), man.get("eval_interval", train.get("eval_interval"))),
         "probe_hashes": (man.get("training_probe_hash"), man.get("validation_probe_hash"), man.get("test_probe_hash")),
-        "analysis_plan_hash": man.get("analysis_plan_hash"), "target_alpha": man.get("target_alpha", (man.get("extension_hyperparameters") or {}).get("target_alpha")),
-        "measurement_schedule": (train.get("spectral_interval"), (man.get("extension_hyperparameters") or {}).get("measurement", {}).get("alpha_interval", train.get("spectral_interval"))),
+        "analysis_plan_hash": man.get("analysis_plan_sha256", man.get("analysis_plan_hash")), "target_alpha": man.get("target_alpha", (man.get("extension_hyperparameters") or {}).get("target_alpha")),
+        "measurement_schedule": (train.get("spectral_interval"), (man.get("measurement") or {}).get("alpha_interval")),
     }
 
 
@@ -168,24 +168,27 @@ def audit_arm(run: Path, required_arm: str | None = None) -> dict:
     elif extension == "wwpgd":
         if not man.get("wwpgd_implementation") or not man.get("wwpgd_commit"): reasons.append("missing_resolved_wwpgd_metadata")
         cached = man.get("adapter_mode") == "cached_endpoint_relaxation_v1" or man.get("projection_schedule_type") == "cached_endpoint_measurement_and_fast_apply"
-        required = projection_files[1:] if cached else projection_files[:1]
+        required = ("wwpgd_endpoint_measurements.csv", "wwpgd_fast_control_steps.csv") if cached else projection_files[:1]
         frames: dict[str, pd.DataFrame] = {}
         for filename in required:
             frame, ferr = _read_csv(run / filename) if (run / filename).exists() else (pd.DataFrame(), f"missing:{filename}")
             if ferr: reasons.append(f"missing_or_invalid_extension_artifact:{filename}")
             frames[filename] = frame
-        actions = pd.concat([f for f in frames.values() if not f.empty], ignore_index=True) if any(not f.empty for f in frames.values()) else pd.DataFrame()
-        if "layer_name" not in actions or any(not _eligible_action_name(n) for n in actions.get("layer_name", [])):
+        action_frames = [f for f in frames.values() if not f.empty and "layer_name" in f]
+        actions = pd.concat(action_frames, ignore_index=True) if action_frames else pd.DataFrame()
+        if actions.empty or any(not _eligible_action_name(n) for n in actions.get("layer_name", [])):
             reasons.append("extension_action_names_ineligible_matrix")
         if cached:
             measurement_steps = list(man.get("expected_endpoint_measurement_steps") or [])
             fast_steps = list(man.get("expected_fast_apply_steps") or [])
             measured = frames.get("wwpgd_endpoint_measurements.csv", pd.DataFrame())
-            relaxed = frames.get("wwpgd_endpoint_relaxation.csv", pd.DataFrame())
+            fast = frames.get("wwpgd_fast_control_steps.csv", pd.DataFrame())
             actual_measurements = sorted(set(measured.get("optimizer_step", pd.Series(dtype=int)).dropna().astype(int)))
-            actual_fast = sorted(set(relaxed.get("optimizer_step", pd.Series(dtype=int)).dropna().astype(int)))
+            actual_fast = fast.get("optimizer_step", pd.Series(dtype=int)).dropna().astype(int).tolist()
+            alpha_interval = (man.get("measurement") or {}).get("alpha_interval")
+            if alpha_interval != man.get("endpoint_measurement_interval"): reasons.append("manifest_measurement_interval_mismatch")
             if actual_measurements != sorted(measurement_steps) or int(complete.get("completed_measurement_count", -1)) != len(measurement_steps): reasons.append("slow_measurement_schedule_mismatch")
-            if actual_fast != sorted(fast_steps): reasons.append("fast_relaxation_schedule_mismatch")
+            if actual_fast != sorted(fast_steps) or len(actual_fast) != len(set(actual_fast)): reasons.append("fast_relaxation_schedule_mismatch")
         else:
             if int(complete.get("wwpgd_call_count", 0) or 0) <= 0: reasons.append("missing_wwpgd_call_count")
             if int(complete.get("projected_matrix_count", 0) or 0) <= 0: reasons.append("missing_projected_matrix_count")

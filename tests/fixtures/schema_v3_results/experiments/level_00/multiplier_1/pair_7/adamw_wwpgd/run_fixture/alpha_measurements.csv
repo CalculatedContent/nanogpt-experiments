@@ -1,0 +1,2 @@
+optimizer_step,tokens_seen,layer_name,alpha
+10,1000,blocks.0.attn.c_attn,2.4

@@ -1,0 +1,2 @@
+step,tokens_seen,train_loss,validation_loss
+10,1000,2.0,2.1
