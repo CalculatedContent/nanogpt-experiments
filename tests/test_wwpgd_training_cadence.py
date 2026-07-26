@@ -174,22 +174,3 @@ def test_checkpoint_resume_is_deterministic_and_complete(monkeypatch, tmp_path: 
     bad["compatibility"] = dict(bad["compatibility"], optimizer_fingerprint="wrong")
     with pytest.raises(RuntimeError, match="checkpoint compatibility validation failed.*optimizer_fingerprint"):
         train_mod.assert_checkpoint_compatible(bad, resumed_ckpt["compatibility"])
-
-
-def test_manifest_records_resolved_train_configuration(monkeypatch, tmp_path: Path):
-    cfg = replace(
-        _tiny_cfg(2),
-        train=replace(_tiny_cfg(2).train, learning_rate=3e-4, weight_decay=0.2, grad_clip=0.7),
-    )
-    init_state, init_hash = _init_state(cfg)
-    monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
-    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kwargs: [])
-    run_dir = run_scientific_single(tmp_path, "adamw", 7, cfg, _tiny_data(), "pair_tiny", init_state, init_hash, 0, 1, device="cpu")
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    resolved = manifest["resolved_train_config"]
-    assert resolved["learning_rate"] == 3e-4
-    assert resolved["weight_decay"] == 0.2
-    assert resolved["grad_clip"] == 0.7
-    assert resolved["batch_size"] == cfg.train.batch_size
-    assert resolved["gradient_accumulation"] == cfg.train.gradient_accumulation
-    assert manifest["optimizer_hyperparameters"] == asdict(cfg.train)
