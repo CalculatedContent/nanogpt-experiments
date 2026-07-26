@@ -65,7 +65,7 @@ jobs:
           python-version: '3.11'
       - name: Install package
         run: python -m pip install -e .
-      - name: Resolve Level 0, 1, and 2 pilot execution manifests
+      - name: Resolve and validate Level 0, 1, and 2 execution manifests
         shell: bash
         run: |
           set -euo pipefail
@@ -82,6 +82,31 @@ jobs:
               | tail -n +2 > "artifacts/resolved-pilot-manifests/level${level}.json"
             python -m json.tool "artifacts/resolved-pilot-manifests/level${level}.json" >/dev/null
           done
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          expected = {
+              0: (25, 75, 0.02),
+              1: (250, 500, 0.002049),
+              2: (1000, 3000, 0.000511),
+          }
+          for level, (interval, first_active, gain) in expected.items():
+              payload = json.loads(
+                  Path(f"artifacts/resolved-pilot-manifests/level{level}.json").read_text()
+              )
+              schedule = payload["wwpgd_adaptive_schedule"]
+              assert payload["endpoint_measurement_interval"] == interval
+              assert payload["endpoint_measurement_source"] == "measurement.alpha_interval"
+              assert schedule["first_possible_active_endpoint_step"] == first_active
+              assert abs(schedule["effective_base_gain"] - gain) <= max(
+                  1e-6, gain * 0.01
+              )
+              assert (
+                  schedule["worst_case_endpoint_fraction_per_refresh"]
+                  <= 0.40 + 1e-12
+              )
+          PY
       - name: Upload resolved pilot execution manifests
         uses: actions/upload-artifact@v4
         with:
@@ -121,6 +146,7 @@ jobs:
           test "$(find "$WWGPT_NOTEBOOK_OUTPUT_DIR/executed" -name '*.ipynb' | wc -l)" -eq 7
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/repository_validation.csv"
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/single_level_selected_metrics.csv"
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/cross_level_scaling_readiness.csv"
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/wwpgd_diagnostic_health.csv"
       - name: Upload executed notebooks and analysis outputs
         if: always()
