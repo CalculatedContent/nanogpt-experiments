@@ -4,7 +4,42 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
+  apply-readiness-integration:
+    name: apply readiness integration
+    if: github.head_ref == 'agent/fix-level12-experiment-workflow' && github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-level12-experiment-workflow
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply readiness source patch
+        run: python scripts/_agent_full_readiness_pass.py
+      - name: Install and validate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e ".[notebooks]"
+          python -m pip install pytest ruff
+          ruff check --fix src tests
+          python -m compileall -q src tests
+          ruff check src tests
+          pytest -q -m "not slow" --tb=short
+          git diff --check
+      - name: Commit validated source changes
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          git commit -m "Complete local Level 0-2 experiment readiness"
+          git push origin HEAD:agent/fix-level12-experiment-workflow
+
   quality:
     name: quality
     runs-on: ubuntu-latest
