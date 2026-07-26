@@ -375,6 +375,8 @@ def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Pa
     (out / "analysis_manifest.json").write_text(json.dumps({"source": str(results_root), "completed_runs": len(runs)}))
     from wwgpt.alpha_analysis import analyze_alpha_trajectories
     analyze_alpha_trajectories(runs, out)
+    from wwgpt.cross_level_analysis import analyze_cross_level_effects
+    analyze_cross_level_effects(results_root, out, figures_dir=out / "figures")
     if analysis_plan is not None:
         from wwgpt.acceleration_analysis import analyze_acceleration_results, verify_analysis_eligibility
         verify_analysis_eligibility(runs, out, analysis_plan)

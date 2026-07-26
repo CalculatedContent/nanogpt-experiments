@@ -112,13 +112,26 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
 
     cfg = _resolved_config(args)
     budget = _budget_summary(cfg, args.token_multiplier)
-    from wwgpt.adaptive_wwpgd import resolve_endpoint_measurement_interval
-    endpoint_interval = resolve_endpoint_measurement_interval(
-        cfg.wwpgd.adaptive, getattr(args, "eval_interval", None) or cfg.train.eval_interval
+    from wwgpt.adaptive_wwpgd import validate_adaptive_level_schedule
+    cached_endpoint_mode = (
+        cfg.wwpgd.enabled
+        and cfg.wwpgd.adaptive.apply_mode == "cached_endpoint_relaxation"
     )
-    endpoint_steps = list(range(endpoint_interval, budget["resolved_optimizer_steps"] + 1, endpoint_interval))
-    if cfg.wwpgd.adaptive.refresh_at_final_step and budget["resolved_optimizer_steps"] not in endpoint_steps:
-        endpoint_steps.append(budget["resolved_optimizer_steps"])
+    endpoint_interval = (
+        int(cfg.measurement.alpha_interval)
+        if cached_endpoint_mode
+        else _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args))
+    )
+    adaptive_schedule = (
+        validate_adaptive_level_schedule(
+            cfg.wwpgd.adaptive,
+            budget["resolved_optimizer_steps"],
+            endpoint_interval,
+        )
+        if cached_endpoint_mode
+        else {}
+    )
+    endpoint_steps = list(adaptive_schedule.get("measurement_steps", []))
     cli_max_steps = getattr(args, "max_steps", None)
     payload = {
         "dry_run": dry_run,
@@ -145,7 +158,12 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
         "estimated_projection_event_count": budget["estimated_optimizer_steps"] // _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)),
         "expected_scheduled_event_steps": list(range(_effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)), budget["estimated_optimizer_steps"] + 1, _effective_ww_interval(cfg, _resolve_ww_interval_aliases(args)))),
         "wwpgd_adaptive": asdict(cfg.wwpgd.adaptive),
-        "endpoint_measurement_source": cfg.wwpgd.adaptive.measurement_source,
+        "wwpgd_adaptive_schedule": adaptive_schedule,
+        "endpoint_measurement_source": (
+            "measurement.alpha_interval"
+            if cached_endpoint_mode
+            else cfg.wwpgd.adaptive.measurement_source
+        ),
         "endpoint_measurement_interval": endpoint_interval,
         "endpoint_apply_interval": cfg.wwpgd.adaptive.apply_interval,
         "expected_endpoint_measurement_steps": endpoint_steps,

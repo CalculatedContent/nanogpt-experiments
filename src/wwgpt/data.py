@@ -301,6 +301,36 @@ def _log_prepare_progress(message: str) -> None:
     print(f"[wwgpt prepare-data] {message}", file=sys.stderr, flush=True)
 
 
+def required_evaluation_tokens(cfg: ExperimentConfig) -> int:
+    """Tokens required to materialize the complete fixed evaluation probe."""
+    return int(cfg.train.eval_batches * cfg.train.batch_size * cfg.model.block_size + 1)
+
+
+def evaluation_probe_capacity(token_count: int, cfg: ExperimentConfig) -> int:
+    """Number of complete evaluation batches supported by a token split."""
+    tokens_per_batch = int(cfg.train.batch_size * cfg.model.block_size)
+    return max(0, (int(token_count) - 1) // max(tokens_per_batch, 1))
+
+
+def validate_evaluation_capacity(
+    data_manifest: dict[str, object], cfg: ExperimentConfig
+) -> None:
+    """Fail before training when validation or test probes cannot be built."""
+    required = required_evaluation_tokens(cfg)
+    for split, key in (("validation", "validation_tokens"), ("test", "test_tokens")):
+        value = data_manifest.get(key)
+        if value is None:
+            raise RuntimeError(
+                f"prepared data manifest is missing {key}; rebuild with `wwgpt prepare-data`"
+            )
+        count = int(value)
+        if count < required:
+            raise RuntimeError(
+                f"insufficient {split} tokens for configured evaluation: "
+                f"{count} < {required}; rebuild with `wwgpt prepare-data`"
+            )
+
+
 def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, config_path: Path | None = None, docs: Iterable[str] | None = None, min_validation_tokens: int = 100_000) -> TokenData:
     cfg = load_config(config_path, level)
     model = GPT(cfg.model)
@@ -311,8 +341,16 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
     budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
     realized = budget.realized_tokens
     needed_train = realized + 1
+    required_probe_tokens = required_evaluation_tokens(cfg)
+    required_validation_tokens = max(int(min_validation_tokens), required_probe_tokens)
+    required_test_tokens = required_probe_tokens
     prep = unique_dir(_profile_mode_root(data_root, cfg) / f"level_{level:02d}" / f"multiplier_{token_multiplier}", "staging")
-    _log_prepare_progress(f"starting level={level} token_multiplier={token_multiplier} requested_tokens={requested} realized_tokens={realized} output={prep}")
+    _log_prepare_progress(
+        f"starting level={level} token_multiplier={token_multiplier} "
+        f"requested_tokens={requested} realized_tokens={realized} "
+        f"required_validation_tokens={required_validation_tokens} "
+        f"required_test_tokens={required_test_tokens} output={prep}"
+    )
     dtype = token_dtype_for_vocab(cfg.model.vocab_size)
     source = docs if docs is not None else _iter_fineweb(cfg)
     train_docs: list[str] = []
@@ -360,9 +398,14 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
         now = time.monotonic(); docs_seen = sum(doc_counts.values())
         if writers and (now - last_log_time >= 30 or docs_seen - last_log_docs >= 10_000):
             elapsed = max(now - start_time, 1e-9)
-            _log_prepare_progress(f"progress docs={docs_seen} train_docs={doc_counts['train']} val_docs={doc_counts['val']} test_docs={doc_counts['test']} train_tokens={writers['train'].count}/{needed_train} val_tokens={writers['val'].count}/{min_validation_tokens} elapsed_s={elapsed:.1f} docs_per_s={docs_seen / elapsed:.1f}")
+            _log_prepare_progress(f"progress docs={docs_seen} train_docs={doc_counts['train']} val_docs={doc_counts['val']} test_docs={doc_counts['test']} train_tokens={writers['train'].count}/{needed_train} val_tokens={writers['val'].count}/{required_validation_tokens} test_tokens={writers['test'].count}/{required_test_tokens} elapsed_s={elapsed:.1f} docs_per_s={docs_seen / elapsed:.1f}")
             last_log_time = now; last_log_docs = docs_seen
-        if writers and writers["train"].count >= needed_train and writers["val"].count >= min_validation_tokens and writers["test"].count > 0:
+        if (
+            writers
+            and writers["train"].count >= needed_train
+            and writers["val"].count >= required_validation_tokens
+            and writers["test"].count >= required_test_tokens
+        ):
             _log_prepare_progress(f"collected enough tokens after docs={docs_seen}: train_tokens={writers['train'].count} val_tokens={writers['val'].count} test_tokens={writers['test'].count}")
             break
     if tok is None:
@@ -378,14 +421,20 @@ def prepare_scientific_data(data_root: Path, level: int, token_multiplier: int, 
         w.close()
     if writers["train"].count < needed_train:
         raise ValueError(f"insufficient unique training tokens: {writers['train'].count} < {needed_train}; refusing to wrap or repeat")
-    if writers["val"].count < 1:
-        raise ValueError("insufficient validation tokens")
-    if writers["test"].count < 1:
-        raise ValueError("insufficient test tokens")
+    if writers["val"].count < required_validation_tokens:
+        raise ValueError(
+            f"insufficient validation tokens for configured evaluation: "
+            f"{writers['val'].count} < {required_validation_tokens}"
+        )
+    if writers["test"].count < required_test_tokens:
+        raise ValueError(
+            f"insufficient test tokens for configured evaluation: "
+            f"{writers['test'].count} < {required_test_tokens}"
+        )
     tok_path = prep / "tokenizer.json"; tok.save(str(tok_path)); tokenizer_hash = _hash_file(tok_path)
     corpus_hash = sha256_bytes("\n".join(corpus_hashes).encode())
     splits_manifest = {sp: writers[sp].manifest() | {"documents": doc_counts[sp], "document_sha256": doc_hashes[sp]} for sp in ("train", "val", "test")}
-    data_manifest = {"scientific_schema_version": 4, "storage_format": "raw_memmap_v1", "dtype": dtype.name, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, None) | {"document_sha256": doc_hashes, "train_document_sha256": doc_hashes["train"], "validation_document_sha256": doc_hashes["val"], "test_document_sha256": doc_hashes["test"]}, "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-3way", "eot_between_documents": tok.token_to_id("<eos>"), "train_document_count": doc_counts["train"], "validation_document_count": doc_counts["val"], "test_document_count": doc_counts["test"], "unique_training_corpus_tokens": writers["train"].count, "validation_tokens": writers["val"].count, "test_tokens": writers["test"].count, "token_counts": {sp: writers[sp].count for sp in writers}, "shapes": {sp: [writers[sp].count] for sp in writers}, "splits": splits_manifest, "min_validation_tokens": min_validation_tokens, "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "selected_parameter_count": param_count, "realized_tokens_per_selected_parameter": realized / max(param_count, 1), "sequence_count": realized // cfg.model.block_size, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
+    data_manifest = {"scientific_schema_version": 4, "storage_format": "raw_memmap_v1", "dtype": dtype.name, "data_mode": "fineweb_custom_bpe_scaling", "model_architecture_version": cfg.model.model_architecture_version, "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_revision": cfg.dataset_revision, "split": cfg.dataset_split, "source_file_identifiers": _source_identifiers(cfg, None) | {"document_sha256": doc_hashes, "train_document_sha256": doc_hashes["train"], "validation_document_sha256": doc_hashes["val"], "test_document_sha256": doc_hashes["test"]}, "preparation_code_git_commit": _preparation_git_commit(), "document_assignment": "sha256-normalized-content-3way", "eot_between_documents": tok.token_to_id("<eos>"), "train_document_count": doc_counts["train"], "validation_document_count": doc_counts["val"], "test_document_count": doc_counts["test"], "unique_training_corpus_tokens": writers["train"].count, "validation_tokens": writers["val"].count, "test_tokens": writers["test"].count, "token_counts": {sp: writers[sp].count for sp in writers}, "shapes": {sp: [writers[sp].count] for sp in writers}, "splits": splits_manifest, "min_validation_tokens": min_validation_tokens, "required_validation_tokens": required_validation_tokens, "required_test_tokens": required_test_tokens, "validation_probe_capacity": evaluation_probe_capacity(writers["val"].count, cfg), "test_probe_capacity": evaluation_probe_capacity(writers["test"].count, cfg), "requested_tokens": requested, "realized_tokens": realized, "tokens_per_optimizer_step": tokens_per_step, "optimizer_steps": realized // tokens_per_step, "selected_parameter_count": param_count, "realized_tokens_per_selected_parameter": realized / max(param_count, 1), "sequence_count": realized // cfg.model.block_size, "tokenizer_hash": tokenizer_hash, "corpus_hash": corpus_hash, "valid_for_science": True, "smoke_test": False, "parameter_report": model.report_dict(), "parameter_count_convention": cfg.parameter_count_convention}
     tokenizer_manifest = {"tokenizer_type": "custom_bpe_scaling", "tokenizer_name": "tokenizers.ByteLevelBPE-trained-from-configured-training-split", "tokenizer_revision": "prepared-locally", "tokenizer_identity": {"type": "tokenizers", "model": "BPE", "pre_tokenizer": "ByteLevel", "hash": tokenizer_hash}, "experiment_label": "fineweb_custom_bpe_scaling", "not_reproduction_of_uploaded_fineweb_experiment": True, "vocabulary_size": cfg.model.vocab_size, "vocab_size": cfg.model.vocab_size, "vocabulary_hash": tokenizer_hash, "tokenizer_hash": tokenizer_hash, "special_token_ids": {s: tok.token_to_id(s) for s in ["<unk>", "<bos>", "<eos>", "<pad>"]}, "training_document_partition": "sha256-normalized-content", "dataset_name": cfg.dataset_name, "dataset_subset": cfg.dataset_subset or cfg.dataset_config, "dataset_config": cfg.dataset_config, "dataset_split": cfg.dataset_split, "dataset_revision": cfg.dataset_revision, "preparation_code_git_commit": _preparation_git_commit()}
     write_json(prep / "data_manifest.json", data_manifest); write_json(prep / "tokenizer_manifest.json", tokenizer_manifest)
     _validate_memmap_manifest(prep, data_manifest)
@@ -476,6 +525,7 @@ def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier:
         obsolete.append(prep)
     else:
         _validate_memmap_manifest(prep, dm)
+        validate_evaluation_capacity(dm, cfg)
         dtype = str(dm["dtype"]); splits = dm["splits"]
         train = _open_token_memmap(prep / splits["train"]["path"], dtype, int(splits["train"]["tokens"]))
         val = _open_token_memmap(prep / splits["val"]["path"], dtype, int(splits["val"]["tokens"]))
