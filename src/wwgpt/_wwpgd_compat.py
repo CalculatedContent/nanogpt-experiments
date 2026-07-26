@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import json
-import math
 import subprocess
 from importlib import metadata
 from pathlib import Path
@@ -55,7 +54,7 @@ def _distribution() -> metadata.Distribution | None:
 
 
 def resolve_wwpgd_provenance() -> dict[str, Any]:
-    """Describe the package pip actually installed without imposing a revision."""
+    """Describe the package pip installed without imposing a revision."""
     import ww_pgd
 
     dist = _distribution()
@@ -130,7 +129,11 @@ def _compatibility_diagnostic(
     data = _row_dict(row)
     weight = getattr(module, "weight", None)
     matrix_rows = int(weight.shape[0]) if weight is not None and weight.ndim >= 1 else None
-    matrix_columns = int(weight.reshape(weight.shape[0], -1).shape[1]) if weight is not None and weight.ndim >= 2 else None
+    matrix_columns = (
+        int(weight.reshape(weight.shape[0], -1).shape[1])
+        if weight is not None and weight.ndim >= 2
+        else None
+    )
     candidate_norm = float(weight.detach().float().norm().cpu()) if weight is not None else None
     reason = (
         "installed ww_pgd exposes ww_logs but not diagnostic_logs; exact internal "
@@ -151,7 +154,9 @@ def _compatibility_diagnostic(
         "changed": False,
         "matrix_rows": matrix_rows,
         "matrix_columns": matrix_columns,
-        "num_singular_values": min(matrix_rows, matrix_columns) if matrix_rows and matrix_columns else None,
+        "num_singular_values": (
+            min(matrix_rows, matrix_columns) if matrix_rows and matrix_columns else None
+        ),
         "original_weight_frobenius_norm": None,
         "candidate_weight_frobenius_norm": candidate_norm,
         "alpha": data.get("alpha"),
@@ -183,7 +188,7 @@ def _compatibility_diagnostic(
 
 
 def install_wwpgd_api_compatibility() -> dict[str, Any]:
-    """Make the pip-installed public WW-PGD API usable without requiring a fork."""
+    """Adapt the pip-installed public WW-PGD API without requiring a fork."""
     import ww_pgd
 
     provenance = resolve_wwpgd_provenance()
@@ -220,10 +225,10 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
         def recording_selector(mm, layer_name, row=None):
             if layer_selector is None:
                 return None
-            module = layer_selector(mm, layer_name, row)
-            if module is not None:
-                admitted.append((str(layer_name), row, module))
-            return module
+            selected_module = layer_selector(mm, layer_name, row)
+            if selected_module is not None:
+                admitted.append((str(layer_name), row, selected_module))
+            return selected_module
 
         original(
             model,
@@ -239,12 +244,12 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
                 _compatibility_diagnostic(
                     layer_name=name,
                     row=row,
-                    module=module,
+                    module=selected_module,
                     cfg=cfg,
                     epoch=int(epoch),
                     global_step=global_step,
                 )
-                for name, row, module in admitted
+                for name, row, selected_module in admitted
             )
 
     compatible_projector.__name__ = getattr(original, "__name__", "ww_pgd_project")
@@ -256,7 +261,7 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
 
 
 def patch_wwgpt_ww_module(ww_module: object, provenance: dict[str, Any]) -> None:
-    """Attach runtime provenance and candidate-level movement to compatibility rows."""
+    """Attach runtime provenance and candidate movement to diagnostic rows."""
     if getattr(ww_module, "__wwgpt_runtime_patched__", False):
         return
 
@@ -264,19 +269,24 @@ def patch_wwgpt_ww_module(ww_module: object, provenance: dict[str, Any]) -> None
         provenance.get("wwpgd_resolved_commit")
         or f"version:{provenance.get('wwpgd_installed_version', 'unknown')}"
     )
-    # Legacy code imports this name. It is now runtime provenance, never a pin.
+    # Legacy code imports this name. It is runtime provenance, never a dependency pin.
     ww_module.WWPGD_COMMIT = runtime_identifier
 
     original_manifest = ww_module.external_wwpgd_manifest_fields
 
-    def manifest_fields(enabled: bool = True, requested_cfg: object | None = None) -> dict[str, Any]:
+    def manifest_fields(
+        enabled: bool = True, requested_cfg: object | None = None
+    ) -> dict[str, Any]:
+        import ww_pgd
+
         fields = original_manifest(enabled, requested_cfg)
         fields.update(provenance)
         fields["wwpgd_commit"] = runtime_identifier if enabled else ""
         fields["wwpgd_dependency_pinned"] = False
+        projector = ww_pgd.ww_pgd_project
         fields["wwpgd_native_internal_diagnostics"] = bool(
-            "diagnostic_logs" in inspect.signature(__import__("ww_pgd").ww_pgd_project).parameters
-            and not getattr(__import__("ww_pgd").ww_pgd_project, "__wwgpt_compatibility_wrapper__", False)
+            "diagnostic_logs" in inspect.signature(projector).parameters
+            and not getattr(projector, "__wwgpt_compatibility_wrapper__", False)
         )
         return fields
 
@@ -295,10 +305,18 @@ def patch_wwgpt_ww_module(ww_module: object, provenance: dict[str, Any]) -> None
                 row["candidate_relative_frobenius_change"] = relative
             row["adapter_candidate_changed"] = changed
             row["wwpgd_resolved_commit"] = provenance.get("wwpgd_resolved_commit", "")
-            row["wwpgd_installed_version"] = provenance.get("wwpgd_installed_version", "unknown")
-            row["wwpgd_install_mode"] = provenance.get("wwpgd_install_mode", "installed-package")
+            row["wwpgd_installed_version"] = provenance.get(
+                "wwpgd_installed_version", "unknown"
+            )
+            row["wwpgd_install_mode"] = provenance.get(
+                "wwpgd_install_mode", "installed-package"
+            )
             rows.append(row)
-        return dataclasses.replace(candidate, internal_diagnostics=rows, stock_commit=runtime_identifier)
+        return dataclasses.replace(
+            candidate,
+            internal_diagnostics=rows,
+            stock_commit=runtime_identifier,
+        )
 
     ww_module.external_wwpgd_manifest_fields = manifest_fields
     ww_module.build_stock_wwpgd_candidate = build_candidate
