@@ -123,6 +123,21 @@ def _is_projected_name(layer_name: str) -> bool:
     return layer_name.startswith("blocks.") and layer_name.endswith(_PROJECTED_SUFFIXES)
 
 
+def _module_for_name(model: object, layer_name: str) -> object | None:
+    current = model
+    for part in layer_name.split("."):
+        if part.isdigit() and hasattr(current, "__getitem__"):
+            try:
+                current = current[int(part)]
+                continue
+            except (IndexError, KeyError, TypeError):
+                return None
+        if not hasattr(current, part):
+            return None
+        current = getattr(current, part)
+    return current if hasattr(current, "weight") else None
+
+
 def _compatibility_diagnostic(
     *,
     layer_name: str,
@@ -194,25 +209,25 @@ def _compatibility_diagnostic(
     return result
 
 
-def install_wwpgd_api_compatibility() -> dict[str, Any]:
-    """Adapt the pip-installed public WW-PGD API without requiring a fork."""
-    import ww_pgd
-
-    provenance = resolve_wwpgd_provenance()
-    projector = getattr(ww_pgd, "ww_pgd_project")
+def _ensure_projector_compatibility(ww_pgd_module: object) -> None:
+    projector = getattr(ww_pgd_module, "ww_pgd_project")
     if getattr(projector, "__wwgpt_compatibility_wrapper__", False):
-        return provenance
+        return
 
     signature = inspect.signature(projector)
+    has_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
     required = {"epoch", "num_epochs", "global_step", "ww_logs", "layer_selector"}
-    missing = sorted(required - set(signature.parameters))
+    missing = [] if has_kwargs else sorted(required - set(signature.parameters))
     if missing:
         raise RuntimeError(
             "the pip-installed ww_pgd package does not expose the required public API; "
             f"missing parameters: {missing}"
         )
     if "diagnostic_logs" in signature.parameters:
-        return provenance
+        return
 
     original = projector
 
@@ -245,6 +260,20 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
             ww_logs=ww_logs,
             layer_selector=recording_selector if layer_selector is not None else None,
         )
+
+        # Some lightweight test projectors populate ww_logs without invoking the
+        # selector. Recover only row identity and module shape; never rerun
+        # WeightWatcher or an SVD.
+        if not observed and ww_logs:
+            frames = [frame for frame in ww_logs if hasattr(frame, "iterrows")]
+            if frames:
+                frame = frames[-1]
+                key = "longname" if "longname" in frame.columns else "name"
+                for _, row in frame.iterrows():
+                    layer_name = str(row.get(key, ""))
+                    if _is_projected_name(layer_name):
+                        observed.append((layer_name, row, _module_for_name(model, layer_name)))
+
         if diagnostic_logs is not None:
             diagnostic_logs.extend(
                 _compatibility_diagnostic(
@@ -262,7 +291,15 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
     compatible_projector.__doc__ = getattr(original, "__doc__", None)
     compatible_projector.__wrapped__ = original
     compatible_projector.__wwgpt_compatibility_wrapper__ = True
-    ww_pgd.ww_pgd_project = compatible_projector
+    ww_pgd_module.ww_pgd_project = compatible_projector
+
+
+def install_wwpgd_api_compatibility() -> dict[str, Any]:
+    """Adapt the pip-installed public WW-PGD API without requiring a fork."""
+    import ww_pgd
+
+    provenance = resolve_wwpgd_provenance()
+    _ensure_projector_compatibility(ww_pgd)
     return provenance
 
 
@@ -299,6 +336,7 @@ def patch_wwgpt_ww_module(ww_module: object, provenance: dict[str, Any]) -> None
     original_build = ww_module.build_stock_wwpgd_candidate
 
     def build_candidate(*args, **kwargs):
+        _ensure_projector_compatibility(ww_module._external_wwpgd_module())
         candidate = original_build(*args, **kwargs)
         rows: list[dict[str, Any]] = []
         for raw in candidate.internal_diagnostics:
