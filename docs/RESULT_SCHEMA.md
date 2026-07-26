@@ -29,3 +29,14 @@ Current metrics files may use `tokens_processed`, `val_loss`, `elapsed_time`, an
 Current WW-PGD projection files use `projection_event`, `scheduled_token_fraction`, `actual_step`, `actual_tokens_seen`, `layer_name`, `hardness`, `projection_runtime`, `changed`, `skip_reason`, `relative_frobenius_change`, `relative_frobenius_weight_change`, `xmin`, `detX_num`, `tail_size`, `TraceLog_before`, `TraceLog_after`, `wwpgd_implementation`, and `wwpgd_commit`. Analysis preserves these fields and adds aliases `step`, `tokens_seen`, `trace_log_before`, and `trace_log_after`.
 
 Current WeightWatcher spectral files may identify layers with `longname` or `name` rather than `layer_name`. Scientific WeightWatcher analysis requires `spectral_estimator == "weightwatcher"` and preserves available fields including `alpha`, `weighted_alpha`, `xmin`, `xmax`, `D`/KS statistic, `num_evals`, `detX_num`, `detX_val`, `spectral_norm`, `stable_rank`, `mp_softrank`, `num_spikes`, `status`, `warning`, and `weightwatcher_version`. Projected transformer matrices are analyzed separately from embeddings, positional embeddings, `lm_head`, and other unprojected matrices.
+# WW-PGD internal diagnostics
+
+`wwpgd_internal_diagnostics.csv` is an append-only, checkpoint-reconciled artifact. Each row is
+emitted by WW_PGD for one selector-admitted matrix during a fresh stock candidate invocation.
+Missing calculations remain empty and skipped rows carry `skip_reason`; cached fast relaxation
+steps never synthesize rows. Its schema-version-1 columns are the union of identifiers and run
+metadata; matrix and pre-projection WeightWatcher fields; `k_pl`, `k_detx`, `k_star`, threshold and
+tail fields; TraceLog values before, target, Cayley, retraction, and final blend; Cayley ratio and
+clip statistics; and shaped/candidate movement fields. `trace_log_retraction_pass` applies only to
+the retracted shaped spectrum, never to final-blend drift. These values reuse the existing stock
+SVD and analysis.

@@ -192,6 +192,43 @@ def audit_arm(run: Path, required_arm: str | None = None) -> dict:
         else:
             if int(complete.get("wwpgd_call_count", 0) or 0) <= 0: reasons.append("missing_wwpgd_call_count")
             if int(complete.get("projected_matrix_count", 0) or 0) <= 0: reasons.append("missing_projected_matrix_count")
+        diagnostics_expected = int(man.get("wwpgd_diagnostics_schema_version", 0) or 0) == 1
+        stock_calls = int(complete.get("stock_wwpgd_invocation_count",
+                          complete.get("wwpgd_call_count", 0)) or 0) if diagnostics_expected else 0
+        diag_path = run / "wwpgd_internal_diagnostics.csv"
+        if stock_calls > 0 and not diag_path.exists():
+            reasons.append("missing_internal_diagnostics_after_stock_invocation")
+        elif diag_path.exists():
+            diag, derr = _read_csv(diag_path)
+            if derr or diag.empty:
+                reasons.append("missing_or_invalid_internal_diagnostics")
+            else:
+                versions = set(pd.to_numeric(diag.get("diagnostics_schema_version"), errors="coerce").dropna())
+                if versions != {1}: reasons.append("unsupported_wwpgd_diagnostics_schema_version")
+                if set(diag.get("wwpgd_commit", pd.Series(dtype=str)).dropna().astype(str)) != {str(man.get("wwpgd_commit"))}:
+                    reasons.append("internal_diagnostics_commit_mismatch")
+                if any(not _eligible_action_name(n) for n in diag.get("layer_name", [])):
+                    reasons.append("internal_diagnostic_layer_ineligible")
+                logical = [c for c in ("optimizer_step", "measurement_index", "projection_event", "layer_name") if c in diag]
+                if logical and diag.duplicated(logical).any(): reasons.append("duplicate_internal_diagnostic_rows")
+                valid = diag.get("valid_diagnostic", pd.Series(False, index=diag.index)).astype(str).str.lower().isin({"true", "1"})
+                successful = diag.get("status", pd.Series("", index=diag.index)).eq("projected")
+                finite_fields = ("selected_lambda_threshold", "trace_log_before", "trace_log_target",
+                    "trace_log_after_retraction", "trace_log_retraction_residual",
+                    "candidate_relative_frobenius_change")
+                if any((valid & ~pd.to_numeric(diag.get(c, pd.Series(math.nan, index=diag.index)), errors="coerce").map(math.isfinite)).any() for c in finite_fields):
+                    reasons.append("nonfinite_internal_diagnostic_values")
+                passed = diag.get("trace_log_retraction_pass", pd.Series(False, index=diag.index)).astype(str).str.lower().isin({"true", "1"})
+                if (successful & ~passed).any(): reasons.append("trace_log_retraction_failed")
+                tail = pd.to_numeric(diag.get("selected_tail_size"), errors="coerce")
+                minimum = pd.to_numeric(diag.get("configured_min_tail"), errors="coerce")
+                if (successful & (tail < minimum)).any(): reasons.append("successful_internal_tail_too_small")
+                changed = diag.get("changed", pd.Series(False, index=diag.index)).astype(str).str.lower().isin({"true", "1"})
+                movement = pd.to_numeric(diag.get("candidate_relative_frobenius_change"), errors="coerce")
+                if (changed & (~valid | ~(movement > 0))).any(): reasons.append("changed_matrix_without_valid_internal_diagnostic")
+                skipped = diag.get("status", pd.Series("", index=diag.index)).eq("skipped")
+                if (skipped & diag.get("skip_reason", pd.Series("", index=diag.index)).fillna("").eq("")).any():
+                    reasons.append("skipped_internal_diagnostic_missing_reason")
     else:
         reasons.append("unknown_extension")
 

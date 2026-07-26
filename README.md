@@ -93,6 +93,16 @@ Schema v3 separates a base optimizer from an extension. Canonical trials contain
 
 Adaptive and cached-endpoint modes are explicit ablations, not evidence of improved loss or generalization. Controller decisions are recorded separately from actual projection or relaxation moves, including requested/applied hardness, endpoint state, and trust-region clipping.
 
+WW-PGD internal diagnostics are written to `wwpgd_internal_diagnostics.csv` directly from the
+dependency's existing SVD, tail selection, Cayley update, TraceLog retraction, and blend; logging
+does not perform a second SVD or WeightWatcher analysis. Alpha and fit fields are pre-projection
+measurements. `trace_log_after_retraction` audits the invariant, while
+`trace_log_after_final_blend` is descriptive and need not equal the original. Cached-endpoint mode
+emits these rows only on endpoint refresh; fast moves remain in
+`wwpgd_endpoint_relaxation.csv`. The midpoint trajectory comprises `k_pl`, `k_detx`, `k_star`, and
+`selected_tail_size`. `target_alpha` is the only public spectral target; the external rank exponent
+is always derived as `1 / (target_alpha - 1)` and is never independently configured.
+
 ## Available analysis
 
 `wwgpt analyze-results RESULTS_ROOT` discovers completed runs, inventories them, selects auditable paired arms, computes per-seed terminal differences and descriptive uncertainty summaries, and analyzes measured alpha trajectories. It writes a `scaling_fit_results.csv` marker with status `not_fit`; no scaling fit or hypothesis test is implemented. Acceleration-analysis outputs are produced only when an explicit analysis plan is supplied and its prerequisites are met; their existence should not be described as a result without inspecting the generated artifacts.
