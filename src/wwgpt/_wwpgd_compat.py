@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 
+_PROJECTED_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
+
 _INTERNAL_ONLY_FIELDS = (
     "k_pl",
     "k_detx",
@@ -117,11 +119,15 @@ def _row_dict(row: object) -> dict[str, Any]:
     return {}
 
 
+def _is_projected_name(layer_name: str) -> bool:
+    return layer_name.startswith("blocks.") and layer_name.endswith(_PROJECTED_SUFFIXES)
+
+
 def _compatibility_diagnostic(
     *,
     layer_name: str,
     row: object,
-    module: object,
+    module: object | None,
     cfg: object,
     epoch: int,
     global_step: int | None,
@@ -144,6 +150,7 @@ def _compatibility_diagnostic(
         "source_package": "ww_pgd",
         "diagnostic_source": "ww_pgd_ww_logs_compatibility_adapter",
         "native_internal_diagnostics": False,
+        "selector_admitted": module is not None,
         "layer_name": layer_name,
         "global_step": global_step,
         "event_index": epoch,
@@ -220,14 +227,13 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
         layer_selector=None,
         diagnostic_logs=None,
     ) -> None:
-        admitted: list[tuple[str, object, object]] = []
+        observed: list[tuple[str, object, object | None]] = []
 
         def recording_selector(mm, layer_name, row=None):
-            if layer_selector is None:
-                return None
-            selected_module = layer_selector(mm, layer_name, row)
-            if selected_module is not None:
-                admitted.append((str(layer_name), row, selected_module))
+            selected_module = layer_selector(mm, layer_name, row) if layer_selector is not None else None
+            normalized_name = str(layer_name)
+            if _is_projected_name(normalized_name):
+                observed.append((normalized_name, row, selected_module))
             return selected_module
 
         original(
@@ -249,7 +255,7 @@ def install_wwpgd_api_compatibility() -> dict[str, Any]:
                     epoch=int(epoch),
                     global_step=global_step,
                 )
-                for name, row, selected_module in admitted
+                for name, row, selected_module in observed
             )
 
     compatible_projector.__name__ = getattr(original, "__name__", "ww_pgd_project")
