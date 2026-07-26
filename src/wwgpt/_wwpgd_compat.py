@@ -289,7 +289,7 @@ def _ensure_projector_compatibility(ww_pgd_module: object) -> None:
 
     compatible_projector.__name__ = getattr(original, "__name__", "ww_pgd_project")
     compatible_projector.__doc__ = getattr(original, "__doc__", None)
-    compatible_projector.__wrapped__ = original
+    compatible_projector.__wwgpt_original_projector__ = original
     compatible_projector.__wwgpt_compatibility_wrapper__ = True
     ww_pgd_module.ww_pgd_project = compatible_projector
 
