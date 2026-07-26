@@ -19,34 +19,30 @@ A smoke test checks infrastructure only and is invalid for scientific conclusion
 
 ## Pilot commands
 
-Prepare the pinned FineWeb-Edu data before launching these pilots (the quick-start
-`download_data.sh` command above does this). Each command runs one paired AdamW
-baseline/WW-PGD seed with the level-specific, `target_alpha: 2.0` cached-endpoint
-configuration. Replace the example data and results paths as needed.
+Prepare the pinned FineWeb-Edu data before launching these pilots. Each command runs a paired AdamW baseline/WW-PGD experiment with the level-specific, `target_alpha: 2.0` cached-endpoint configuration. Replace the example data and results paths as needed.
 
 **Level 0 pilot:**
 
 ```bash
-wwgpt run-multiseed --level 0 --config configs/level0_adaptive_alpha.yaml --analysis-plan configs/analysis_plan.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+wwgpt run-multiseed --level 0 --config configs/level0_adaptive_alpha.yaml --analysis-plan configs/analysis_plan_exploratory.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
 ```
 
 **Level 1 pilot:**
 
 ```bash
-wwgpt run-multiseed --level 1 --config configs/level1_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+wwgpt run-multiseed --level 1 --config configs/level1_adaptive_alpha.yaml --analysis-plan configs/analysis_plan_exploratory.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
 ```
 
 **Level 2 pilot:**
 
 ```bash
-wwgpt run-multiseed --level 2 --config configs/level2_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+wwgpt run-multiseed --level 2 --config configs/level2_adaptive_alpha.yaml --analysis-plan configs/analysis_plan_exploratory.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
 ```
 
-Run the preregistered paired acceleration and alpha-distance analyses only after
-both arms have completed:
+Run the paired acceleration and alpha-distance analyses only after both arms have completed:
 
 ```bash
-wwgpt analyze-results /path/to/results --profile scaling --analysis-plan configs/analysis_plan.yaml
+wwgpt analyze-results /path/to/results --profile scaling --analysis-plan configs/analysis_plan_exploratory.yaml
 ```
 
 Audit the same isolated experiment root before interpreting any output:
@@ -55,9 +51,13 @@ Audit the same isolated experiment root before interpreting any output:
 wwgpt audit-experiment --experiment-root /path/to/results
 ```
 
-These commands make the repository capable of testing whether WW-PGD accelerates
-generalization. They do **not** establish that it does; that claim requires analysis
-of actual eligible paired results.
+These commands make the repository capable of testing whether WW-PGD improves generalization. They do **not** establish that it does; that claim requires analysis of actual eligible paired results.
+
+## WW-PGD installation policy
+
+`python -m pip install -e .` installs WW-PGD through pip from the current default branch of `CalculatedContent/WW_PGD`. The dependency has no commit, tag, or branch pin. Each run records the package version and, when pip supplies PEP 610 VCS provenance, the commit that happened to be installed. That recorded commit is runtime metadata, not an installation requirement.
+
+The nanoGPT adapter targets the public `ww_pgd` API. When the installed package exposes a native `diagnostic_logs` sink, those internal rows are retained. When it exposes only its established `ww_logs` output, the repository installs a compatibility wrapper that preserves normal WW-PGD execution and records the available pre-projection WeightWatcher fields plus adapter-observed candidate movement. Exact internal midpoint, Cayley-ratio, and TraceLog-retraction fields remain explicitly unsupported in that case; they are never invented and their absence does not prevent the experiment from running.
 
 ## Public experiment interface
 
@@ -82,7 +82,7 @@ The source of truth is `configs/default.yaml`:
 - **Model ladder:** level 0 is `(layers=1, heads=1, width=64, block=256)`. Levels 1–4 are `(2,2,128)`, `(4,3,192)`, `(6,4,256)`, and `(8,5,320)`, preserving 64-dimensional heads.
 - **Data mode:** the scaling default is `fineweb_custom_bpe_scaling` over pinned `HuggingFaceFW/fineweb-edu` `sample-10BT`. Preparation deterministically splits normalized documents, keeps duplicates in one split, trains the custom BPE only on training documents, and records dataset/tokenizer identities. Local or synthetic text is for tests and smoke runs only.
 - **Token convention:** budgets use `parameter_count_convention: transformer_body`, not total or trainable parameter count. The selected count and realized tokens are recorded in each manifest. A multiplier such as 20 is an experiment budget convention, not a claimed optimum.
-- **Measurement cadence:** evaluation, alpha measurement, and trap diagnostics default to every 10 optimizer steps; checkpoints default to every 50 steps. Composite spectral analysis is disabled by default. WW-PGD event cadence is a separate optimizer-step schedule (default every step), and cached-endpoint mode separates expensive measurements from fast endpoint relaxation.
+- **Measurement cadence:** evaluation, alpha measurement, and trap diagnostics default to every 10 optimizer steps; checkpoints default to every 50 steps. Composite spectral analysis is disabled by default. WW-PGD event cadence is a separate optimizer-step schedule, and cached-endpoint mode separates expensive measurements from fast endpoint relaxation.
 - **Training:** batch size 16, gradient accumulation 1, dropout 0, flat layer learning rates, and warmup-cosine scheduling are the defaults.
 
 Resolved manifests, rather than this summary, are authoritative for any individual run.
@@ -93,19 +93,11 @@ Schema v3 separates a base optimizer from an extension. Canonical trials contain
 
 Adaptive and cached-endpoint modes are explicit ablations, not evidence of improved loss or generalization. Controller decisions are recorded separately from actual projection or relaxation moves, including requested/applied hardness, endpoint state, and trust-region clipping.
 
-WW-PGD internal diagnostics are written to `wwpgd_internal_diagnostics.csv` directly from the
-dependency's existing SVD, tail selection, Cayley update, TraceLog retraction, and blend; logging
-does not perform a second SVD or WeightWatcher analysis. Alpha and fit fields are pre-projection
-measurements. `trace_log_after_retraction` audits the invariant, while
-`trace_log_after_final_blend` is descriptive and need not equal the original. Cached-endpoint mode
-emits these rows only on endpoint refresh; fast moves remain in
-`wwpgd_endpoint_relaxation.csv`. The midpoint trajectory comprises `k_pl`, `k_detx`, `k_star`, and
-`selected_tail_size`. `target_alpha` is the only public spectral target; the external rank exponent
-is always derived as `1 / (target_alpha - 1)` and is never independently configured.
+`wwpgd_internal_diagnostics.csv` records the diagnostics exposed by the installed package at fresh stock-candidate events. Native rows may include tail midpoint, Cayley, and TraceLog quantities. Compatibility rows are labeled `native_internal_diagnostics: false`, preserve available WeightWatcher and candidate-movement data, and list unsupported internal fields explicitly. Cached fast moves remain in `wwpgd_endpoint_relaxation.csv` and never fabricate fresh SVD diagnostics.
 
 ## Available analysis
 
-`wwgpt analyze-results RESULTS_ROOT` discovers completed runs, inventories them, selects auditable paired arms, computes per-seed terminal differences and descriptive uncertainty summaries, and analyzes measured alpha trajectories. It writes a `scaling_fit_results.csv` marker with status `not_fit`; no scaling fit or hypothesis test is implemented. Acceleration-analysis outputs are produced only when an explicit analysis plan is supplied and its prerequisites are met; their existence should not be described as a result without inspecting the generated artifacts.
+`wwgpt analyze-results RESULTS_ROOT` discovers completed runs, inventories them, selects auditable paired arms, computes per-seed terminal differences and descriptive uncertainty summaries, and analyzes measured alpha trajectories. It writes a `scaling_fit_results.csv` marker with status `not_fit`; no scaling fit or efficacy conclusion is implied. Acceleration-analysis outputs are produced only when an explicit analysis plan is supplied and its prerequisites are met; their existence should not be described as a result without inspecting the generated artifacts.
 
 Retired nominal-strength artifacts are not accepted by a dedicated public analysis or audit interface. They must not be interpreted as controller-dose, target-alpha, or rank-exponent scans.
 
