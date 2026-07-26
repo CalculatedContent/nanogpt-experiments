@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/fix-level12-experiment-workflow
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
