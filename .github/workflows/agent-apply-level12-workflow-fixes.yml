@@ -33,9 +33,23 @@ jobs:
         if: steps.guard.outputs.apply == 'true'
         with:
           python-version: '3.11'
+      - name: Exclude CI workflow edit from bot-applied patch
+        if: steps.guard.outputs.apply == 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("scripts/_agent_apply_workflow_fixes.py")
+          text = path.read_text()
+          start = text.index('replace_once(\n    ".github/workflows/ci.yml",')
+          end = text.index('\n\nprint("Applied deterministic Level 0-2 workflow fixes")', start)
+          path.write_text(text[:start] + text[end:])
+          PY
       - name: Apply deterministic source patches
         if: steps.guard.outputs.apply == 'true'
         run: python scripts/_agent_apply_workflow_fixes.py
+      - name: Restore patch helper before commit
+        if: steps.guard.outputs.apply == 'true'
+        run: git checkout -- scripts/_agent_apply_workflow_fixes.py
       - name: Install package and test tools
         if: steps.guard.outputs.apply == 'true'
         run: |
