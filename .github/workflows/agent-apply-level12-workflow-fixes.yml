@@ -1,0 +1,46 @@
+name: Apply Level 0-2 workflow fixes
+
+on:
+  push:
+    branches:
+      - agent/fix-level12-experiment-workflow
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-level12-experiment-workflow
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply deterministic source patches
+        run: python scripts/_agent_apply_workflow_fixes.py
+      - name: Remove one-time patch machinery
+        run: |
+          rm scripts/_agent_apply_workflow_fixes.py
+          rm .github/workflows/agent-apply-level12-workflow-fixes.yml
+      - name: Install package and test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e ".[notebooks]"
+          python -m pip install pytest ruff
+      - name: Validate workflow changes
+        run: |
+          python -m compileall -q src tests
+          ruff check src tests
+          pytest -q -m "not slow" --tb=short
+          git diff --check
+      - name: Commit validated changes
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          git commit -m "Fix Level 0-2 experiment workflow"
+          git push origin HEAD:agent/fix-level12-experiment-workflow
