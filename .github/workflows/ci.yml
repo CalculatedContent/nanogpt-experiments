@@ -35,7 +35,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e . pytest
       - name: Run non-slow test suite
-        run: pytest -q -m "not slow"
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/test-logs
+          pytest -q -m "not slow" --tb=short 2>&1 | tee artifacts/test-logs/pytest.log
+      - name: Upload pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: non-slow-pytest-log
+          path: artifacts/test-logs/pytest.log
+          if-no-files-found: error
 
   resolved-pilot-manifests:
     name: resolved pilot manifests

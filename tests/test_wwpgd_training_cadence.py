@@ -59,7 +59,8 @@ def test_wwpgd_runs_once_per_successful_optimizer_step(monkeypatch, tmp_path: Pa
     steps = 3
     calls = []
 
-    def fake_apply(model, *, event_index, scheduled_token_fraction, actual_step, actual_tokens_seen, cfg):
+    def fake_apply(model, *, event_index, scheduled_token_fraction, actual_step, actual_tokens_seen, cfg, stock_candidate=None):
+        assert stock_candidate is not None
         calls.append(actual_step)
         return [
             {"projection_event": event_index, "layer_name": "blocks.0.attn.key"},
