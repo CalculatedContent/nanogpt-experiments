@@ -50,16 +50,19 @@ def test_real_level_configs_have_bounded_comparable_dose(
     assert schedule["first_possible_active_endpoint_step"] == first_active
     assert schedule["expected_endpoint_opportunities"] > 0
     assert schedule["effective_base_gain"] == pytest.approx(expected_gain, rel=5e-3)
-    assert schedule["worst_case_endpoint_fraction_per_refresh"] <= pytest.approx(
-        cfg.wwpgd.adaptive.max_endpoint_fraction_per_refresh,
-        abs=1e-12,
+    assert (
+        schedule["worst_case_endpoint_fraction_per_refresh"]
+        <= cfg.wwpgd.adaptive.max_endpoint_fraction_per_refresh + 1e-12
     )
     assert schedule["cumulative_refresh_cap"] == pytest.approx(0.025)
     assert schedule["per_step_frobenius_cap"] == pytest.approx(0.001)
 
 
 def test_effective_gain_decreases_with_longer_refresh_cadence() -> None:
-    configs = [load_config(Path(f"configs/level{level}_adaptive_alpha.yaml"), level) for level in range(3)]
+    configs = [
+        load_config(Path(f"configs/level{level}_adaptive_alpha.yaml"), level)
+        for level in range(3)
+    ]
     gains = [
         effective_base_gain(cfg.wwpgd.adaptive, cfg.measurement.alpha_interval)
         for cfg in configs
