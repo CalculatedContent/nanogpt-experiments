@@ -68,7 +68,7 @@ def test_paired_effects_never_cross_base_optimizer():
 def test_profile_isolation_and_no_composite_pooling_by_default(tmp_path: Path):
     _run(tmp_path / "repro", "pair_1", "adamw", "adamw", "none", 1, "reproduction_fineweb")
     _run(tmp_path / "scale", "pair_1", "adamw", "adamw", "none", 1, "scaling")
-    assert len(discover_canonical_runs(tmp_path / "repro")) == 0  # no within-base pair, not pooled
+    assert len(discover_canonical_runs(tmp_path / "repro")) == 0
     assert discover_canonical_runs(tmp_path) == []
 
 
@@ -88,17 +88,27 @@ def test_ci_workflow_contains_acceptance_commands():
         assert cmd in ci
 
 
-def test_ci_has_required_fixture_backed_analysis_notebook_job():
+def test_ci_has_required_schema_v3_papermill_notebook_job():
     ci = Path(".github/workflows/ci.yml").read_text()
     assert "analysis-notebooks:" in ci
     assert "continue-on-error" not in ci
     assert "|| true" not in ci
-    assert "pytest -q -m \"notebook\" tests/test_schema_v2_analysis.py::test_notebooks_parse_and_execute_fixture" in ci
-    assert "test_notebooks_synthetic.py" not in ci
+    assert "tests/fixtures/schema_v3_results" in ci
+    assert "./scripts/run_analysis_notebooks.sh" in ci
+    assert "schema-v2" not in ci
+    assert "test_schema_v2_analysis.py" not in ci
     assert "actions/upload-artifact" in ci
-    assert "if: failure()" in ci
-    for env_name in ["WWGPT_RESULTS_ROOT", "WWGPT_SCALING_ROOT", "MPLBACKEND"]:
+    assert "if: always()" in ci
+    for env_name in [
+        "WWGPT_RESULTS_ROOT",
+        "WWGPT_NOTEBOOK_OUTPUT_DIR",
+        "WWGPT_ANALYSIS_PLAN",
+        "WWGPT_LEVEL",
+        "WWGPT_TOKEN_MULTIPLIER",
+        "MPLBACKEND",
+    ]:
         assert env_name in ci
+
 
 def test_clean_install_imports_required_packages():
     import importlib
