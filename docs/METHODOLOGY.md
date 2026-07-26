@@ -16,7 +16,7 @@ This document describes the nanoGPT AdamW vs WW-PGD framework.
 
 Scientific spectral records now require the real WeightWatcher analyzer: `WeightWatcher(model=model).analyze(detX=True, randomize=False, plot=False)`. The legacy local SVD rank-regression estimator is quarantined for smoke tests only and is labeled `fallback_non_scientific`.
 
-The corrected WW-PGD arm is named `adamw_wwpgd_reference` and is pinned to `CalculatedContent/WW_PGD` commit `bf970cb6b73e977f8374114c442ae5b0589eccaa`. Projection events are scheduled only by the optimizer-step interval in `train.wwpgd_interval`. Event index maps to hardness through the functional warmup/ramp event controls: events before warmup have zero hardness; ramp events increase linearly as `(event - warmup + 1) / ramp_events`; subsequent events use full hardness.
+The corrected WW-PGD arm is named `adamw_wwpgd_reference` and uses the unpinned `ww-pgd` package installed by pip. The resolved package version and PEP 610 commit, when available, are runtime provenance rather than a dependency constraint. Projection events are scheduled only by the optimizer-step interval in `train.wwpgd_interval`. Event index maps to hardness through the functional warmup/ramp event controls: events before warmup have zero hardness; ramp events increase linearly as `(event - warmup + 1) / ramp_events`; subsequent events use full hardness.
 
 Eligible projected layers are only transformer matrices named `blocks.*.attn.key`, `blocks.*.attn.query`, `blocks.*.attn.value`, `blocks.*.attn.proj`, `blocks.*.mlp.0`, and `blocks.*.mlp.2`. Token embeddings, position embeddings, the tied output head, LayerNorm parameters, and biases are excluded.
 

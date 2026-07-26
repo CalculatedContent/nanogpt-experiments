@@ -21,3 +21,4 @@ analysis/
 *.arrow
 *.log
 .DS_Store
+*.egg-info/

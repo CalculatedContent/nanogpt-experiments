@@ -216,7 +216,7 @@ def test_manifest_records_requested_and_resolved_external_config():
     assert fields["requested_external_wwpgd_config"]["ramp_events"] == 0
     assert fields["resolved_external_wwpgd_config"] == {
         "enable_tail_pgd": True,
-        "target_alpha": 2.0,
+        "q": 1.0,
         "blend_eta": 0.5,
         "cayley_eta": 0.25,
         "min_tail": 5,
