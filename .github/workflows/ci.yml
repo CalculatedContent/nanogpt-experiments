@@ -37,6 +37,40 @@ jobs:
       - name: Run non-slow test suite
         run: pytest -q -m "not slow"
 
+  resolved-pilot-manifests:
+    name: resolved pilot manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package
+        run: python -m pip install -e .
+      - name: Resolve Level 0, 1, and 2 pilot execution manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/resolved-pilot-manifests
+          for level in 0 1 2; do
+            wwgpt run-multiseed \
+              --level "$level" \
+              --config "configs/level${level}_adaptive_alpha.yaml" \
+              --data-root /tmp/wwgpt-data \
+              --results-root /tmp/wwgpt-results \
+              --token-multiplier 20 \
+              --device cpu \
+              --dry-run \
+              | tail -n +2 > "artifacts/resolved-pilot-manifests/level${level}.json"
+            python -m json.tool "artifacts/resolved-pilot-manifests/level${level}.json" >/dev/null
+          done
+      - name: Upload resolved pilot execution manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: resolved-pilot-execution-manifests
+          path: artifacts/resolved-pilot-manifests/*.json
+          if-no-files-found: error
+
   analysis-notebooks:
     name: analysis-notebooks
     runs-on: ubuntu-latest

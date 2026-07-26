@@ -17,6 +17,48 @@ A smoke test checks infrastructure only and is invalid for scientific conclusion
 ./scripts/run_smoke_test.sh /tmp
 ```
 
+## Pilot commands
+
+Prepare the pinned FineWeb-Edu data before launching these pilots (the quick-start
+`download_data.sh` command above does this). Each command runs one paired AdamW
+baseline/WW-PGD seed with the level-specific, `target_alpha: 2.0` cached-endpoint
+configuration. Replace the example data and results paths as needed.
+
+**Level 0 pilot:**
+
+```bash
+wwgpt run-multiseed --level 0 --config configs/level0_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+```
+
+**Level 1 pilot:**
+
+```bash
+wwgpt run-multiseed --level 1 --config configs/level1_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+```
+
+**Level 2 pilot:**
+
+```bash
+wwgpt run-multiseed --level 2 --config configs/level2_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+```
+
+Run the preregistered paired acceleration and alpha-distance analyses only after
+both arms have completed:
+
+```bash
+wwgpt analyze-results /path/to/results --profile scaling --analysis-plan configs/analysis_plan.yaml
+```
+
+Audit the same isolated experiment root before interpreting any output:
+
+```bash
+wwgpt audit-experiment --experiment-root /path/to/results
+```
+
+These commands make the repository capable of testing whether WW-PGD accelerates
+generalization. They do **not** establish that it does; that claim requires analysis
+of actual eligible paired results.
+
 ## Public experiment interface
 
 `wwgpt prepare-data`, `wwgpt run-multiseed`, and `wwgpt run-canonical-trials` accept `--dry-run` and print the resolved configuration, trial and arm counts, seeds, token budget, estimated optimizer steps, and output location. `run-strength-scan` is retired and is not a CLI command: its nominal strength was not a scientifically defined projector parameter. It has not been replaced by a `q` scan or target-alpha scan.
