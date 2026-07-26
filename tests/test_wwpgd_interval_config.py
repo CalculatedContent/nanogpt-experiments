@@ -35,6 +35,7 @@ def test_extension_interval_cadences_and_skips(monkeypatch):
     calls = []
     pre_calls = []
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pre_calls.append("pre") or object())
+    monkeypatch.setattr("wwgpt.train.build_stock_wwpgd_candidate", lambda *args, **kwargs: SimpleNamespace(internal_diagnostics=[]))
     monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kw: calls.append(kw) or [{"projection_event": kw["event_index"], "actual_step": kw["actual_step"], "actual_tokens_seen": kw["actual_tokens_seen"], "layer_name": "fake"}])
 
     ext = WWPGDExtension(WWPGDConfig(), interval=2)
