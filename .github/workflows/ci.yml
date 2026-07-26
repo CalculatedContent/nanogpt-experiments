@@ -90,14 +90,19 @@ jobs:
           if-no-files-found: error
 
   analysis-notebooks:
-    name: analysis-notebooks
+    name: schema-v3 Papermill notebooks
     runs-on: ubuntu-latest
     env:
       MPLBACKEND: Agg
-      WWGPT_RESULTS_ROOT: tests/fixtures/schema_v2_results/experiments/level_00/multiplier_20
-      WWGPT_SCALING_ROOT: tests/fixtures/schema_v2_results
-      WWGPT_STRENGTH_SCAN_ROOT: tests/fixtures/strength_scan
-      WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/analysis-notebooks/executed
+      WWGPT_RESULTS_ROOT: tests/fixtures/schema_v3_results/experiments/level_00/multiplier_1
+      WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/analysis-notebooks
+      WWGPT_ANALYSIS_PLAN: configs/analysis_plan_exploratory.yaml
+      WWGPT_LEVEL: '0'
+      WWGPT_TOKEN_MULTIPLIER: '1'
+      WWGPT_BASE_OPTIMIZER: adamw
+      WWGPT_NOTEBOOK_STRICT: '0'
+      WWGPT_RUN_ANALYSIS: '0'
+      WWGPT_REUSE_ANALYSIS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -106,22 +111,21 @@ jobs:
       - name: Install package and notebook tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e . pytest nbclient nbformat ipykernel
-      - name: Execute fixture-backed analysis notebooks
+          python -m pip install --no-cache-dir -e ".[notebooks]"
+          python -m pip install pytest
+      - name: Execute all schema-v3 analysis notebooks through Papermill
         shell: bash
         run: |
-          set -o pipefail
-          mkdir -p artifacts/analysis-notebooks/logs "$WWGPT_NOTEBOOK_OUTPUT_DIR"
-          pytest -q -m "notebook" tests/test_schema_v2_analysis.py::test_notebooks_parse_and_execute_fixture 2>&1 | tee artifacts/analysis-notebooks/logs/pytest-notebooks.log
-      - name: Upload notebook failure artifacts
-        if: failure()
+          set -euo pipefail
+          ./scripts/run_analysis_notebooks.sh
+          test "$(find "$WWGPT_NOTEBOOK_OUTPUT_DIR/executed" -name '*.ipynb' | wc -l)" -eq 7
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/repository_validation.csv"
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/single_level_selected_metrics.csv"
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/wwpgd_diagnostic_health.csv"
+      - name: Upload executed notebooks and analysis outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: analysis-notebooks-failure-artifacts
-          path: |
-            artifacts/analysis-notebooks/**
-            tests/fixtures/schema_v2_results/**/analysis/**
-            tests/fixtures/schema_v2_results/**/figures/**
-            tests/fixtures/strength_scan/**/analysis/**
-            tests/fixtures/strength_scan/**/figures/**
-          if-no-files-found: warn
+          name: schema-v3-analysis-notebooks
+          path: artifacts/analysis-notebooks/**
+          if-no-files-found: error
