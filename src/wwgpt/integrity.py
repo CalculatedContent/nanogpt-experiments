@@ -260,7 +260,3 @@ def audit_experiment(root: Path) -> Path:
     report = ["# Integrity audit", ""] + [f"- {'PASS' if t['publication_eligible'] else 'FAIL'} {Path(t['trial_dir']).name}: {t['passed_arm_count']}/{t['required_arm_count']} arms passed" for t in trials]
     (analysis / "integrity_report.md").write_text("\n".join(report) + "\n")
     return output
-
-
-def audit_strength_scan(scan_root: Path) -> Path:
-    return audit_experiment(scan_root)

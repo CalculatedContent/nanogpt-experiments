@@ -17,12 +17,11 @@ def pytest_collection_modifyitems(config, items):
     integration_files = {
         "test_canonical_trials.py", "test_cli_execution_interface.py", "test_data_source_reproducibility.py",
         "test_pass5_dataset_e2e.py", "test_pass6_resume_analysis_cli_ci.py",
-        "test_schema_v2_analysis.py", "test_strength_scan.py", "test_wwpgd_training_cadence.py",
+        "test_schema_v2_analysis.py", "test_wwpgd_training_cadence.py",
     }
     accelerator_files = {"test_accelerator_device.py"}
     slow_tests = {
         "tests/test_core.py::test_notebooks_parse",
-        "tests/test_strength_scan.py::test_notebooks_parse_strength",
     }
 
     for item in items:

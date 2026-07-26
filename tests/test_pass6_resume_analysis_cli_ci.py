@@ -78,6 +78,8 @@ def test_cli_help_lists_profiles_and_commands():
     for text in ["reproduction_tiny", "reproduction_fineweb", "scaling", "run-multiseed", "analyze-results"]:
         assert text in help_text
     assert "run-strength-scan" not in help_text
+    assert "analyze-strength-scan" not in help_text
+    assert "audit-strength-scan" not in help_text
 
 
 def test_ci_workflow_contains_acceptance_commands():
@@ -95,7 +97,7 @@ def test_ci_has_required_fixture_backed_analysis_notebook_job():
     assert "test_notebooks_synthetic.py" not in ci
     assert "actions/upload-artifact" in ci
     assert "if: failure()" in ci
-    for env_name in ["WWGPT_RESULTS_ROOT", "WWGPT_SCALING_ROOT", "WWGPT_STRENGTH_SCAN_ROOT", "MPLBACKEND"]:
+    for env_name in ["WWGPT_RESULTS_ROOT", "WWGPT_SCALING_ROOT", "MPLBACKEND"]:
         assert env_name in ci
 
 def test_clean_install_imports_required_packages():

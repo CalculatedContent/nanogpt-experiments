@@ -55,14 +55,7 @@ Adaptive and cached-endpoint modes are explicit ablations, not evidence of impro
 
 `wwgpt analyze-results RESULTS_ROOT` discovers completed runs, inventories them, selects auditable paired arms, computes per-seed terminal differences and descriptive uncertainty summaries, and analyzes measured alpha trajectories. It writes a `scaling_fit_results.csv` marker with status `not_fit`; no scaling fit or hypothesis test is implemented. Acceleration-analysis outputs are produced only when an explicit analysis plan is supplied and its prerequisites are met; their existence should not be described as a result without inspecting the generated artifacts.
 
-Legacy strength-scan artifacts remain readable with:
-
-```bash
-wwgpt analyze-strength-scan --scan-root PATH
-wwgpt audit-strength-scan --scan-root PATH
-```
-
-These are compatibility analysis/audit commands, not experiment runners, and do not validate retired nominal-strength semantics. The legacy fixture-backed notebooks `07_strength_scan_overview.ipynb` and `08_strength_scan_weightwatcher.ipynb` likewise inspect existing artifacts only.
+Retired nominal-strength artifacts are not accepted by a dedicated public analysis or audit interface. They must not be interpreted as controller-dose, target-alpha, or rank-exponent scans.
 
 ## Resume and append-only behavior
 

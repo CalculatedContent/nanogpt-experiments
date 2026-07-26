@@ -56,7 +56,6 @@ def test_notebooks_parse_and_execute_fixture(tmp_path, monkeypatch):
     monkeypatch.setenv('MPLBACKEND', 'Agg')
     monkeypatch.setenv('WWGPT_RESULTS_ROOT', str(FIX))
     monkeypatch.setenv('WWGPT_SCALING_ROOT', str(FIX.parents[3]))
-    monkeypatch.setenv('WWGPT_STRENGTH_SCAN_ROOT', str(Path('tests/fixtures/strength_scan').resolve()))
     output_dir = Path(os.environ.get('WWGPT_NOTEBOOK_OUTPUT_DIR', tmp_path / 'executed_notebooks'))
     output_dir.mkdir(parents=True, exist_ok=True)
     notebooks = [
@@ -66,8 +65,6 @@ def test_notebooks_parse_and_execute_fixture(tmp_path, monkeypatch):
         Path('notebooks/04_scaling_laws.ipynb'),
         Path('notebooks/05_overfitting_and_generalization.ipynb'),
         Path('notebooks/06_summary_report.ipynb'),
-        Path('notebooks/07_strength_scan_overview.ipynb'),
-        Path('notebooks/08_strength_scan_weightwatcher.ipynb'),
     ]
     for nbp in notebooks:
         nb=nbformat.read(nbp, as_version=4)

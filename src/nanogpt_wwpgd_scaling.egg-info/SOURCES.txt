@@ -23,7 +23,6 @@ src/wwgpt/optim.py
 src/wwgpt/publication_plots.py
 src/wwgpt/reproducibility.py
 src/wwgpt/scaling.py
-src/wwgpt/strength_scan_analysis.py
 src/wwgpt/train.py
 src/wwgpt/utils.py
 src/wwgpt/ww.py
