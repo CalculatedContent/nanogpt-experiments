@@ -21,12 +21,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Disambiguate the train patch helper
+        run: python scripts/_fix_phase2_helper.py
       - name: Apply source changes
         shell: bash
         run: |
           set -o pipefail
           mkdir -p artifacts/phase2
           python scripts/_agent_phase2_health_workflow.py 2>&1 | tee artifacts/phase2/apply.log
+      - name: Restore helper source before commit
+        run: git checkout -- scripts/_agent_phase2_health_workflow.py
       - name: Install package and tools
         run: |
           python -m pip install --upgrade pip
