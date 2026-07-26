@@ -139,6 +139,8 @@ def load_run_artifacts(run_dir: Path) -> dict[str, Any]:
     d = {"run_dir": run_dir, "manifest": read_json_file(run_dir / "manifest.json"), "manifest.json": read_json_file(run_dir / "manifest.json"), "complete": read_json_file(run_dir / "run_complete.json"), "run_complete.json": read_json_file(run_dir / "run_complete.json")}
     d["metrics"] = normalize_metrics(load_csv_file(run_dir / "metrics.csv")); d["metrics.csv"] = d["metrics"]
     d["selected_checkpoint_metrics"] = read_json_file(run_dir / "selected_checkpoint_metrics.json")
+    d["alpha_measurements"] = load_csv_file(run_dir / "alpha_measurements.csv")
+    d["weightwatcher_aggregates"] = load_csv_file(run_dir / "weightwatcher_aggregates.csv")
     d["spectral"] = normalize_spectral_records(load_csv_file(run_dir / "spectral.csv")); d["spectral.csv"] = d["spectral"]
     d["projection"] = normalize_projection_records(load_csv_file(run_dir / "wwpgd_projection.csv")); d["wwpgd_projection.csv"] = d["projection"]
     return d
@@ -364,7 +366,8 @@ def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Pa
     from wwgpt.alpha_analysis import analyze_alpha_trajectories
     analyze_alpha_trajectories(runs, out)
     if analysis_plan is not None:
-        from wwgpt.acceleration_analysis import analyze_acceleration_results
+        from wwgpt.acceleration_analysis import analyze_acceleration_results, verify_analysis_eligibility
+        verify_analysis_eligibility(runs, out, analysis_plan)
         analyze_acceleration_results(results_root, out, analysis_plan)
     return out
 

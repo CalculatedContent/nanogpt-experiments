@@ -27,7 +27,7 @@ configuration. Replace the example data and results paths as needed.
 **Level 0 pilot:**
 
 ```bash
-wwgpt run-multiseed --level 0 --config configs/level0_adaptive_alpha.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
+wwgpt run-multiseed --level 0 --config configs/level0_adaptive_alpha.yaml --analysis-plan configs/analysis_plan.yaml --data-root /path/to/data --results-root /path/to/results --token-multiplier 20 --seeds 1337 --extensions none,wwpgd
 ```
 
 **Level 1 pilot:**

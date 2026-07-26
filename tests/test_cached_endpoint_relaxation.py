@@ -53,6 +53,22 @@ def test_gain_point_one_applies_ten_percent_and_residual_contracts(monkeypatch):
     assert result.changed_rows[0]["controller_gain_applied"] == pytest.approx(0.1)
 
 
+def test_fast_step_before_endpoint_and_measurement_step_are_logged(monkeypatch):
+    model = torch.nn.Linear(2, 2, bias=False)
+    ext = _extension(skip_fast_apply_on_measurement_step=True)
+    monkeypatch.setattr("wwgpt.ww.projected_matrix_modules", lambda _model: [])
+    ext.after_optimizer_step_fast(model=model, optimizer_step=1, total_optimizer_steps=100,
+                                  measurement_interval=10)
+    ext.after_optimizer_step_fast(model=model, optimizer_step=10, total_optimizer_steps=100,
+                                  measurement_interval=10)
+    assert ext.fast_step_rows == [
+        {"optimizer_step": 1, "measurement_step": False, "active_endpoint_count": 0,
+         "changed_layer_count": 0, "any_change": False, "skip_reason": "no_active_endpoint"},
+        {"optimizer_step": 10, "measurement_step": True, "active_endpoint_count": 0,
+         "changed_layer_count": 0, "any_change": False, "skip_reason": "measurement_step"},
+    ]
+
+
 def test_applied_update_decreases_as_residual_decreases(monkeypatch):
     model = torch.nn.Linear(2, 2, bias=False); model.weight.data.fill_(1.0)
     ext = _extension()

@@ -42,7 +42,61 @@ def load_analysis_plan(path: str | Path) -> tuple[dict[str, Any], str]:
 def plan_manifest(path: str | Path) -> dict[str, Any]:
     plan, digest = load_analysis_plan(path)
     return {"analysis_plan_path": str(Path(path)), "analysis_plan_sha256": digest,
-            "analysis_mode": plan["mode"], "analysis_plan": plan}
+            "analysis_mode": plan["mode"],
+            "confirmatory_paired_seeds": plan.get("confirmatory_paired_seeds"),
+            "required_paired_seed_count": plan.get("confirmatory_paired_seeds"),
+            "thresholds": plan.get("thresholds", []),
+            "primary_outcomes": plan.get("primary_outcomes", []),
+            "analysis_thresholds": plan.get("thresholds", []),
+            "analysis_primary_outcomes": plan.get("primary_outcomes", []),
+            "analysis_plan": plan}
+
+
+def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Path,
+                                plan_path: str | Path) -> dict[str, Any]:
+    """Bind analysis to the frozen training plan and count complete seed pairs."""
+    plan, digest = load_analysis_plan(plan_path)
+    grouped: dict[tuple[str, Any], set[str]] = {}
+    recorded: set[str] = set()
+    for run in runs:
+        manifest = run.get("manifest") or {}
+        value = manifest.get("analysis_plan_sha256") or manifest.get("analysis_plan_hash")
+        if value:
+            recorded.add(str(value))
+        if run.get("run_dir") and (Path(run["run_dir"]) / "run_complete.json").exists():
+            grouped.setdefault((str(run.get("base_optimizer")), run.get("seed")), set()).add(str(run.get("extension")))
+    observed: dict[str, int] = {base: 0 for base, _seed in grouped}
+    for (base, _seed), arms in grouped.items():
+        if {"none", "wwpgd"} <= arms:
+            observed[base] = observed.get(base, 0) + 1
+    required = int(plan.get("confirmatory_paired_seeds") or 0)
+    reasons: list[str] = []
+    hash_status = "not_required"
+    if plan["mode"] == "confirmatory":
+        if not recorded:
+            hash_status = "missing"
+            reasons.append("confirmatory analysis plan hash was not recorded before training")
+        elif recorded != {digest}:
+            hash_status = "mismatch"
+            reasons.append(f"supplied plan SHA-256 {digest} does not match recorded training hash(es): {sorted(recorded)}")
+        else:
+            hash_status = "match"
+        if not observed:
+            reasons.append("no complete baseline/WW-PGD seed pairs were observed")
+        for base, count in sorted(observed.items()):
+            if count < required:
+                reasons.append(f"{base} has {count} complete paired seeds; confirmatory plan requires {required}")
+    elif not observed:
+        reasons.append("exploratory analysis requires at least one complete baseline/WW-PGD seed pair")
+    artifact = {"analysis_mode": plan["mode"], "required_paired_seeds": required,
+                "observed_paired_seeds_by_optimizer": observed, "plan_hash_status": hash_status,
+                "supplied_plan_sha256": digest, "recorded_plan_sha256": sorted(recorded),
+                "eligible": not reasons, "exclusion_reasons": reasons}
+    out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
+    (out / "analysis_eligibility.json").write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    if reasons:
+        raise RuntimeError("analysis is ineligible: " + "; ".join(reasons))
+    return artifact
 
 
 def _curve(frame: pd.DataFrame) -> pd.DataFrame:

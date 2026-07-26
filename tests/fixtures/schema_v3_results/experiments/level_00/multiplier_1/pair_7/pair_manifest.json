@@ -1,0 +1,1 @@
+{"scientific_schema_version":3,"pair_id":"pair_7","seed":7,"base_optimizer":"adamw","arms":["adamw","adamw_wwpgd"]}

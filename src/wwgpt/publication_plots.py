@@ -105,6 +105,16 @@ def prepare_metric_source(runs: list[dict[str, Any]], metric: str) -> pd.DataFra
         if m is None and r.get("run_dir"):
             from wwgpt.analysis import load_run_artifacts
             art = load_run_artifacts(Path(r["run_dir"])); m = art["metrics"]
+        if metric in {"test_loss", "test_perplexity", "test_accuracy"}:
+            selected = art.get("selected_checkpoint_metrics") or {}
+            if metric not in selected:
+                continue
+            rows.append({"seed": r.get("seed"), "pair_id": r.get("pair_id"),
+                "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"),
+                "extension": r.get("extension"), "x_axis": "selected_step",
+                "x_value": selected.get("selected_step", np.nan), "step": selected.get("selected_step", np.nan),
+                "metric": metric, "value": selected[metric]})
+            continue
         if m is None or len(m) == 0: continue
         vocab = vocab_size_from_artifacts(art)
         d = add_generalization_measures(normalize_metrics(m), vocab_size=vocab)
@@ -181,6 +191,23 @@ def _spectral_source(runs: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _run_artifact_source(runs: list[dict[str, Any]], key: str) -> pd.DataFrame:
+    rows = []
+    for r in runs:
+        art = r.get("artifacts") or {}
+        frame = art.get(key)
+        if frame is None and r.get("run_dir"):
+            from wwgpt.analysis import load_run_artifacts
+            frame = load_run_artifacts(Path(r["run_dir"])).get(key)
+        if frame is None:
+            continue
+        for _, row in frame.iterrows():
+            rows.append({**row.to_dict(), "seed": r.get("seed"), "pair_id": r.get("pair_id"),
+                         "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"),
+                         "extension": r.get("extension")})
+    return pd.DataFrame(rows)
+
+
 def _aggregate_numeric_source(source: pd.DataFrame, value_col: str, group_cols: list[str], config: PublicationPlotConfig) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     if source.empty:
@@ -204,14 +231,14 @@ def _aggregate_numeric_source(source: pd.DataFrame, value_col: str, group_cols: 
 
 def _plot_spectral_families(runs, out_dir, config):
     import matplotlib.pyplot as plt
-    src = _spectral_source(runs)
     outs = {}
     specs = {
-        "per_layer_alpha": ("layer_name", "alpha", "Layer", "Alpha"),
-        "alpha_trajectories": ("tokens_seen", "alpha", "Tokens seen", "Alpha"),
-        "correlation_trap_metrics": ("tokens_seen", "detX_num", "Tokens seen", "detX count"),
+        "per_layer_alpha": ("alpha_measurements", "layer_name", "alpha", "Layer", "Alpha"),
+        "alpha_trajectories": ("alpha_measurements", "tokens_seen", "alpha", "Tokens seen", "Alpha"),
+        "correlation_trap_metrics": ("weightwatcher_aggregates", "tokens_seen", "trap_layer_fraction", "Tokens seen", "Trap-layer fraction"),
     }
-    for name, (x, y, xlab, ylab) in specs.items():
+    for name, (source_key, x, y, xlab, ylab) in specs.items():
+        src = _run_artifact_source(runs, source_key)
         fig, ax = plt.subplots(figsize=(7, 4))
         plot = src.dropna(subset=[x, y]).copy() if not src.empty and {x, y}.issubset(src.columns) else pd.DataFrame(columns=[x, y, "optimizer_family", "seed"])
         agg = pd.DataFrame()

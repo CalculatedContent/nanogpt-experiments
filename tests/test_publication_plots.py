@@ -36,6 +36,16 @@ def _run(root: Path, base: str, ext: str, seed: int, loss_offset: float):
         "detX_num": [3, 4],
         "spectral_estimator": ["weightwatcher", "weightwatcher"],
     }).to_csv(rd / "spectral.csv", index=False)
+    pd.DataFrame({
+        "layer_name": ["blocks.0.attn.c_attn", "blocks.0.mlp.0"],
+        "tokens_seen": [100, 300], "alpha": [2.0 + loss_offset, 2.2 + loss_offset],
+    }).to_csv(rd / "alpha_measurements.csv", index=False)
+    pd.DataFrame({"tokens_seen": [100, 300], "trap_layer_count": [1, 2],
+                  "trap_layer_fraction": [0.25, 0.5]}).to_csv(rd / "weightwatcher_aggregates.csv", index=False)
+    (rd / "selected_checkpoint_metrics.json").write_text(json.dumps({
+        "selected_step": 2, "test_loss": 9.0 + loss_offset,
+        "test_perplexity": 10.0 + loss_offset, "test_accuracy": 0.2 - loss_offset,
+    }))
     (rd / "run_complete.json").write_text(json.dumps({"step": 3}))
     return {"run_dir": rd, "artifacts": load_run_artifacts(rd), "seed": seed, "pair_id": f"pair_{seed}", "optimizer_family": fam, "base_optimizer": base, "extension": ext}
 
@@ -94,3 +104,16 @@ def test_paired_effect_exports_all_available_base_optimizers_without_notebook_ha
     plotted = paired[paired["row_type"].eq("plotted_effect")]
     assert set(plotted["base_optimizer"].dropna()) == {"adamw", "muon", "stableadamw"}
     assert set(plotted["metric"].dropna()).issuperset({"validation_loss", "test_loss", "val_perplexity", "generalization_gap"})
+
+
+def test_selected_checkpoint_is_only_test_metric_source(tmp_path: Path):
+    runs = _runs(tmp_path / "runs")
+    source = prepare_metric_source(runs, "test_loss")
+    assert source["value"].min() >= 8.8
+
+
+def test_trap_plot_uses_normalized_trap_output_not_detx(tmp_path: Path):
+    outputs = build_all_publication_figures(_runs(tmp_path / "runs"), tmp_path / "figures")
+    source = pd.read_csv(outputs["correlation_trap_metrics"]["data"])
+    assert "trap_layer_fraction" in source
+    assert "detX_num" not in source
