@@ -1,4 +1,3 @@
-import importlib
 import types
 
 import pytest
@@ -40,6 +39,7 @@ def test_auto_prefers_xla_then_cuda_then_mps(monkeypatch):
 def test_cuda_memory_metrics_only_called_for_cuda(monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("cuda memory API should not be called")
+
     monkeypatch.setattr(torch.cuda, "memory_allocated", boom)
     monkeypatch.setattr(torch.cuda, "memory_reserved", boom)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", boom)
@@ -66,31 +66,7 @@ def test_precision_policy_is_device_appropriate(monkeypatch):
     assert devmod.precision_policy(torch.device("mps"))["mixed_precision"] == "none"
 
 
-@pytest.mark.hardware
-@pytest.mark.cuda
-def test_cuda_smoke_skips_without_hardware():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA hardware absent")
-    device = devmod.detect_device("cuda")
-    x = torch.ones(1, device=device)
-    assert float((x + 1).cpu()) == 2.0
-
-
-@pytest.mark.hardware
-@pytest.mark.mps
-def test_mps_smoke_skips_without_hardware():
-    if not devmod._mps_available():
-        pytest.skip("MPS hardware absent")
-    device = devmod.detect_device("mps")
-    x = torch.ones(1, device=device)
-    assert float((x + 1).cpu()) == 2.0
-
-
-@pytest.mark.hardware
-@pytest.mark.xla
-def test_xla_smoke_skips_without_hardware():
-    if importlib.util.find_spec("torch_xla") is None:
-        pytest.skip("torch_xla absent")
-    device = devmod.detect_device("xla")
-    x = torch.ones(1, device=device)
-    assert float((x + 1).cpu()) == 2.0
+# Actual CUDA, MPS, and XLA tensor execution is environment-dependent and is
+# exercised by `wwgpt device-preflight --device <device>` on the target machine.
+# Keeping those probes inside the portable CPU pytest suite only produced
+# guaranteed skips and did not add CI coverage beyond the contract tests above.
