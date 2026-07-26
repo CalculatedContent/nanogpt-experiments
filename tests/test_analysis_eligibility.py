@@ -49,3 +49,12 @@ def test_insufficient_confirmatory_pairs_write_eligibility_then_fail(tmp_path):
     artifact = json.loads((tmp_path / "analysis/analysis_eligibility.json").read_text())
     assert artifact["observed_paired_seeds_by_optimizer"] == {"adamw": 5}
     assert artifact["eligible"] is False
+
+
+def test_one_missing_completed_arm_hash_fails_closed(tmp_path):
+    plan = _plan(tmp_path / "plan.yaml", seeds=10)
+    digest = plan_manifest(plan)["analysis_plan_sha256"]
+    runs = _runs(tmp_path / "runs", digest, 10)
+    runs[1]["manifest"].pop("analysis_plan_sha256")
+    with pytest.raises(RuntimeError, match="every completed analyzed arm"):
+        verify_analysis_eligibility(runs, tmp_path / "analysis", plan)

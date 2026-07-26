@@ -249,7 +249,17 @@ def discover_canonical_runs(results_root: Path, include_legacy: bool = False) ->
             for arm in man.get("arms", []):
                 arm_name = arm["arm_name"]
                 rd = _latest_completed_run_for_compat(t["trial_dir"] / arm_name) or (t["trial_dir"] / arm_name)
-                rows.append(_row_from_record(_build_record(man["trial_id"], t["trial_dir"], rd, arm_name, {**shared, **arm, "scientific_schema_version": man.get("scientific_schema_version"), "trial_manifest": man}, t["valid"])))
+                # The arm manifest is the frozen record of what training actually
+                # used.  Trial entries are orchestration metadata and must never
+                # shadow run-level analysis-plan or configuration fields.
+                run_manifest = read_json_file(rd / "manifest.json")
+                authoritative = dict(run_manifest)
+                authoritative["trial_manifest"] = man
+                valid = bool(t["valid"] and run_manifest and run_manifest.get("valid_for_science", True) is True)
+                rows.append(_row_from_record(_build_record(
+                    man["trial_id"], t["trial_dir"], rd, arm_name,
+                    authoritative, valid,
+                )))
         return rows
     pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
     rows = []

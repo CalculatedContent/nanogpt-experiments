@@ -197,6 +197,8 @@ def _config_with_run_overrides(args):
     model_updates = {}
     train_updates = {}
     adaptive_updates = {}
+    wwpgd_updates = {}
+    measurement_updates = {}
     for arg, key, target in [
         ("batch_size", "batch_size", train_updates),
         ("gradient_accumulation", "gradient_accumulation", train_updates),
@@ -214,17 +216,54 @@ def _config_with_run_overrides(args):
         ("max_train_tokens", "max_train_tokens", train_updates),
         ("max_steps", "max_steps", train_updates),
         ("wwpgd_interval", "wwpgd_interval", train_updates),
+        ("learning_rate", "learning_rate", train_updates),
+        ("epsilon", "epsilon", train_updates),
+        ("muon_learning_rate", "muon_learning_rate", train_updates),
+        ("muon_momentum", "muon_momentum", train_updates),
+        ("muon_newton_schulz_steps", "newton_schulz_steps", train_updates),
+        ("stable_learning_rate", "stable_learning_rate", train_updates),
+        ("stable_epsilon", "stable_epsilon", train_updates),
+        ("stable_triton", "stable_triton", train_updates),
         ("dropout", "dropout", model_updates),
     ]:
         value = getattr(args, arg, None)
         if value is not None:
             target[key] = value
-    for arg, key in [("wwpgd_adaptive_mode","mode"),("wwpgd_alpha_response","response_curve"),("wwpgd_alpha_start_step","start_step"),("wwpgd_alpha_deadband","deadband_above_target"),("wwpgd_alpha_full_strength","full_strength_alpha"),("wwpgd_alpha_ema_beta","alpha_ema_beta"),("wwpgd_alpha_min_observations","min_observations"),("wwpgd_alpha_max_d","max_D"),("wwpgd_max_relative_change","max_relative_frobenius_change"),("wwpgd_alpha_max_hardness","max_hardness"),("wwpgd_apply_mode","apply_mode"),("wwpgd_measurement_interval","measurement_interval"),("wwpgd_measurement_source","measurement_source"),("wwpgd_apply_interval","apply_interval"),("wwpgd_max_per_step_gain","max_per_step_gain"),("wwpgd_per_step_max_relative_change","max_relative_frobenius_change_per_step"),("wwpgd_endpoint_stop_distance","endpoint_stop_relative_distance"),("wwpgd_max_endpoint_age","max_endpoint_age_steps"),("wwpgd_stale_distance_multiplier","stale_distance_multiplier"),("wwpgd_skip_fast_apply_on_measurement_step","skip_fast_apply_on_measurement_step"),("wwpgd_log_every_fast_step","log_every_fast_step")]:
+    if getattr(args, "beta1", None) is not None or getattr(args, "beta2", None) is not None:
+        train_updates["betas"] = (args.beta1 if args.beta1 is not None else cfg.train.betas[0], args.beta2 if args.beta2 is not None else cfg.train.betas[1])
+    if getattr(args, "stable_beta1", None) is not None or getattr(args, "stable_beta2", None) is not None:
+        train_updates["stable_betas"] = (args.stable_beta1 if args.stable_beta1 is not None else cfg.train.stable_betas[0], args.stable_beta2 if args.stable_beta2 is not None else cfg.train.stable_betas[1])
+    matrix = dict(cfg.train.matrix_lr_multipliers)
+    cli_matrix_roles: set[str] = set()
+    for item in getattr(args, "matrix_lr_multiplier", []):
+        if "=" not in item:
+            raise SystemExit("--matrix-lr-multiplier requires ROLE=VALUE")
+        role, value = item.split("=", 1)
+        if not role or role in cli_matrix_roles:
+            raise SystemExit(f"duplicate or empty matrix role: {role!r}")
+        cli_matrix_roles.add(role)
+        try: matrix[role] = float(value)
+        except ValueError as exc: raise SystemExit(f"invalid matrix multiplier: {item}") from exc
+    if getattr(args, "matrix_lr_multiplier", []): train_updates["matrix_lr_multipliers"] = matrix
+    for arg, key in [("target_alpha", "target_alpha"), ("wwpgd_blend_eta", "blend_eta"),
+                     ("wwpgd_cayley_eta", "cayley_eta"), ("wwpgd_min_tail", "min_tail"),
+                     ("wwpgd_use_detx", "use_detx")]:
+        value = getattr(args, arg, None)
+        if value is not None: wwpgd_updates[key] = value
+    for arg, key in [("alpha_interval", "alpha_interval"),
+                     ("trap_diagnostic_interval", "trap_diagnostic_interval"),
+                     ("trap_randomize", "trap_randomize")]:
+        value = getattr(args, arg, None)
+        if value is not None: measurement_updates[key] = value
+    for arg, key in [("wwpgd_adaptive_mode","mode"),("wwpgd_alpha_response","response_curve"),("wwpgd_alpha_start_step","start_step"),("wwpgd_alpha_deadband","deadband_above_target"),("wwpgd_alpha_full_strength","full_strength_alpha"),("wwpgd_alpha_ema_beta","alpha_ema_beta"),("wwpgd_alpha_min_observations","min_observations"),("wwpgd_alpha_max_d","max_D"),("wwpgd_max_relative_change","max_relative_frobenius_change"),("wwpgd_alpha_max_hardness","max_hardness"),("wwpgd_apply_mode","apply_mode"),("wwpgd_apply_interval","apply_interval"),("wwpgd_max_per_step_gain","max_per_step_gain"),("wwpgd_per_step_max_relative_change","max_relative_frobenius_change_per_step"),("wwpgd_endpoint_stop_distance","endpoint_stop_relative_distance"),("wwpgd_max_endpoint_age","max_endpoint_age_steps"),("wwpgd_stale_distance_multiplier","stale_distance_multiplier"),("wwpgd_skip_fast_apply_on_measurement_step","skip_fast_apply_on_measurement_step"),("wwpgd_log_every_fast_step","log_every_fast_step")]:
         value = getattr(args, arg, None)
         if value is not None:
             adaptive_updates[key] = value
-    if adaptive_updates:
-        cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, adaptive=replace(cfg.wwpgd.adaptive, **adaptive_updates)))
+    if adaptive_updates or wwpgd_updates:
+        cfg = replace(cfg, wwpgd=replace(cfg.wwpgd, **wwpgd_updates,
+            adaptive=replace(cfg.wwpgd.adaptive, **adaptive_updates)))
+    if measurement_updates:
+        cfg = replace(cfg, measurement=replace(cfg.measurement, **measurement_updates))
     above_updates = {key: getattr(args, arg) for arg, key in (
         ("wwpgd_alpha_above_deadband", "deadband"),
         ("wwpgd_alpha_above_full_distance", "full_strength_distance"),
@@ -246,7 +285,7 @@ def _config_with_run_overrides(args):
         cfg = replace(cfg, model=replace(cfg.model, **model_updates))
     if train_updates:
         cfg = replace(cfg, train=replace(cfg.train, **train_updates))
-    if not model_updates and not train_updates and not adaptive_updates and not above_updates and not below_updates and direction is None:
+    if not model_updates and not train_updates and not adaptive_updates and not wwpgd_updates and not measurement_updates and not above_updates and not below_updates and direction is None:
         return _resolve_config_path(args)
     out = args.results_root / "cli_overrides_config.yaml"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -260,15 +299,27 @@ def _seeds(s: str | None) -> list[int] | None:
 def main() -> None:
     p=argparse.ArgumentParser(prog="wwgpt", epilog="Supported experiment profiles: reproduction_tiny, reproduction_fineweb, scaling. target_alpha is the only public spectral target."); sub=p.add_subparsers(dest="cmd", required=True)
     s=sub.add_parser("smoke-test"); s.add_argument("root", type=Path); s.add_argument("--steps", type=int, default=3)
-    a=sub.add_parser("analyze-results", help="analyze one isolated profile result root; no composite pooling by default"); a.add_argument("results_root", type=Path); a.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Profile label for isolation metadata"); a.add_argument("--analysis-plan", type=Path, default=Path("configs/analysis_plan.yaml"))
+    a=sub.add_parser("analyze-results", help="analyze one isolated profile result root; no composite pooling by default"); a.add_argument("results_root", type=Path); a.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Profile label for isolation metadata"); a.add_argument("--analysis-plan", type=Path, default=None)
     pd=sub.add_parser("prepare-data", help="prepare data for profiles: reproduction_tiny, reproduction_fineweb, scaling"); pd.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Experiment profile; omit to use --config (default configs/default.yaml)"); pd.add_argument("--level", type=int, required=True); pd.add_argument("--data-root", type=Path, required=True); pd.add_argument("--token-multiplier", type=int, required=True); pd.add_argument("--config", type=Path, default=Path("configs/default.yaml")); pd.add_argument("--docs-file", type=Path, help="newline-delimited local documents for offline data-preparation tests"); pd.add_argument("--dry-run", action="store_true")
     rm=sub.add_parser("run-multiseed", help="run one profile: reproduction_tiny, reproduction_fineweb, or scaling"); rm.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Experiment profile; omit to use --config (default configs/default.yaml)"); rm.add_argument("--analysis-plan", type=Path); rm.add_argument("--level", type=int, required=True); rm.add_argument("--data-root", type=Path, required=True); rm.add_argument("--results-root", type=Path, required=True); rm.add_argument("--token-multiplier", type=int, required=True); rm.add_argument("--seeds"); rm.add_argument("--device"); rm.add_argument("--precision"); rm.add_argument("--resume", action="store_true"); rm.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rm.add_argument("--ww-interval", type=int); rm.add_argument("--spectral-interval", type=int); rm.add_argument("--eval-interval", type=int); rm.add_argument("--checkpoint-interval", type=int); rm.add_argument("--optimizer", choices=["adamw","muon","stableadamw"], default="adamw"); rm.add_argument("--extensions", default="none,wwpgd"); rm.add_argument("--extension", choices=["none","wwpgd","measurement_only","norm_matched_sham","delayed_onset"]); rm.add_argument("--wwpgd-interval", type=int); rm.add_argument("--batch-size", type=int); rm.add_argument("--gradient-accumulation", type=int); rm.add_argument("--weight-decay", type=float); rm.add_argument("--grad-clip", type=float); rm.add_argument("--eval-batches", type=int); rm.add_argument("--dropout", type=float); rm.add_argument("--lr-schedule", choices=["constant","warmup_cosine","warmup_linear"], help="LR schedule; warmup_cosine is the nanoGPT-style default."); rm.add_argument("--warmup-ratio", type=float, help="Derived warmup fraction when --warmup-steps is omitted."); rm.add_argument("--warmup-steps", type=int, help="Explicit linear warmup optimizer steps."); rm.add_argument("--lr-decay-steps", type=int, help="Cosine/linear decay horizon; defaults to the total optimizer-step horizon."); rm.add_argument("--min-lr-ratio", type=float, help="Minimum LR as a ratio of each group peak LR."); rm.add_argument("--layer-lr", choices=["flat","llrd","manual"], help="Layer LR policy: flat is nanoGPT-compatible; llrd and manual are research ablations."); rm.add_argument("--llrd-gamma", type=float); rm.add_argument("--llrd-min-multiplier", type=float); rm.add_argument("--max-train-tokens", type=int); rm.add_argument("--max-steps", type=int); rm.add_argument("--wwpgd-adaptive-mode", choices=["uniform","alpha_linear","alpha_piecewise","alpha_distance"]); rm.add_argument("--wwpgd-alpha-direction", choices=["above_target","below_target","both"]); rm.add_argument("--wwpgd-alpha-response", choices=["linear","smoothstep"]); rm.add_argument("--wwpgd-alpha-above-response", choices=["linear","smoothstep"]); rm.add_argument("--wwpgd-alpha-below-response", choices=["linear","smoothstep"]); rm.add_argument("--wwpgd-alpha-start-step", type=int); rm.add_argument("--wwpgd-alpha-deadband", type=float); rm.add_argument("--wwpgd-alpha-full-strength", type=float); rm.add_argument("--wwpgd-alpha-ema-beta", type=float); rm.add_argument("--wwpgd-alpha-min-observations", type=int); rm.add_argument("--wwpgd-alpha-max-d", type=float); rm.add_argument("--wwpgd-max-relative-change", type=float); rm.add_argument("--wwpgd-alpha-max-hardness", type=float); rm.add_argument("--wwpgd-alpha-above-deadband", type=float); rm.add_argument("--wwpgd-alpha-above-full-distance", type=float); rm.add_argument("--wwpgd-alpha-above-max-hardness", type=float); rm.add_argument("--wwpgd-alpha-below-deadband", type=float); rm.add_argument("--wwpgd-alpha-below-full-distance", type=float); rm.add_argument("--wwpgd-alpha-below-max-hardness", type=float);  rm.set_defaults(immediate_projection_spectral=False); rm.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rm.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rm.add_argument("--allow-code-version-mismatch", action="store_true"); rm.add_argument("--audit-override-code-version-mismatch", action="store_true"); rm.add_argument("--dry-run", action="store_true")
 
-    rt=sub.add_parser("run-canonical-trials", help="publication six-arm canonical trials"); rt.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"]); rt.add_argument("--level", type=int, required=True); rt.add_argument("--data-root", type=Path, required=True); rt.add_argument("--results-root", type=Path, required=True); rt.add_argument("--token-multiplier", type=int, required=True); rt.add_argument("--seeds"); rt.add_argument("--device"); rt.add_argument("--precision"); rt.add_argument("--resume", action="store_true"); rt.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rt.add_argument("--analysis-plan", type=Path, default=Path("configs/analysis_plan.yaml")); rt.add_argument("--ww-interval", type=int); rt.add_argument("--wwpgd-interval", type=int); rt.add_argument("--spectral-interval", type=int); rt.add_argument("--eval-interval", type=int); rt.add_argument("--checkpoint-interval", type=int); rt.set_defaults(immediate_projection_spectral=False); rt.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rt.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rt.add_argument("--allow-code-version-mismatch", action="store_true"); rt.add_argument("--audit-override-code-version-mismatch", action="store_true"); rt.add_argument("--max-steps", type=int); rt.add_argument("--wwpgd-adaptive-mode", choices=["uniform","alpha_linear","alpha_piecewise","alpha_distance"]); rt.add_argument("--wwpgd-alpha-direction", choices=["above_target","below_target","both"]); rt.add_argument("--wwpgd-alpha-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-above-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-below-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-start-step", type=int); rt.add_argument("--wwpgd-alpha-deadband", type=float); rt.add_argument("--wwpgd-alpha-full-strength", type=float); rt.add_argument("--wwpgd-alpha-ema-beta", type=float); rt.add_argument("--wwpgd-alpha-min-observations", type=int); rt.add_argument("--wwpgd-alpha-max-d", type=float); rt.add_argument("--wwpgd-max-relative-change", type=float); rt.add_argument("--wwpgd-alpha-max-hardness", type=float); rt.add_argument("--dry-run", action="store_true")
+    rt=sub.add_parser("run-canonical-trials", help="publication six-arm canonical trials"); rt.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"]); rt.add_argument("--level", type=int, required=True); rt.add_argument("--data-root", type=Path, required=True); rt.add_argument("--results-root", type=Path, required=True); rt.add_argument("--token-multiplier", type=int, required=True); rt.add_argument("--seeds"); rt.add_argument("--device"); rt.add_argument("--precision"); rt.add_argument("--resume", action="store_true"); rt.add_argument("--config", type=Path, default=Path("configs/default.yaml")); rt.add_argument("--analysis-plan", type=Path, default=None); rt.add_argument("--ww-interval", type=int); rt.add_argument("--wwpgd-interval", type=int); rt.add_argument("--spectral-interval", type=int); rt.add_argument("--eval-interval", type=int); rt.add_argument("--checkpoint-interval", type=int); rt.set_defaults(immediate_projection_spectral=False); rt.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); rt.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); rt.add_argument("--allow-code-version-mismatch", action="store_true"); rt.add_argument("--audit-override-code-version-mismatch", action="store_true"); rt.add_argument("--max-steps", type=int); rt.add_argument("--wwpgd-adaptive-mode", choices=["uniform","alpha_linear","alpha_piecewise","alpha_distance"]); rt.add_argument("--wwpgd-alpha-direction", choices=["above_target","below_target","both"]); rt.add_argument("--wwpgd-alpha-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-above-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-below-response", choices=["linear","smoothstep"]); rt.add_argument("--wwpgd-alpha-start-step", type=int); rt.add_argument("--wwpgd-alpha-deadband", type=float); rt.add_argument("--wwpgd-alpha-full-strength", type=float); rt.add_argument("--wwpgd-alpha-ema-beta", type=float); rt.add_argument("--wwpgd-alpha-min-observations", type=int); rt.add_argument("--wwpgd-alpha-max-d", type=float); rt.add_argument("--wwpgd-max-relative-change", type=float); rt.add_argument("--wwpgd-alpha-max-hardness", type=float); rt.add_argument("--dry-run", action="store_true")
     for parser in (rm, rt):
+        parser.add_argument("--learning-rate", type=float)
+        parser.add_argument("--beta1", type=float); parser.add_argument("--beta2", type=float)
+        parser.add_argument("--epsilon", type=float)
+        parser.add_argument("--matrix-lr-multiplier", action="append", default=[])
+        parser.add_argument("--muon-learning-rate", type=float); parser.add_argument("--muon-momentum", type=float)
+        parser.add_argument("--muon-newton-schulz-steps", type=int)
+        parser.add_argument("--stable-learning-rate", type=float); parser.add_argument("--stable-beta1", type=float)
+        parser.add_argument("--stable-beta2", type=float); parser.add_argument("--stable-epsilon", type=float)
+        parser.add_argument("--stable-triton", action=argparse.BooleanOptionalAction, default=None)
+        parser.add_argument("--target-alpha", type=float); parser.add_argument("--wwpgd-blend-eta", type=float)
+        parser.add_argument("--wwpgd-cayley-eta", type=float); parser.add_argument("--wwpgd-min-tail", type=int)
+        parser.add_argument("--wwpgd-use-detx", action=argparse.BooleanOptionalAction, default=None)
+        parser.add_argument("--alpha-interval", type=int); parser.add_argument("--trap-diagnostic-interval", type=int)
+        parser.add_argument("--trap-randomize", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--wwpgd-apply-mode", choices=["event_projection", "cached_endpoint_relaxation"])
-        parser.add_argument("--wwpgd-measurement-interval", type=int)
-        parser.add_argument("--wwpgd-measurement-source", choices=["explicit_interval", "evaluation_interval"])
         parser.add_argument("--wwpgd-apply-interval", type=int)
         parser.add_argument("--wwpgd-max-per-step-gain", type=float)
         parser.add_argument("--wwpgd-per-step-max-relative-change", type=float)
