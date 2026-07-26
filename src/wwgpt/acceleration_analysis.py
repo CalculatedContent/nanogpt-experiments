@@ -56,31 +56,55 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
                                 plan_path: str | Path) -> dict[str, Any]:
     """Bind analysis to the frozen training plan and count complete seed pairs."""
     plan, digest = load_analysis_plan(plan_path)
-    grouped: dict[tuple[str, Any], set[str]] = {}
-    recorded: set[str] = set()
+    grouped: dict[tuple[str, Any], dict[str, dict[str, Any]]] = {}
+    recorded: list[str | None] = []
+    trial_recorded: list[str | None] = []
     for run in runs:
         manifest = run.get("manifest") or {}
         value = manifest.get("analysis_plan_sha256") or manifest.get("analysis_plan_hash")
-        if value:
-            recorded.add(str(value))
-        if run.get("run_dir") and (Path(run["run_dir"]) / "run_complete.json").exists():
-            grouped.setdefault((str(run.get("base_optimizer")), run.get("seed")), set()).add(str(run.get("extension")))
+        is_complete = bool(run.get("run_dir") and (Path(run["run_dir"]) / "run_complete.json").exists())
+        if is_complete:
+            recorded.append(str(value) if value else None)
+            trial = manifest.get("trial_manifest")
+            if isinstance(trial, dict):
+                trial_hash = trial.get("analysis_plan_sha256") or trial.get("analysis_plan_hash")
+                trial_recorded.append(str(trial_hash) if trial_hash else None)
+        valid_for_science = run.get("valid_for_science", manifest.get("valid_for_science", True)) is True
+        if is_complete and valid_for_science:
+            grouped.setdefault((str(run.get("base_optimizer")), run.get("seed")), {})[str(run.get("extension"))] = run
     observed: dict[str, int] = {base: 0 for base, _seed in grouped}
-    for (base, _seed), arms in grouped.items():
-        if {"none", "wwpgd"} <= arms:
+    identity_fields = ("initialization_hash", "model_configuration_hash", "tokenizer_hash",
+                       "data_hash", "validation_probe_hash", "training_probe_hash",
+                       "base_optimizer_fingerprint", "token_multiplier", "level", "target_alpha")
+    invalid_pairs: list[str] = []
+    for (base, seed), arms in grouped.items():
+        if {"none", "wwpgd"} <= set(arms):
+            left, right = arms["none"].get("manifest", {}), arms["wwpgd"].get("manifest", {})
+            mismatches = [key for key in identity_fields
+                          if left.get(key) is not None and right.get(key) is not None
+                          and left.get(key) != right.get(key)]
+            if mismatches:
+                invalid_pairs.append(f"{base}/seed={seed} identity mismatch: {', '.join(mismatches)}")
+                continue
+            if any((arm.get("manifest") or {}).get("analysis_plan_sha256") != digest for arm in arms.values()):
+                invalid_pairs.append(f"{base}/seed={seed} does not carry the supplied frozen plan hash")
+                continue
             observed[base] = observed.get(base, 0) + 1
     required = int(plan.get("confirmatory_paired_seeds") or 0)
     reasons: list[str] = []
     hash_status = "not_required"
     if plan["mode"] == "confirmatory":
-        if not recorded:
+        if not recorded or any(value is None for value in recorded):
             hash_status = "missing"
-            reasons.append("confirmatory analysis plan hash was not recorded before training")
-        elif recorded != {digest}:
+            reasons.append("every completed analyzed arm must record the confirmatory analysis plan hash")
+        elif set(recorded) != {digest}:
             hash_status = "mismatch"
-            reasons.append(f"supplied plan SHA-256 {digest} does not match recorded training hash(es): {sorted(recorded)}")
+            reasons.append(f"supplied plan SHA-256 {digest} does not match recorded training hash(es): {sorted(set(recorded))}")
         else:
             hash_status = "match"
+        if trial_recorded and (any(value is None for value in trial_recorded) or set(trial_recorded) != {digest}):
+            reasons.append("canonical trial manifest hash does not match every arm and the supplied plan")
+        reasons.extend(invalid_pairs)
         if not observed:
             reasons.append("no complete baseline/WW-PGD seed pairs were observed")
         for base, count in sorted(observed.items()):
@@ -90,7 +114,7 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
         reasons.append("exploratory analysis requires at least one complete baseline/WW-PGD seed pair")
     artifact = {"analysis_mode": plan["mode"], "required_paired_seeds": required,
                 "observed_paired_seeds_by_optimizer": observed, "plan_hash_status": hash_status,
-                "supplied_plan_sha256": digest, "recorded_plan_sha256": sorted(recorded),
+                "supplied_plan_sha256": digest, "recorded_plan_sha256": sorted({x for x in recorded if x}),
                 "eligible": not reasons, "exclusion_reasons": reasons}
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     (out / "analysis_eligibility.json").write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")

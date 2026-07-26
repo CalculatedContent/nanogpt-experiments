@@ -53,3 +53,33 @@ def test_canonical_trial_mocked_orchestration(monkeypatch, tmp_path):
     runs = discover_canonical_runs(exp_root)
     assert [r["optimizer_raw"] for r in runs] == list(CANONICAL_TRIAL_ARMS)
     assert all(r["pair_dir"] == trial for r in runs)
+
+
+def test_canonical_discovery_uses_authoritative_run_manifest(monkeypatch, tmp_path):
+    """Trial fragments cannot erase fields frozen in each actual arm manifest."""
+    trial = tmp_path / "trial_7"
+    plan_hash = "a" * 64
+    arms = []
+    for base, ww in CANONICAL_TRIAL_PAIRS.items():
+        for arm, extension in ((base, "none"), (ww, "wwpgd")):
+            arms.append({"arm_name": arm, "base_optimizer": base, "extension": extension})
+            run = trial / arm / "run_1"
+            run.mkdir(parents=True)
+            (run / "metrics.csv").write_text("step,validation_loss\n1,1.0\n")
+            (run / "run_complete.json").write_text("{}")
+            (run / "manifest.json").write_text(json.dumps({
+                "scientific_schema_version": 3, "seed": 7, "base_optimizer": base,
+                "extension": extension, "valid_for_science": True,
+                "analysis_plan_sha256": plan_hash, "target_alpha": 2.0,
+            }))
+    trial.mkdir(exist_ok=True)
+    trial_manifest = {"scientific_schema_version": 3, "trial_id": trial.name,
+                      "arms": arms, "pairs": [{"baseline": b, "wwpgd": w}
+                                               for b, w in CANONICAL_TRIAL_PAIRS.items()],
+                      "analysis_plan_sha256": plan_hash}
+    (trial / "trial_manifest.json").write_text(json.dumps(trial_manifest))
+
+    runs = discover_canonical_runs(tmp_path)
+    assert len(runs) == 6
+    assert {run["manifest"]["analysis_plan_sha256"] for run in runs} == {plan_hash}
+    assert all(run["manifest"]["trial_manifest"] == trial_manifest for run in runs)

@@ -1,0 +1,12 @@
+# Descriptive pilot plan. Thresholds may only be derived with an exploratory label.
+mode: exploratory
+experimental_unit: seed
+pairing: within_base_optimizer
+primary_outcomes: []
+descriptive_outcomes:
+  - validation_loss
+  - validation_loss_auc
+  - selected_checkpoint_test_loss
+  - selected_checkpoint_test_perplexity
+  - selected_checkpoint_test_next_token_accuracy
+  - alpha_distance_to_target
