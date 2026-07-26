@@ -10,6 +10,7 @@ CONTROLLER_VERSION = "adaptive_wwpgd_two_timescale_v1"
 MATRIX_TYPES = {"W_K", "W_Q", "W_V", "W_O", "W_MLP_IN", "W_MLP_OUT"}
 DIRECTIONS = {"above_target", "below_target", "both"}
 RESPONSES = {"linear", "smoothstep"}
+DOSE_SCHEDULES = {"bounded_refresh_fraction", "fixed_per_step_gain"}
 PRECEDENCE = ["global adaptive configuration", "matrix-type override", "matching layer-glob overrides", "exact layer-name override"]
 OVERRIDE_FIELDS = {"enabled", "direction", "above_target", "below_target", "max_D", "max_relative_frobenius_change", "cooldown_events", "min_observations", "alpha_ema_beta"}
 
@@ -49,6 +50,9 @@ class AdaptiveWWPGDConfig:
     measurement_source: str = "evaluation_interval"
     apply_interval: int = 1
     max_per_step_gain: float = 0.02
+    max_endpoint_fraction_per_refresh: float = 0.40
+    max_cumulative_relative_frobenius_change_per_refresh: float = 0.025
+    dose_schedule: str = "bounded_refresh_fraction"
     max_relative_frobenius_change_per_step: float | None = None
     endpoint_stop_relative_distance: float = 0.0001
     max_endpoint_age_steps: int = 50
@@ -99,6 +103,62 @@ def resolve_endpoint_measurement_interval(
     return value
 
 
+def eligible_fast_steps(measurement_interval: int, apply_interval: int,
+                        skip_measurement_step: bool = True) -> int:
+    """Exact eligible applications in a full refresh window."""
+    if measurement_interval <= 0 or apply_interval <= 0:
+        return 0
+    return sum(1 for offset in range(1, measurement_interval + 1)
+               if offset % apply_interval == 0
+               and not (skip_measurement_step and offset == measurement_interval))
+
+
+def derived_interval_gain(cfg: AdaptiveWWPGDConfig, measurement_interval: int) -> float:
+    n = eligible_fast_steps(measurement_interval, cfg.apply_interval,
+                            cfg.skip_fast_apply_on_measurement_step)
+    if n == 0:
+        return 0.0
+    if cfg.dose_schedule == "fixed_per_step_gain":
+        return cfg.max_per_step_gain
+    return 1.0 - (1.0 - cfg.max_endpoint_fraction_per_refresh) ** (1.0 / n)
+
+
+def effective_base_gain(cfg: AdaptiveWWPGDConfig, measurement_interval: int) -> float:
+    return min(cfg.max_per_step_gain, derived_interval_gain(cfg, measurement_interval))
+
+
+def validate_adaptive_level_schedule(cfg: AdaptiveWWPGDConfig, total_optimizer_steps: int,
+                                     measurement_interval: int | None = None) -> dict[str, Any]:
+    """Validate and describe cached-endpoint cadence independently of model level."""
+    interval = measurement_interval or cfg.measurement_interval
+    if not interval:
+        raise ValueError("measurement_interval is required for schedule validation")
+    measurements = list(range(interval, total_optimizer_steps + 1, interval))
+    after_start = [s for s in measurements if s >= cfg.start_step]
+    if not after_start:
+        raise ValueError("no possible endpoint measurement after start_step")
+    if len(after_start) < cfg.min_observations:
+        raise ValueError("min_observations cannot be reached")
+    nfast = eligible_fast_steps(interval, cfg.apply_interval, cfg.skip_fast_apply_on_measurement_step)
+    if cfg.apply_mode == "cached_endpoint_relaxation" and nfast == 0:
+        raise ValueError("no eligible fast steps in refresh window")
+    gain = effective_base_gain(cfg, interval)
+    if not math.isfinite(gain):
+        raise ValueError("effective gain must be finite")
+    fraction = 1.0 - (1.0 - gain) ** nfast
+    if cfg.dose_schedule == "bounded_refresh_fraction" and fraction > cfg.max_endpoint_fraction_per_refresh + 1e-12:
+        raise ValueError("configured schedule exceeds endpoint-fraction bound")
+    first = after_start[cfg.min_observations - 1]
+    return {"measurement_steps": measurements, "first_possible_active_endpoint_step": first,
+            "observations_before_activation": cfg.min_observations,
+            "fast_steps_per_refresh_window": nfast, "derived_interval_gain": derived_interval_gain(cfg, interval),
+            "effective_base_gain": gain, "maximum_endpoint_fraction_per_refresh": cfg.max_endpoint_fraction_per_refresh,
+            "worst_case_endpoint_fraction_per_refresh": fraction,
+            "per_step_frobenius_cap": cfg.max_relative_frobenius_change_per_step,
+            "cumulative_refresh_cap": cfg.max_cumulative_relative_frobenius_change_per_refresh,
+            "expected_endpoint_opportunities": max(0, len(after_start) - cfg.min_observations + 1)}
+
+
 def _side_from_any(value: Any) -> AdaptiveAlphaSideConfig:
     if isinstance(value, AdaptiveAlphaSideConfig):
         return value
@@ -137,6 +197,12 @@ def validate_adaptive_config(cfg: AdaptiveWWPGDConfig, target_alpha: float) -> N
         raise ValueError("wwpgd.adaptive.max_per_step_gain must be in [0,1]")
     if cfg.max_relative_frobenius_change_per_step is not None and cfg.max_relative_frobenius_change_per_step <= 0:
         raise ValueError("wwpgd.adaptive.max_relative_frobenius_change_per_step must be positive")
+    if cfg.dose_schedule not in DOSE_SCHEDULES:
+        raise ValueError("wwpgd.adaptive.dose_schedule is invalid")
+    if not 0 < cfg.max_endpoint_fraction_per_refresh <= 1:
+        raise ValueError("wwpgd.adaptive.max_endpoint_fraction_per_refresh must be in (0,1]")
+    if cfg.max_cumulative_relative_frobenius_change_per_refresh <= 0:
+        raise ValueError("wwpgd.adaptive cumulative refresh cap must be positive")
     if cfg.endpoint_stop_relative_distance < 0:
         raise ValueError("wwpgd.adaptive.endpoint_stop_relative_distance must be nonnegative")
     if cfg.max_endpoint_age_steps <= 0:

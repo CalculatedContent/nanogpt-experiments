@@ -82,6 +82,9 @@ wwpgd:
     cooldown_events: 0
     apply_interval: 1
     max_per_step_gain: 0.02
+    dose_schedule: bounded_refresh_fraction
+    max_endpoint_fraction_per_refresh: 0.40
+    max_cumulative_relative_frobenius_change_per_refresh: 0.025
     max_relative_frobenius_change_per_step: 0.001
     endpoint_stop_relative_distance: 0.0001
     max_endpoint_age_steps: 500

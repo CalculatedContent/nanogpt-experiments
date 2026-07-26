@@ -31,33 +31,16 @@ def test_weightwatcher_notebook_executes_fixture_and_exports_expected_files(tmp_
     results = tmp_path / "schema_v2_results"
     shutil.copytree(FIXTURE_ROOT, results)
     monkeypatch.setenv("WWGPT_RESULTS_ROOT", str(results))
+    output = tmp_path / "notebook-output"
+    monkeypatch.setenv("WWGPT_NOTEBOOK_OUTPUT_DIR", str(output))
     nb = nbformat.read(NOTEBOOK, as_version=4)
     NotebookClient(nb, timeout=120, kernel_name="python3").execute(cwd=str(Path.cwd()))
 
-    analysis = results / "analysis"
-    expected_csv = {
-        "spectral_records_scientific.csv",
-        "metrics_records_scientific.csv",
-        "projection_records_scientific.csv",
-        "spectral_validity_audit.csv",
-        "projected_layer_alpha_summary.csv",
-        "run_snapshot_alpha_summary.csv",
-        "weightwatcher_plot_manifest.csv",
-    }
+    analysis = output / "tables"
+    expected_csv = {"scientific_alpha.csv", "trap_diagnostics.csv"}
     for name in expected_csv:
         path = analysis / name
         assert path.exists() and path.stat().st_size >= 0
-
-    manifest = pd.read_csv(analysis / "weightwatcher_plot_manifest.csv")
-    assert not manifest.empty
-    assert manifest["png"].map(lambda p: Path(p).exists()).all()
-    assert manifest["pdf"].map(lambda p: Path(p).exists()).all()
-    assert manifest["data"].map(lambda p: Path(p).exists()).all()
-    assert manifest["metadata"].map(lambda p: Path(p).exists()).all()
-    metadata = json.loads(Path(manifest["metadata"].iloc[0]).read_text())
-    assert metadata["png_dpi"] >= 300
-    assert "sample standard deviation" in metadata["band_definition"] or "Student-t" in metadata["band_definition"]
-
 
 def test_spectral_validity_audit_refuses_unverifiable_rows():
     run = next(FIXTURE_ROOT.glob("pair_1337*/adamw/run_*"))

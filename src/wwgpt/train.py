@@ -23,7 +23,7 @@ from wwgpt.config import (
     MeasurementConfig,
     load_config,
 )
-from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CachedLayerEndpoint, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index, resolve_endpoint_measurement_interval
+from wwgpt.adaptive_wwpgd import AdaptiveWWPGDConfig, AdaptiveWWPGDController, CachedLayerEndpoint, CONTROLLER_VERSION, PRECEDENCE, resolve_layer_config, hardness_for_alpha, matrix_type, block_index, resolve_endpoint_measurement_interval, eligible_fast_steps, derived_interval_gain, effective_base_gain
 from wwgpt.optim import ARM_DISPLAY, SCHEDULER_IMPLEMENTATION, arm_name as make_arm_name, build_optimizer_bundle, apply_lr_schedule, optimizer_fingerprint, resolve_lr_decay_steps, resolve_warmup_steps
 from wwgpt.data import NonRepeatingTokenReader, RandomWindowTokenReader, prepare_local_text, fixed_probe, random_probe, stable_seed
 from wwgpt.model import GPT
@@ -483,12 +483,18 @@ class WWPGDExtension(TrainingExtension):
                     self.counters["endpoint_convergence_count"] += 1
                     rows.append(self._terminal_fast_row(name, ep, optimizer_step, "endpoint_converged", before=before, converged=True))
                     continue
-                gain = max(0.0, min(cfg.max_per_step_gain,
-                                    cfg.max_per_step_gain * ep.alpha_hardness * ep.global_event_hardness))
+                n_fast = eligible_fast_steps(cadence, cfg.apply_interval, cfg.skip_fast_apply_on_measurement_step)
+                interval_gain = derived_interval_gain(cfg, cadence)
+                base_gain = effective_base_gain(cfg, cadence)
+                gain = max(0.0, base_gain * ep.alpha_hardness * ep.global_event_hardness)
                 delta = gain * (endpoint - weight)
                 requested = float(torch.linalg.norm(delta.float())) / denom
                 limit = cfg.max_relative_frobenius_change_per_step
+                cumulative_before = ep.cumulative_applied_relative_change
+                remaining_before = max(0.0, cfg.max_cumulative_relative_frobenius_change_per_refresh - cumulative_before)
                 scale = min(1.0, float(limit) / max(requested, eps)) if limit is not None else 1.0
+                scale = min(scale, remaining_before / max(requested, eps))
+                dose_saturated = remaining_before <= eps or requested * scale >= remaining_before - eps
                 applied = scale * delta
                 applied_rel = float(torch.linalg.norm(applied.float())) / denom
                 old = weight.detach().clone()
@@ -512,8 +518,20 @@ class WWPGDExtension(TrainingExtension):
                        "endpoint_progress_ratio": 1-after/max(ep.initial_endpoint_relative_distance, eps),
                        "requested_relative_frobenius_change": requested,
                        "applied_relative_frobenius_change": applied_rel, "trust_region_limit": limit,
+                       "measurement_interval": cadence, "apply_interval": cfg.apply_interval,
+                       "eligible_fast_steps_in_refresh": n_fast,
+                       "max_endpoint_fraction_per_refresh": cfg.max_endpoint_fraction_per_refresh,
+                       "derived_interval_gain": interval_gain,
+                       "configured_max_per_step_gain": cfg.max_per_step_gain,
+                       "effective_base_gain": base_gain,
+                       "max_cumulative_relative_frobenius_change_per_refresh": cfg.max_cumulative_relative_frobenius_change_per_refresh,
+                       "cumulative_applied_relative_change_before": cumulative_before,
+                       "cumulative_applied_relative_change_after": ep.cumulative_applied_relative_change,
+                       "remaining_refresh_budget_before": remaining_before,
+                       "remaining_refresh_budget_after": max(0.0, cfg.max_cumulative_relative_frobenius_change_per_refresh - ep.cumulative_applied_relative_change),
+                       "dose_cap_saturated": dose_saturated, "dose_schedule": cfg.dose_schedule,
                        "trust_region_scale": scale, "changed": changed, "converged": False,
-                       "invalidated": False, "invalidation_reason": "", "controller_version": CONTROLLER_VERSION,
+                       "invalidated": False, "invalidation_reason": "refresh_cumulative_dose_cap_reached" if remaining_before <= eps else "", "controller_version": CONTROLLER_VERSION,
                        "adapter_mode": "cached_endpoint_relaxation_v1", "action_type": "fast_endpoint_relaxation"}
                 rows.append(row)
         if changed_step: self.counters["changed_fast_control_step_count"] += 1
