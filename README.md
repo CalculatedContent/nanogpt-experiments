@@ -110,3 +110,33 @@ New runs use unique timestamped directories and do not overwrite prior results. 
 `wwgpt audit-experiment --experiment-root PATH` checks artifact completeness, arm identity, pair invariants, measurement schedules, finite metrics, schema/provenance fields, and recorded overrides. It writes machine-readable and Markdown reports under the analysis directory. Audit reports eligibility and exclusion reasons; it does not infer efficacy, significance, acceleration, scaling behavior, or generalization. `generate-reproducibility-report` summarizes recorded provenance but likewise makes no scientific outcome claim.
 
 See `docs/SCHEMA_V3.md`, `docs/EXPERIMENT_RESUME_PROTOCOL.md`, `docs/RESULT_SCHEMA.md`, and `docs/SCIENTIFIC_INTEGRITY_POLICY.md` for schema and integrity details.
+# Notebook workflow
+
+The seven schema-v3 analysis notebooks consume completed runs and **never retrain
+models**. Selected test metrics always come from validation-selected checkpoints;
+next-token accuracy is not downstream classification accuracy.
+
+```bash
+export WWGPT_RESULTS_ROOT="$HOME/wwgpt-results-level0"
+export WWGPT_NOTEBOOK_OUTPUT_DIR="$HOME/wwgpt-notebooks-level0"
+export WWGPT_ANALYSIS_PLAN="configs/analysis_plan_exploratory.yaml"
+export WWGPT_LEVEL=0
+export WWGPT_TOKEN_MULTIPLIER=20
+export WWGPT_BASE_OPTIMIZER=adamw
+./scripts/run_analysis_notebooks.sh
+```
+
+Direct Papermill execution uses the same parameter precedence:
+
+```bash
+papermill notebooks/07_wwpgd_diagnostics.ipynb \
+  "$WWGPT_NOTEBOOK_OUTPUT_DIR/executed/07_wwpgd_diagnostics.ipynb" \
+  -p RESULTS_ROOT "$WWGPT_RESULTS_ROOT" \
+  -p OUTPUT_ROOT "$WWGPT_NOTEBOOK_OUTPUT_DIR" \
+  -p LEVEL 0 -p TOKEN_MULTIPLIER 20
+```
+
+Compatibility diagnostics contain observable candidate movement, never invented
+private midpoint/Cayley/TraceLog values. Level 0--2 endpoint dose is normalized by
+the refresh interval and bounded both per step and cumulatively per refresh.
+`target_alpha = 2.0` remains the only public spectral target.

@@ -481,8 +481,11 @@ def build_stock_wwpgd_candidate(
             changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
     if result.get("native_internal_diagnostics"):
         for row in diagnostic_logs:
+            row.setdefault("diagnostics_schema_version", 1)
             row.setdefault("diagnostics_mode", "native")
             row.setdefault("native_internal_diagnostics", True)
+            row.setdefault("valid_observable_diagnostic", True)
+            row.setdefault("unsupported_internal_fields", json.dumps([]))
     else:
         unsupported = [
             "k_pl", "k_detx", "k_star", "selected_lambda_threshold",
@@ -495,10 +498,12 @@ def build_stock_wwpgd_candidate(
         for name, original in originals.items():
             observed = by_name.get(name, {})
             diagnostic_logs.append({
+                "diagnostics_schema_version": 1,
                 "diagnostics_mode": "compatibility",
                 "native_internal_diagnostics": False,
+                "valid_observable_diagnostic": bool(math.isfinite(rel[name])),
                 "status": "unsupported_internal_fields",
-                "unsupported_internal_fields": unsupported,
+                "unsupported_internal_fields": json.dumps(unsupported),
                 "layer_name": name,
                 "layer_shape": list(original.shape),
                 "alpha": observed.get("alpha"), "D": observed.get("D"),
@@ -508,12 +513,14 @@ def build_stock_wwpgd_candidate(
                 "original_to_candidate_relative_frobenius_change": rel[name],
                 "original_frobenius_norm": float(original.float().norm()),
                 "candidate_frobenius_norm": float(candidates[name].float().norm()),
-                "configured_target_alpha": full_cfg.target_alpha,
+                "target_alpha": full_cfg.target_alpha,
+                "candidate_relative_frobenius_change": rel[name],
                 "configured_blend_eta": full_cfg.blend_eta,
                 "configured_cayley_eta": full_cfg.cayley_eta,
                 "configured_min_tail": full_cfg.min_tail,
                 "configured_use_detx": full_cfg.use_detx,
                 "projection_runtime": runtime,
+                "warning_message": "private WWPGD internals are unsupported by the installed package",
                 **_WWPGD_PROVENANCE,
             })
     return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg, diagnostic_logs)

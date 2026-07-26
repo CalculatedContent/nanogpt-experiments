@@ -333,6 +333,7 @@ def main() -> None:
     dp=sub.add_parser("device-preflight"); dp.add_argument("--device", default="auto"); dp.add_argument("--output", type=Path, default=Path("."))
     ae=sub.add_parser("audit-experiment"); ae.add_argument("--experiment-root", type=Path, required=True)
     gr=sub.add_parser("generate-reproducibility-report"); gr.add_argument("--experiment-root", type=Path, required=True); gr.add_argument("--strict", action="store_true")
+    rn=sub.add_parser("run-notebooks"); rn.add_argument("--results-root", type=Path, required=True); rn.add_argument("--output-root", type=Path, required=True); rn.add_argument("--analysis-plan", type=Path); rn.add_argument("--profile", default=""); rn.add_argument("--level", type=int); rn.add_argument("--token-multiplier", type=int); rn.add_argument("--base-optimizer", default="adamw"); rn.add_argument("--notebooks", default="all"); rn.add_argument("--strict", action="store_true"); rn.add_argument("--run-analysis", action="store_true"); rn.add_argument("--reuse-existing-analysis", action=argparse.BooleanOptionalAction, default=True)
     pl=sub.add_parser("plan-scaling"); pl.add_argument("--params", type=int); pl.add_argument("--level", type=int); pl.add_argument("--token-multiplier", type=int, required=True); pl.add_argument("--available-tokens", type=int, required=True); pl.add_argument("--batch-size", type=int, default=8); pl.add_argument("--block-size", type=int, default=256); pl.add_argument("--grad-accum", type=int, default=1)
     args=p.parse_args()
     if args.cmd=="smoke-test": print(smoke(args.root, args.steps))
@@ -382,6 +383,9 @@ def main() -> None:
         import json; print(json.dumps(run_device_preflight(args.output, args.device), indent=2, sort_keys=True, default=str))
     elif args.cmd=="audit-experiment": print(audit_experiment(args.experiment_root))
     elif args.cmd=="generate-reproducibility-report": print(write_reproducibility_report(args.experiment_root))
+    elif args.cmd=="run-notebooks":
+        from wwgpt.notebook_runner import run_notebooks
+        for path in run_notebooks(args.results_root, args.output_root, analysis_plan=args.analysis_plan, profile=args.profile, level=args.level, token_multiplier=args.token_multiplier, base_optimizer=args.base_optimizer, notebooks=args.notebooks, strict=args.strict, run_analysis=args.run_analysis, reuse_existing_analysis=args.reuse_existing_analysis): print(path)
     elif args.cmd=="plan-scaling":
         params=args.params
         if params is None:

@@ -22,6 +22,8 @@ def _endpoint(weight, *, distance=1.0, step=0):
 def _extension(**kwargs):
     adaptive = AdaptiveWWPGDConfig(apply_mode="cached_endpoint_relaxation",
         measurement_source="explicit_interval", measurement_interval=100, max_per_step_gain=0.1,
+        dose_schedule="fixed_per_step_gain",
+        max_cumulative_relative_frobenius_change_per_refresh=1.0,
         max_endpoint_age_steps=100, endpoint_stop_relative_distance=0.0, **kwargs)
     return WWPGDExtension(WWPGDConfig(adaptive=adaptive), interval=100)
 
