@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-echo "Creating local editable Python environment if requested by user shell"
-python -m pip install -e ".[dev]" || python -m pip install -e .
+
+echo "Installing nanoGPT experiments and the current pip-resolved WW-PGD dependency"
+python -m pip install --upgrade pip
+python -m pip install --no-cache-dir --upgrade -e .
