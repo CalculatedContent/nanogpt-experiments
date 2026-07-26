@@ -20,27 +20,37 @@ jobs:
         with:
           ref: agent/fix-level12-experiment-workflow
           fetch-depth: 0
+      - name: Decide whether patch is already committed
+        id: guard
+        shell: bash
+        run: |
+          if [ "$(git log -1 --pretty=%s)" = "Fix Level 0-2 experiment workflow" ]; then
+            echo "apply=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "apply=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.apply == 'true'
         with:
           python-version: '3.11'
       - name: Apply deterministic source patches
+        if: steps.guard.outputs.apply == 'true'
         run: python scripts/_agent_apply_workflow_fixes.py
-      - name: Remove one-time patch machinery
-        run: |
-          rm scripts/_agent_apply_workflow_fixes.py
-          rm .github/workflows/agent-apply-level12-workflow-fixes.yml
       - name: Install package and test tools
+        if: steps.guard.outputs.apply == 'true'
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-cache-dir -e ".[notebooks]"
           python -m pip install pytest ruff
       - name: Validate workflow changes
+        if: steps.guard.outputs.apply == 'true'
         run: |
           python -m compileall -q src tests
           ruff check src tests
           pytest -q -m "not slow" --tb=short
           git diff --check
       - name: Commit validated changes
+        if: steps.guard.outputs.apply == 'true'
         run: |
           git config user.name "OpenAI Codex"
           git config user.email "codex@openai.com"
