@@ -75,8 +75,9 @@ def test_profile_isolation_and_no_composite_pooling_by_default(tmp_path: Path):
 def test_cli_help_lists_profiles_and_commands():
     res = subprocess.run([sys.executable, "-m", "wwgpt.cli", "--help"], text=True, capture_output=True, check=True)
     help_text = res.stdout
-    for text in ["reproduction_tiny", "reproduction_fineweb", "scaling", "run-multiseed", "analyze-results", "run-strength-scan"]:
+    for text in ["reproduction_tiny", "reproduction_fineweb", "scaling", "run-multiseed", "analyze-results"]:
         assert text in help_text
+    assert "run-strength-scan" not in help_text
 
 
 def test_ci_workflow_contains_acceptance_commands():

@@ -62,8 +62,10 @@ def test_tied_weight_wwpgd_and_stability():
     m = GPT(ModelConfig(n_layer=1, n_head=1, n_embd=8, block_size=4, vocab_size=10, tie_weights=True))
     names = [n for n, _ in matrix_modules(m)]
     assert len(names) == len(set(names))
-    with pytest.raises(ValueError, match="deprecated strength"):
-        apply_wwpgd(m, 2.0, 0.01, 1)
+    with pytest.raises(TypeError):
+        apply_wwpgd(m, 2.0, 0.01)
+    with pytest.raises(ValueError, match="target_alpha"):
+        apply_wwpgd(m, 1.0)
 
 
 def test_append_only_result_dirs(tmp_path: Path):
