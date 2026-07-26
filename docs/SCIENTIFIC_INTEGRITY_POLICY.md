@@ -4,7 +4,7 @@ WW-PGD scientific outputs must contain only real WeightWatcher measurements or d
 
 ## Legacy immediate-alpha issue
 
-Earlier strength-scan code generated `wwpgd_projection_spectral.csv` with fabricated immediate alpha values and placeholder fit-quality fields. Those files are invalid for scientific use unless they contain `immediate_spectral_source=weightwatcher_measured` and measured-provenance fields. Old data are not deleted automatically; audit old scans with `wwgpt audit-strength-scan --scan-root PATH` and rerun invalid arms.
+Earlier strength-scan code generated `wwpgd_projection_spectral.csv` with fabricated immediate alpha values and placeholder fit-quality fields. Those files are invalid for scientific use. The retired scan has no dedicated analysis or audit command; rerun a currently supported experiment rather than interpreting nominal strength as a projector parameter.
 
 ## Spectral target ownership
 

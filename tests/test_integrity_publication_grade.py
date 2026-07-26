@@ -1,5 +1,5 @@
 from pathlib import Path
-import ast, pandas as pd, torch
+import pandas as pd, torch
 from wwgpt.ww import measured_projection_spectral_rows
 from wwgpt.checkpointing import save_checkpoint, load_latest_checkpoint, validate_resume, complete_test_checkpoint_state
 from wwgpt.device import detect_device
@@ -12,13 +12,9 @@ def test_no_fabricated_constants_in_production_source():
         for b in bad:
             assert b not in txt, (p,b)
 
-def test_production_strength_scan_does_not_import_prepare_local_text():
-    tree=ast.parse(Path('src/wwgpt/strength_scan.py').read_text())
-    names=[]
-    for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom): names += [a.name for a in n.names]
-        if isinstance(n, ast.Name): names.append(n.id)
-    assert 'prepare_local_text' not in names
+def test_retired_strength_scan_has_no_production_module():
+    assert not Path('src/wwgpt/strength_scan.py').exists()
+    assert not Path('src/wwgpt/strength_scan_analysis.py').exists()
 
 def test_missing_weightwatcher_outputs_remain_nan_and_invalid():
     pre=pd.DataFrame([{'longname':'blocks.0.attn.c_attn','alpha':2.2,'xmin':1,'status':'ok'}])

@@ -12,9 +12,8 @@ from wwgpt.config import DEFAULT_SEEDS
 from wwgpt.data import prepare_data_for_mode
 from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
 from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
-from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_strength_scan_cmd
 from wwgpt.device import device_summary, save_device_manifest, run_device_preflight
-from wwgpt.integrity import audit_experiment, audit_strength_scan
+from wwgpt.integrity import audit_experiment
 from wwgpt.checkpointing import inspect_checkpoint, validate_resume
 from wwgpt.reproducibility import write_reproducibility_report
 
@@ -278,12 +277,10 @@ def main() -> None:
         parser.add_argument("--wwpgd-stale-distance-multiplier", type=float)
         parser.add_argument("--wwpgd-skip-fast-apply-on-measurement-step", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--wwpgd-log-every-fast-step", action=argparse.BooleanOptionalAction, default=None)
-    ass=sub.add_parser("analyze-strength-scan"); ass.add_argument("--scan-root", type=Path, required=True)
     ic=sub.add_parser("inspect-checkpoint"); ic.add_argument("--checkpoint", type=Path, required=True)
     vr=sub.add_parser("validate-resume"); vr.add_argument("--run-dir", type=Path, required=True)
     dp=sub.add_parser("device-preflight"); dp.add_argument("--device", default="auto"); dp.add_argument("--output", type=Path, default=Path("."))
     ae=sub.add_parser("audit-experiment"); ae.add_argument("--experiment-root", type=Path, required=True)
-    ast=sub.add_parser("audit-strength-scan"); ast.add_argument("--scan-root", type=Path, required=True)
     gr=sub.add_parser("generate-reproducibility-report"); gr.add_argument("--experiment-root", type=Path, required=True); gr.add_argument("--strict", action="store_true")
     pl=sub.add_parser("plan-scaling"); pl.add_argument("--params", type=int); pl.add_argument("--level", type=int); pl.add_argument("--token-multiplier", type=int, required=True); pl.add_argument("--available-tokens", type=int, required=True); pl.add_argument("--batch-size", type=int, default=8); pl.add_argument("--block-size", type=int, default=256); pl.add_argument("--grad-accum", type=int, default=1)
     args=p.parse_args()
@@ -326,7 +323,6 @@ def main() -> None:
         if args.dry_run:
             return
         print(run_canonical_trials(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),_resolve_config_path(args),args.device,args.wwpgd_interval,args.eval_interval,args.checkpoint_interval,args.spectral_interval,args.precision,args.resume,args.immediate_projection_spectral,args.allow_code_version_mismatch,args.analysis_plan,args.audit_override_code_version_mismatch))
-    elif args.cmd=="analyze-strength-scan": print(analyze_strength_scan_cmd(args.scan_root))
     elif args.cmd=="inspect-checkpoint":
         import json; print(json.dumps(inspect_checkpoint(args.checkpoint), indent=2, sort_keys=True, default=str))
     elif args.cmd=="validate-resume":
@@ -334,7 +330,6 @@ def main() -> None:
     elif args.cmd=="device-preflight":
         import json; print(json.dumps(run_device_preflight(args.output, args.device), indent=2, sort_keys=True, default=str))
     elif args.cmd=="audit-experiment": print(audit_experiment(args.experiment_root))
-    elif args.cmd=="audit-strength-scan": print(audit_strength_scan(args.scan_root))
     elif args.cmd=="generate-reproducibility-report": print(write_reproducibility_report(args.experiment_root))
     elif args.cmd=="plan-scaling":
         params=args.params

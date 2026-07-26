@@ -2,7 +2,7 @@
 
 This document describes the nanoGPT AdamW vs WW-PGD framework.
 
-- Scaling rationale: use exact instantiated parameter counts; total parameters are default, non-embedding parameters are also recorded. The 20-token-per-parameter rule is an experimental extrapolation for these tiny GPTs.
+- Budget rationale: use exact instantiated parameter counts with `transformer_body` as the default selected convention; total and trainable counts are also recorded. A 20-token multiplier is an experimental budget convention, not a fitted scaling-law result or claimed optimum.
 - Dataset split methodology: stream documents, normalize text, SHA-256 hash normalized content, assign duplicates to the same split, keep validation documents out of tokenizer training unless explicitly configured, and refuse insufficient unique training tokens.
 - Paired-run design: one initialization is saved and reused for AdamW and AdamW+WW-PGD, with identical data order, model configuration, tokenizer hash, corpus hash, and realized tokens.
 - Uncertainty methodology: compute confidence intervals across independent seeds, not across layers or time points. Paired comparisons are WW-PGD minus AdamW.
