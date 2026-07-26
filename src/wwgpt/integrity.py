@@ -1,6 +1,6 @@
-"""Compatibility import for the schema-v3 integrity implementation."""
+"""Compatibility import for the schema-aware integrity implementation."""
 
-from wwgpt.integrity_v2 import (
+from wwgpt.integrity_v3 import (
     BASELINE_EXTENSIONS,
     CANONICAL_ARMS,
     CANONICAL_PAIRS,
