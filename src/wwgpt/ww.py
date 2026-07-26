@@ -12,8 +12,18 @@ import pandas as pd
 import torch
 from torch import nn
 from wwgpt.adaptive_wwpgd import matrix_type, block_index
+from wwgpt.pip_wwpgd_adapter import (
+    construct_pip_wwpgd_config,
+    inspect_pip_wwpgd_api,
+    resolve_pip_wwpgd_provenance,
+    run_pip_wwpgd_candidate,
+)
 
-WWPGD_COMMIT = "384b8a1b50ec93be6ef1a0fb50db1e69cae8d7f4"
+_WWPGD_PROVENANCE = resolve_pip_wwpgd_provenance()
+WWPGD_COMMIT = str(
+    _WWPGD_PROVENANCE.get("wwpgd_resolved_commit")
+    or f"version:{_WWPGD_PROVENANCE['wwpgd_installed_version']}"
+)
 WWPGD_DIAGNOSTICS_SCHEMA_VERSION = 1
 WWPGD_ADAPTER_MODE = "stock_candidate_displacement_scaling_v1"
 SCIENTIFIC_SCHEMA_VERSION = 3
@@ -327,9 +337,11 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
     cfg = external_wwpgd_config_from_experiment(requested_cfg) if requested_cfg is not None else resolved_external_wwpgd_config()
     from dataclasses import asdict as _asdict
     requested = _asdict(requested_cfg) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
-    resolved = {k: v for k, v in vars(cfg).items() if not (k == "max_relative_frobenius_change" and v is None)}
+    _, mapping = construct_pip_wwpgd_config(cfg)
+    resolved = mapping["resolved"]
     derived = target_alpha_to_external_rank_exponent(cfg.target_alpha)
     return {
+        **_WWPGD_PROVENANCE,
         "wwpgd_package": "ww_pgd",
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
         "wwpgd_commit": WWPGD_COMMIT,
@@ -363,46 +375,15 @@ def external_projected_layer_names(model: nn.Module) -> list[str]:
 
 
 def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
-    config_cls = getattr(ww_pgd_module, "WWTailConfig")
-    kwargs = {
-        "enable_tail_pgd": cfg.enable_tail_pgd,
-        # The pinned dependency names this private adapter argument `q`.
-        "q": target_alpha_to_external_rank_exponent(cfg.target_alpha),
-        "blend_eta": cfg.blend_eta,
-        "cayley_eta": cfg.cayley_eta,
-        "min_tail": cfg.min_tail,
-        "use_detx": cfg.use_detx,
-        "max_relative_frobenius_change": cfg.max_relative_frobenius_change,
-        "warmup_epochs": cfg.warmup_epochs,
-        "ramp_epochs": cfg.ramp_epochs,
-        "verbose": cfg.verbose,
-    }
-    try:
-        return config_cls(**kwargs)
-    except TypeError:
-        import inspect
-        sig = inspect.signature(config_cls)
-        accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
-        return config_cls(**accepted)
+    del ww_pgd_module
+    return construct_pip_wwpgd_config(cfg)[0]
 
 
 
 def _assert_stock_wwpgd_api(projector: object) -> None:
-    import inspect
-    sig = inspect.signature(projector)
-    required = {"epoch", "num_epochs", "global_step", "ww_logs", "layer_selector", "diagnostic_logs"}
-    missing = sorted(required - set(sig.parameters))
-    unsupported = {"precomputed_details", "global_event_hardness", "layer_hardness", "layer_max_relative_change", "layer_names"} & set(sig.parameters)
-    if missing or unsupported:
-        try:
-            import ww_pgd
-            version = getattr(ww_pgd, "__version__", metadata.version("ww-pgd"))
-        except Exception:
-            version = "unknown"
-        raise RuntimeError(
-            f"installed ww_pgd API is not the expected stock public interface at {WWPGD_COMMIT}; "
-            f"version={version}; missing={missing}; unsupported_adaptive_parameters={sorted(unsupported)}"
-        )
+    api = inspect_pip_wwpgd_api()
+    if projector is not api["projector"]:
+        raise RuntimeError("projector must be the unmodified pip-installed ww_pgd public function")
 
 
 @dataclass(frozen=True)
@@ -455,10 +436,10 @@ def build_stock_wwpgd_candidate(
         cayley_eta=cfg.cayley_eta,
         min_tail=cfg.min_tail,
         use_detx=cfg.use_detx,
-        warmup_epochs=0,
-        ramp_epochs=0,
+        warmup_epochs=cfg.warmup_epochs,
+        ramp_epochs=cfg.ramp_epochs,
         verbose=cfg.verbose,
-        max_relative_frobenius_change=None,
+        max_relative_frobenius_change=cfg.max_relative_frobenius_change,
     )
     ww_pgd_module = _external_wwpgd_module()
     projector = getattr(ww_pgd_module, "ww_pgd_project")
@@ -466,17 +447,15 @@ def build_stock_wwpgd_candidate(
     selected_names = selected_names or set(external_projected_layer_names(model))
     selector = layer_selector or _selected_layer_selector(set(selected_names))
     originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
-    ww_logs: list[pd.DataFrame] = []
-    diagnostic_logs: list[dict[str, object]] = []
     start = time.perf_counter()
     candidates: dict[str, torch.Tensor] = {}
+    result: dict[str, object] = {}
     try:
         with torch.no_grad():
-            projector(
+            result = run_pip_wwpgd_candidate(
                 model, _external_config_object(ww_pgd_module, full_cfg),
                 epoch=event_index, num_epochs=max(event_index + 1, 1),
-                global_step=actual_step, ww_logs=ww_logs, layer_selector=selector,
-                diagnostic_logs=diagnostic_logs,
+                global_step=actual_step, layer_selector=selector,
             )
             candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     finally:
@@ -486,6 +465,8 @@ def build_stock_wwpgd_candidate(
                 if not torch.equal(weight.detach().cpu(), originals[name].cpu()):
                     raise RuntimeError(f"failed to restore original WW_PGD weight bitwise for {name}")
     runtime = time.perf_counter() - start
+    ww_logs = result.get("ww_logs", [])
+    diagnostic_logs = result.get("diagnostic_logs", [])
     usable = [x for x in ww_logs if isinstance(x, pd.DataFrame) and not x.empty]
     if len(usable) != 1:
         raise RuntimeError(f"stock WW_PGD candidate generation expected exactly one usable ww_logs DataFrame, got {len(usable)}")
@@ -498,8 +479,43 @@ def build_stock_wwpgd_candidate(
             disp = (cand - orig).float()
             rel[name] = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
             changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
-    if not diagnostic_logs:
-        raise RuntimeError("stock WW_PGD invocation returned no internal diagnostics; install the pinned diagnostics-enabled commit")
+    if result.get("native_internal_diagnostics"):
+        for row in diagnostic_logs:
+            row.setdefault("diagnostics_mode", "native")
+            row.setdefault("native_internal_diagnostics", True)
+    else:
+        unsupported = [
+            "k_pl", "k_detx", "k_star", "selected_lambda_threshold",
+            "selected_tail_size", "TraceLog", "cayley_ratios", "clipping_counts",
+            "shaped_movement",
+        ]
+        frame = usable[0]
+        name_column = "longname" if "longname" in frame.columns else "name"
+        by_name = {str(row.get(name_column, "")): row for _, row in frame.iterrows()}
+        for name, original in originals.items():
+            observed = by_name.get(name, {})
+            diagnostic_logs.append({
+                "diagnostics_mode": "compatibility",
+                "native_internal_diagnostics": False,
+                "status": "unsupported_internal_fields",
+                "unsupported_internal_fields": unsupported,
+                "layer_name": name,
+                "layer_shape": list(original.shape),
+                "alpha": observed.get("alpha"), "D": observed.get("D"),
+                "xmin": observed.get("xmin"), "detX_num": observed.get("detX_num"),
+                "num_evals": observed.get("num_evals"),
+                "candidate_changed": changed[name],
+                "original_to_candidate_relative_frobenius_change": rel[name],
+                "original_frobenius_norm": float(original.float().norm()),
+                "candidate_frobenius_norm": float(candidates[name].float().norm()),
+                "configured_target_alpha": full_cfg.target_alpha,
+                "configured_blend_eta": full_cfg.blend_eta,
+                "configured_cayley_eta": full_cfg.cayley_eta,
+                "configured_min_tail": full_cfg.min_tail,
+                "configured_use_detx": full_cfg.use_detx,
+                "projection_runtime": runtime,
+                **_WWPGD_PROVENANCE,
+            })
     return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg, diagnostic_logs)
 
 

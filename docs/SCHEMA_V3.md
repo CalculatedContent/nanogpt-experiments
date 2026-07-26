@@ -72,7 +72,7 @@ Schema v3 manifests record whether adaptive WW-PGD is enabled, the adaptive mode
 
 ### Stock WW_PGD candidate-displacement adapter
 
-Schema v3 manifests record `wwpgd_commit: bf970cb6b73e977f8374114c442ae5b0589eccaa` and `wwpgd_adapter_mode: stock_candidate_displacement_scaling_v1`. This means the public WW_PGD API is used only as `ww_pgd_project(model, cfg, epoch=..., num_epochs=..., global_step=..., ww_logs=..., layer_selector=...)`; adaptive strength is implemented by `nanogpt-experiments` after stock candidate generation.
+Schema v3 manifests record the installed WWPGD version and any PEP 610 resolved commit as runtime provenance, plus `wwpgd_adapter_mode: stock_candidate_displacement_scaling_v1`. This means the public WWPGD API is used only as `ww_pgd_project(model, cfg, epoch=..., num_epochs=..., global_step=..., ww_logs=..., layer_selector=...)`; adaptive strength is implemented by `nanogpt-experiments` after stock candidate generation.
 
 `wwpgd_controller.csv` has one row for every eligible layer at every scheduled event, including raw and smoothed alpha, alpha side, side-specific deadband/full-strength/max-hardness/response settings, requested controller hardness, global event hardness, requested and applied combined hardness, requested/applied relative-Frobenius changes, trust-region limit/scale, whether the stock candidate changed, and skip/projected state. `wwpgd_projection.csv` contains only actual applied rows whose applied relative-Frobenius change is positive. `num_evals` is recorded under that name and is not a selected-tail-size field.
 
