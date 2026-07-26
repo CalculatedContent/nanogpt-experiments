@@ -46,3 +46,5 @@ jobs:
           git add -A
           git commit -m "Add robust local Mac experiment readiness"
           git push origin HEAD:agent/final-local-mac-readiness
+
+# This workflow is temporary and will be removed after the validated source commit.
