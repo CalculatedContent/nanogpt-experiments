@@ -5,6 +5,7 @@ import hashlib
 import math
 import time
 from dataclasses import dataclass
+import dataclasses
 from importlib import metadata
 import numpy as np
 import pandas as pd
@@ -12,7 +13,8 @@ import torch
 from torch import nn
 from wwgpt.adaptive_wwpgd import matrix_type, block_index
 
-WWPGD_COMMIT = "bf970cb6b73e977f8374114c442ae5b0589eccaa"
+WWPGD_COMMIT = "384b8a1b50ec93be6ef1a0fb50db1e69cae8d7f4"
+WWPGD_DIAGNOSTICS_SCHEMA_VERSION = 1
 WWPGD_ADAPTER_MODE = "stock_candidate_displacement_scaling_v1"
 SCIENTIFIC_SCHEMA_VERSION = 3
 PROJECTED_LAYER_SUFFIXES = ("attn.key", "attn.query", "attn.value", "attn.proj", "mlp.0", "mlp.2")
@@ -331,6 +333,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
         "wwpgd_package": "ww_pgd",
         "wwpgd_source_repository": "CalculatedContent/WW_PGD",
         "wwpgd_commit": WWPGD_COMMIT,
+        "wwpgd_diagnostics_schema_version": WWPGD_DIAGNOSTICS_SCHEMA_VERSION,
         "wwpgd_implementation": "ww_pgd",
         "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
         "wwpgd_adaptive_implementation": "nanogpt-experiments scales stock WW_PGD candidate displacements per layer",
@@ -387,7 +390,7 @@ def _external_config_object(ww_pgd_module, cfg: ExternalWWTailConfigSpec):
 def _assert_stock_wwpgd_api(projector: object) -> None:
     import inspect
     sig = inspect.signature(projector)
-    required = {"epoch", "num_epochs", "global_step", "ww_logs", "layer_selector"}
+    required = {"epoch", "num_epochs", "global_step", "ww_logs", "layer_selector", "diagnostic_logs"}
     missing = sorted(required - set(sig.parameters))
     unsupported = {"precomputed_details", "global_event_hardness", "layer_hardness", "layer_max_relative_change", "layer_names"} & set(sig.parameters)
     if missing or unsupported:
@@ -411,6 +414,7 @@ class StockWWPGDCandidate:
     stock_candidate_changed: dict[str, bool]
     runtime: float
     stock_config: ExternalWWTailConfigSpec
+    internal_diagnostics: list[dict[str, object]] = dataclasses.field(default_factory=list)
     stock_commit: str = WWPGD_COMMIT
 
 
@@ -463,6 +467,7 @@ def build_stock_wwpgd_candidate(
     selector = layer_selector or _selected_layer_selector(set(selected_names))
     originals = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     ww_logs: list[pd.DataFrame] = []
+    diagnostic_logs: list[dict[str, object]] = []
     start = time.perf_counter()
     candidates: dict[str, torch.Tensor] = {}
     try:
@@ -471,6 +476,7 @@ def build_stock_wwpgd_candidate(
                 model, _external_config_object(ww_pgd_module, full_cfg),
                 epoch=event_index, num_epochs=max(event_index + 1, 1),
                 global_step=actual_step, ww_logs=ww_logs, layer_selector=selector,
+                diagnostic_logs=diagnostic_logs,
             )
             candidates = {name: w.detach().clone() for name, w in projected_matrix_modules(model)}
     finally:
@@ -492,7 +498,9 @@ def build_stock_wwpgd_candidate(
             disp = (cand - orig).float()
             rel[name] = float(torch.linalg.norm(disp) / max(float(torch.linalg.norm(orig.float())), 1e-12))
             changed[name] = not torch.equal(candidates[name].cpu(), originals[name].cpu())
-    return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg)
+    if not diagnostic_logs:
+        raise RuntimeError("stock WW_PGD invocation returned no internal diagnostics; install the pinned diagnostics-enabled commit")
+    return StockWWPGDCandidate(usable[0].copy(), originals, candidates, rel, changed, runtime, full_cfg, diagnostic_logs)
 
 
 def apply_external_wwpgd(

@@ -9,7 +9,7 @@ description = "Append-only nanoGPT AdamW vs WW-PGD scaling experiments"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
-dependencies = ["numpy", "pandas", "matplotlib", "PyYAML", "torch", "datasets", "tokenizers", "jupyterlab", "nbformat", "scipy", "weightwatcher>=0.7.7,<0.8", "torch-optimi", "tiktoken", "ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git@bf970cb6b73e977f8374114c442ae5b0589eccaa"]
+dependencies = ["numpy", "pandas", "matplotlib", "PyYAML", "torch", "datasets", "tokenizers", "jupyterlab", "nbformat", "scipy", "weightwatcher>=0.7.7,<0.8", "torch-optimi", "tiktoken", "ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git@384b8a1b50ec93be6ef1a0fb50db1e69cae8d7f4"]
 
 [project.scripts]
 wwgpt = "wwgpt.cli:main"
