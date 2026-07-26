@@ -18,7 +18,7 @@ Scientific spectral records now require the real WeightWatcher analyzer: `Weight
 
 The corrected WW-PGD arm is named `adamw_wwpgd_reference` and is pinned to `CalculatedContent/WW_PGD` commit `bf970cb6b73e977f8374114c442ae5b0589eccaa`. Projection events are scheduled only by the optimizer-step interval in `train.wwpgd_interval`. Event index maps to hardness through the functional warmup/ramp event controls: events before warmup have zero hardness; ramp events increase linearly as `(event - warmup + 1) / ramp_events`; subsequent events use full hardness.
 
-Eligible projected layers are only transformer matrices named `blocks.*.attn.c_attn`, `blocks.*.attn.c_proj`, `blocks.*.mlp.0`, and `blocks.*.mlp.2`. Token embeddings, position embeddings, tied output weights, LayerNorm parameters, and biases are excluded.
+Eligible projected layers are only transformer matrices named `blocks.*.attn.key`, `blocks.*.attn.query`, `blocks.*.attn.value`, `blocks.*.attn.proj`, `blocks.*.mlp.0`, and `blocks.*.mlp.2`. Token embeddings, position embeddings, the tied output head, LayerNorm parameters, and biases are excluded.
 
 Evaluation uses fixed held-out validation and fixed training probes, identified by hashes in metrics and manifests. Validation readers never concatenate training tokens.
 

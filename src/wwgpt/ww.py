@@ -587,10 +587,13 @@ def apply_external_wwpgd(
                              "sham_seed": int(sham_seed) if sham_seed is not None else None})
     return rows
 
-def apply_wwpgd(model: nn.Module, target_alpha: float | None = None, strength: float | None = None, step: int = 0, warmup_steps: int = 0, ramp_steps: int = 0):
-    if strength is not None:
-        raise ValueError("deprecated strength is not a documented external WW_PGD parameter; use standard WWPGD or a documented external parameter ablation")
-    return apply_external_wwpgd(model, event_index=step, actual_step=step)
+def apply_wwpgd(model: nn.Module, target_alpha: float = 2.0, *, step: int = 0):
+    """Apply WW-PGD using its sole public spectral target."""
+    target_alpha = float(target_alpha)
+    if not math.isfinite(target_alpha) or target_alpha <= 1.0:
+        raise ValueError("target_alpha must be finite and greater than 1")
+    cfg = ExternalWWTailConfigSpec(target_alpha=target_alpha)
+    return apply_external_wwpgd(model, event_index=step, actual_step=step, cfg=cfg)
 
 COMPOSITE_SPECIFICATION_VERSION = "raw_and_composite_v1"
 

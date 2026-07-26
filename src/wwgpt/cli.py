@@ -12,7 +12,6 @@ from wwgpt.config import DEFAULT_SEEDS
 from wwgpt.data import prepare_data_for_mode
 from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
 from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
-from wwgpt.strength_scan import run_strength_scan, parse_strengths
 from wwgpt.strength_scan_analysis import analyze_strength_scan as analyze_strength_scan_cmd
 from wwgpt.device import device_summary, save_device_manifest, run_device_preflight
 from wwgpt.integrity import audit_experiment, audit_strength_scan
@@ -260,7 +259,7 @@ def _seeds(s: str | None) -> list[int] | None:
 
 
 def main() -> None:
-    p=argparse.ArgumentParser(prog="wwgpt", epilog="Supported experiment profiles: reproduction_tiny, reproduction_fineweb, scaling. Primary reproduction uses blend_eta=0.5; strength/blend_eta ablations must be explicit."); sub=p.add_subparsers(dest="cmd", required=True)
+    p=argparse.ArgumentParser(prog="wwgpt", epilog="Supported experiment profiles: reproduction_tiny, reproduction_fineweb, scaling. target_alpha is the only public spectral target."); sub=p.add_subparsers(dest="cmd", required=True)
     s=sub.add_parser("smoke-test"); s.add_argument("root", type=Path); s.add_argument("--steps", type=int, default=3)
     a=sub.add_parser("analyze-results", help="analyze one isolated profile result root; no composite pooling by default"); a.add_argument("results_root", type=Path); a.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Profile label for isolation metadata"); a.add_argument("--analysis-plan", type=Path, default=Path("configs/analysis_plan.yaml"))
     pd=sub.add_parser("prepare-data", help="prepare data for profiles: reproduction_tiny, reproduction_fineweb, scaling"); pd.add_argument("--profile", choices=["reproduction_tiny", "reproduction_fineweb", "scaling"], help="Experiment profile; omit to use --config (default configs/default.yaml)"); pd.add_argument("--level", type=int, required=True); pd.add_argument("--data-root", type=Path, required=True); pd.add_argument("--token-multiplier", type=int, required=True); pd.add_argument("--config", type=Path, default=Path("configs/default.yaml")); pd.add_argument("--docs-file", type=Path, help="newline-delimited local documents for offline data-preparation tests"); pd.add_argument("--dry-run", action="store_true")
@@ -279,7 +278,6 @@ def main() -> None:
         parser.add_argument("--wwpgd-stale-distance-multiplier", type=float)
         parser.add_argument("--wwpgd-skip-fast-apply-on-measurement-step", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--wwpgd-log-every-fast-step", action=argparse.BooleanOptionalAction, default=None)
-    ss=sub.add_parser("run-strength-scan", help="explicit external blend_eta/strength ablation; not part of primary reproduction") ; ss.add_argument("--level", type=int, required=True); ss.add_argument("--data-root", type=Path, required=True); ss.add_argument("--results-root", type=Path, required=True); ss.add_argument("--token-multiplier", type=int, required=True); ss.add_argument("--seeds", default="1337"); ss.add_argument("--strengths", default="0.1,0.25,0.5,1.0", help="Explicit ablation strengths. The retired 0.02 scan is not part of reproduction and is not a default."); ss.add_argument("--device"); ss.add_argument("--optimizer", choices=["adamw","muon","stableadamw"], default="adamw"); ss.add_argument("--config", type=Path, default=Path("configs/default.yaml")); ss.add_argument("--eval-interval", type=int); ss.add_argument("--spectral-interval", type=int); ss.add_argument("--checkpoint-interval", type=int); ss.set_defaults(immediate_projection_spectral=True); ss.add_argument("--immediate-projection-spectral", dest="immediate_projection_spectral", action="store_true"); ss.add_argument("--no-immediate-projection-spectral", dest="immediate_projection_spectral", action="store_false"); ss.add_argument("--resume", action="store_true"); ss.add_argument("--continue-on-error", action="store_true", default=True); ss.add_argument("--scan-name", default="strength_scan"); ss.add_argument("--instability-loss-threshold", type=float, default=20.0); ss.add_argument("--include-adamw-control", action="store_true", default=True); ss.add_argument("--dry-run", action="store_true")
     ass=sub.add_parser("analyze-strength-scan"); ass.add_argument("--scan-root", type=Path, required=True)
     ic=sub.add_parser("inspect-checkpoint"); ic.add_argument("--checkpoint", type=Path, required=True)
     vr=sub.add_parser("validate-resume"); vr.add_argument("--run-dir", type=Path, required=True)
@@ -328,15 +326,6 @@ def main() -> None:
         if args.dry_run:
             return
         print(run_canonical_trials(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),_resolve_config_path(args),args.device,args.wwpgd_interval,args.eval_interval,args.checkpoint_interval,args.spectral_interval,args.precision,args.resume,args.immediate_projection_spectral,args.allow_code_version_mismatch,args.analysis_plan,args.audit_override_code_version_mismatch))
-    elif args.cmd=="run-strength-scan":
-        seeds = _seeds(args.seeds) or _resolved_config(args).seeds
-        strengths = parse_strengths(args.strengths)
-        arms = (["adamw_control"] if args.include_adamw_control else []) + [f"wwpgd_strength_{x:g}" for x in strengths]
-        out = args.results_root / args.scan_name / f"level_{args.level:02d}" / f"multiplier_{args.token_multiplier}"
-        _print_resolved_execution(args, arms=arms, seeds=seeds, trials=len(seeds), output_dirs=[out], dry_run=args.dry_run)
-        if args.dry_run:
-            return
-        print(run_strength_scan(args.level,args.data_root,args.results_root,args.token_multiplier,_seeds(args.seeds),args.strengths,_resolve_config_path(args),args.device,args.eval_interval,args.spectral_interval,args.checkpoint_interval,args.immediate_projection_spectral,args.resume,args.continue_on_error,args.scan_name,args.instability_loss_threshold,args.include_adamw_control,args.optimizer))
     elif args.cmd=="analyze-strength-scan": print(analyze_strength_scan_cmd(args.scan_root))
     elif args.cmd=="inspect-checkpoint":
         import json; print(json.dumps(inspect_checkpoint(args.checkpoint), indent=2, sort_keys=True, default=str))
