@@ -1,16 +1,15 @@
 name: Apply final generalization regression fix
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - agent/final-portable-test-cleanup
 
 permissions:
   contents: write
 
 jobs:
   fix-and-commit:
-    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
