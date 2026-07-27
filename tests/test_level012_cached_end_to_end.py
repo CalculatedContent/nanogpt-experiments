@@ -72,7 +72,7 @@ def _fake_candidate_builder(model, *, event_index=0, actual_step=0, cfg=None, la
         selected = layer_selector(model, name, row) if layer_selector else True
         original = weight.detach().clone()
         # The first eligible layer converges immediately; the remaining layers
-        # take an ordinary fast step.  This creates terminal and nonterminal rows
+        # take an ordinary fast step. This creates terminal and nonterminal rows
         # in the same flush, matching the failure mode seen on the MacBook.
         displacement_scale = 1e-6 if index == 0 else 1e-2
         candidate = original + displacement_scale
@@ -228,14 +228,19 @@ def test_level_cached_endpoint_run_completes_end_to_end(level, monkeypatch, tmp_
     assert {row["action_type"] for row in relaxation} == {"fast_endpoint_relaxation"}
     assert not (run / "wwpgd_projection.csv").exists()
     assert complete["projected_matrix_count"] == complete["fast_changed_layer_count"]
-    assert any(
-        row["converged"].lower() == "true"
-        or row["invalidated"].lower() == "true"
+    terminal_rows = [
+        row
         for row in relaxation
-    )
-    assert any(row["changed"].lower() == "true" for row in relaxation)
-    assert all(row["controller_gain_requested"] != "" for row in relaxation)
-    assert all(row["applied_relative_frobenius_change"] != "" for row in relaxation)
+        if row["converged"].lower() == "true"
+        or row["invalidated"].lower() == "true"
+    ]
+    changed_rows = [row for row in relaxation if row["changed"].lower() == "true"]
+    assert terminal_rows
+    assert changed_rows
+    assert all(row["controller_gain_requested"] == "" for row in terminal_rows)
+    assert all(row["applied_relative_frobenius_change"] == "" for row in terminal_rows)
+    assert all(row["controller_gain_requested"] != "" for row in changed_rows)
+    assert all(row["applied_relative_frobenius_change"] != "" for row in changed_rows)
     assert (run / "selected_checkpoint_metrics.json").is_file()
     assert (run / "checkpoints" / "checkpoint_step_000006.pt").is_file()
     assert json.loads((run / "events.jsonl").read_text()) == {"event": "complete"}
