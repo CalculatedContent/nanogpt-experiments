@@ -95,3 +95,98 @@ def test_trust_region_clipping_is_enforced(monkeypatch):
 def test_level_config_dimensions(level, layers, heads, width):
     cfg = yaml.safe_load(Path(f"configs/level{level}_adaptive_alpha.yaml").read_text())
     assert (cfg["model"]["n_layer"], cfg["model"]["n_head"], cfg["model"]["n_embd"]) == (layers, heads, width)
+
+
+def test_cached_fast_rows_do_not_enter_controller_stream(monkeypatch):
+    model = torch.nn.Linear(2, 2, bias=False)
+    model.weight.data.fill_(1.0)
+    ext = _extension()
+    ext.endpoint_cache["layer"] = _endpoint(model.weight)
+    monkeypatch.setattr(
+        "wwgpt.ww.projected_matrix_modules", lambda _model: [("layer", model.weight)]
+    )
+
+    _details, changed_rows, controller_rows = ext.after_optimizer_step(
+        model=model,
+        optimizer_step=1,
+        total_optimizer_steps=10,
+        tokens_seen=2,
+        measurement_interval=100,
+    )
+
+    assert changed_rows
+    assert controller_rows == []
+    assert ext.relaxation_rows
+
+
+def test_terminal_fast_row_matches_full_relaxation_schema(monkeypatch, tmp_path):
+    from wwgpt.checkpointing import append_csv_records
+
+    model = torch.nn.Linear(2, 2, bias=False)
+    model.weight.data.fill_(1.0)
+    ext = _extension()
+    endpoint = _endpoint(model.weight)
+    ext.endpoint_cache["layer"] = endpoint
+    monkeypatch.setattr(
+        "wwgpt.ww.projected_matrix_modules", lambda _model: [("layer", model.weight)]
+    )
+
+    ordinary = ext.after_optimizer_step_fast(
+        model=model,
+        optimizer_step=1,
+        total_optimizer_steps=10,
+        measurement_interval=100,
+    ).all_rows[0]
+    terminal = ext._terminal_fast_row(
+        "layer",
+        endpoint,
+        2,
+        "endpoint_converged",
+        before=endpoint.latest_endpoint_relative_distance,
+        converged=True,
+        measurement_interval=100,
+    )
+
+    assert list(terminal) == list(ordinary)
+    assert terminal["controller_gain_requested"] != ""
+    assert terminal["applied_relative_frobenius_change"] != ""
+
+    path = tmp_path / "wwpgd_endpoint_relaxation.csv"
+    append_csv_records(path, [ordinary])
+    append_csv_records(path, [terminal])
+    frame = pd.read_csv(path)
+    assert len(frame) == 2
+    assert set(frame.action_type) == {"fast_endpoint_relaxation"}
+
+
+def test_cached_completion_summary_handles_csv_blanks_and_false_strings():
+    from wwgpt.train import _cached_endpoint_completion_statistics
+
+    measurements = [
+        {"alpha_side": "above_target", "cache_activated": "False"},
+        {"alpha_side": "below_target", "cache_activated": "True"},
+    ]
+    relaxations = [
+        {
+            "changed": "True",
+            "controller_gain_requested": "0.02",
+            "controller_gain_applied": "0.01",
+            "applied_relative_frobenius_change": "0.001",
+        },
+        {
+            "changed": "False",
+            "controller_gain_requested": "",
+            "controller_gain_applied": "nan",
+            "applied_relative_frobenius_change": "",
+        },
+    ]
+
+    summary = _cached_endpoint_completion_statistics(measurements, relaxations)
+
+    assert summary["endpoint_activation_count"] == 1
+    assert summary["above_target_activation_count"] == 0
+    assert summary["below_target_activation_count"] == 1
+    assert summary["fast_changed_layer_count"] == 1
+    assert summary["mean_controller_gain_requested"] == pytest.approx(0.02)
+    assert summary["max_controller_gain_applied"] == pytest.approx(0.01)
+    assert summary["mean_applied_relative_frobenius_change"] == pytest.approx(0.001)
