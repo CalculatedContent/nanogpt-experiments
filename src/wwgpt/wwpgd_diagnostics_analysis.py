@@ -73,10 +73,20 @@ def collect_wwpgd_diagnostics(
         level=level,
         token_multiplier=token_multiplier,
     )
-    runs = runs[runs.extension.eq("wwpgd")]
+    empty = {
+        key: pd.DataFrame()
+        for key in ("internal", "measurements", "relaxations", "fast_steps", "controller")
+    }
+    if runs.empty or "extension" not in runs.columns:
+        return empty
+    runs = runs[runs["extension"].eq("wwpgd")]
+    if runs.empty:
+        return empty
     if base_optimizer:
+        if "base_optimizer" not in runs.columns:
+            return empty
         base = normalize_arm(base_optimizer).removesuffix("_wwpgd")
-        runs = runs[runs.base_optimizer.map(normalize_arm).eq(base)]
+        runs = runs[runs["base_optimizer"].map(normalize_arm).eq(base)]
     buckets: dict[str, list[pd.DataFrame]] = {
         "internal": [],
         "measurements": [],

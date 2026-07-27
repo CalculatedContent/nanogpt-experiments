@@ -387,6 +387,13 @@ def _write_curve_figures(
 ) -> list[Path]:
     figures_dir.mkdir(parents=True, exist_ok=True)
     outputs: list[Path] = []
+    grouping_columns = ["level", "token_multiplier", "base_optimizer", "metric"]
+    if not set(grouping_columns).issubset(arm_summary.columns):
+        arm_summary = pd.DataFrame(columns=grouping_columns)
+    if not set(grouping_columns).issubset(paired_summary.columns):
+        paired_summary = pd.DataFrame(columns=grouping_columns)
+    if not set(grouping_columns).issubset(selected.columns):
+        selected = pd.DataFrame(columns=grouping_columns)
     for identity, group in arm_summary.groupby(
         ["level", "token_multiplier", "base_optimizer", "metric"], dropna=False
     ):

@@ -61,6 +61,8 @@ def collect_weightwatcher_rows(
         level=level,
         token_multiplier=token_multiplier,
     )
+    if runs.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     if base_optimizer:
         base = normalize_arm(base_optimizer).removesuffix("_wwpgd")
         runs = runs[runs["base_optimizer"].map(normalize_arm).eq(base)]
@@ -343,6 +345,8 @@ def analyze_weightwatcher_results(
         "weightwatcher_exclusion_reasons.csv": exclusion,
         "weightwatcher_trap_rows.csv": traps,
         "weightwatcher_trap_seed_summary.csv": trap_summary,
+        "scientific_alpha.csv": valid,
+        "trap_diagnostics.csv": traps,
     }
     for filename, frame in outputs.items():
         frame.to_csv(output_dir / filename, index=False)
