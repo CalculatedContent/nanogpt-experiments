@@ -1,0 +1,82 @@
+name: Apply cached summary reader fix
+
+on:
+  push:
+    branches:
+      - agent/fix-cached-summary-empty-values
+
+permissions:
+  contents: write
+
+jobs:
+  patch-train-reader:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-cached-summary-empty-values
+          fetch-depth: 0
+      - name: Patch typed cached completion CSV reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/wwgpt/train.py")
+          text = path.read_text()
+          old = '''def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
+              if not path.is_file():
+                  return []
+              with path.open(newline="") as handle:
+                  return list(csv.DictReader(handle))
+          '''
+          new = '''def _csv_truth(value: object) -> bool:
+              if isinstance(value, bool):
+                  return value
+              return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+          def _csv_optional_float(value: object) -> float | None:
+              if value in (None, ""):
+                  return None
+              try:
+                  parsed = float(value)
+              except (TypeError, ValueError):
+                  return None
+              return parsed if math.isfinite(parsed) else None
+
+
+          def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
+              if not path.is_file():
+                  return []
+              with path.open(newline="") as handle:
+                  rows: list[dict[str, object]] = list(csv.DictReader(handle))
+              for row in rows:
+                  for field in ("changed", "converged", "invalidated", "cache_activated"):
+                      if field in row:
+                          row[field] = _csv_truth(row[field])
+                  for field in (
+                      "controller_gain_requested",
+                      "controller_gain_applied",
+                      "requested_relative_frobenius_change",
+                      "applied_relative_frobenius_change",
+                  ):
+                      if field in row:
+                          row[field] = _csv_optional_float(row[field])
+              return rows
+          '''
+          if old not in text:
+              raise SystemExit("expected _read_complete_csv_rows source was not found")
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/wwgpt/train.py
+          git commit -m "Parse cached WWPGD completion CSV values"
+          git push origin HEAD:agent/fix-cached-summary-empty-values
