@@ -1723,9 +1723,15 @@ def run_scientific_single(
             last_loss = validation_probe_loss
             latest_validation_loss = validation_probe_loss
             if validation_probe_loss < best_validation_loss:
+                previous_best_step = best_validation_step
                 best_validation_loss = validation_probe_loss
                 best_validation_step = step
-                torch.save(model.state_dict(), ckpt / f"best_val_step_{step:06d}_{seed}.pt")
+                best_path = ckpt / f"best_val_step_{step:06d}_{seed}.pt"
+                torch.save(model.state_dict(), best_path)
+                if previous_best_step and previous_best_step != step:
+                    (ckpt / f"best_val_step_{previous_best_step:06d}_{seed}.pt").unlink(
+                        missing_ok=True
+                    )
             metric_rows.append(
                 {
                     "step": step,

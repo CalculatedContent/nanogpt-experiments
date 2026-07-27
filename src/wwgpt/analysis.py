@@ -377,6 +377,14 @@ def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Pa
     analyze_alpha_trajectories(runs, out)
     from wwgpt.cross_level_analysis import analyze_cross_level_effects
     analyze_cross_level_effects(results_root, out, figures_dir=out / "figures")
+    from wwgpt.seed_analysis import analyze_seed_results
+    from wwgpt.generalization_analysis import analyze_generalization_results
+    from wwgpt.weightwatcher_analysis import analyze_weightwatcher_results
+    from wwgpt.wwpgd_diagnostics_analysis import analyze_wwpgd_diagnostics
+    analyze_seed_results(results_root, out, figures_dir=out / "figures")
+    analyze_generalization_results(results_root, out, figures_dir=out / "figures")
+    analyze_weightwatcher_results(results_root, out, figures_dir=out / "figures")
+    analyze_wwpgd_diagnostics(results_root, out, figures_dir=out / "figures")
     if analysis_plan is not None:
         from wwgpt.acceleration_analysis import analyze_acceleration_results, verify_analysis_eligibility
         verify_analysis_eligibility(runs, out, analysis_plan)

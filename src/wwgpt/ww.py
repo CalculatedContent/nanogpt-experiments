@@ -111,9 +111,15 @@ def _ww_version() -> str:
 
 
 def weightwatcher_details(model: nn.Module, *, randomize: bool = False) -> pd.DataFrame:
+    # Run pip-installed WeightWatcher on CPU for MPS/XLA training models.
     import weightwatcher
+
+    live_device = _model_device(model)
+    offloaded = live_device.type in {"mps", "xla"}
+    analysis_model = _cpu_candidate_model(model) if offloaded else model
+    analysis_device = _model_device(analysis_model)
     start = time.perf_counter()
-    watcher = weightwatcher.WeightWatcher(model=model)
+    watcher = weightwatcher.WeightWatcher(model=analysis_model)
     details = watcher.analyze(detX=True, randomize=randomize, plot=False)
     if details is None:
         raise RuntimeError("WeightWatcher.analyze returned None")
@@ -122,7 +128,13 @@ def weightwatcher_details(model: nn.Module, *, randomize: bool = False) -> pd.Da
     df["weightwatcher_version"] = _ww_version()
     df["spectral_estimator"] = "weightwatcher"
     df["spectral_estimator_version"] = df["weightwatcher_version"]
-    df["weightwatcher_configuration"] = json.dumps({"detX": True, "randomize": bool(randomize), "plot": False}, sort_keys=True)
+    df["weightwatcher_configuration"] = json.dumps(
+        {"detX": True, "randomize": bool(randomize), "plot": False},
+        sort_keys=True,
+    )
+    df["analysis_execution_device"] = str(analysis_device)
+    df["live_model_device"] = str(live_device)
+    df["analysis_offloaded"] = offloaded
     df["valid_for_science"] = True
     return df
 
