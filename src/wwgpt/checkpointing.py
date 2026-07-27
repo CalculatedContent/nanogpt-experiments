@@ -48,6 +48,48 @@ def _sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
+def _csv_truth(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return bool(value)
+
+
+def _normalize_scientific_csv_rows(
+    path: Path, rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Normalize values consumed later through ``csv.DictReader``.
+
+    DictReader returns missing numeric cells as ``""`` and false booleans as the
+    truthy string ``"False"``. Cached WWPGD completion summaries intentionally
+    consume these two append-only artifacts without pandas, so terminal no-op rows
+    need explicit numeric zeros and false flags need an empty representation.
+    """
+    normalized = [dict(row) for row in rows]
+    if path.name == "wwpgd_endpoint_relaxation.csv":
+        for row in normalized:
+            if str(row.get("action_type", "")) != "fast_endpoint_relaxation":
+                continue
+            for field in (
+                "controller_gain_requested",
+                "controller_gain_applied",
+                "requested_relative_frobenius_change",
+                "applied_relative_frobenius_change",
+            ):
+                if row.get(field) in (None, ""):
+                    row[field] = 0.0
+            for field in ("changed", "converged", "invalidated"):
+                if field in row:
+                    row[field] = "true" if _csv_truth(row[field]) else ""
+    elif path.name == "wwpgd_endpoint_measurements.csv":
+        for row in normalized:
+            if "cache_activated" in row:
+                row["cache_activated"] = (
+                    "true" if _csv_truth(row["cache_activated"]) else ""
+                )
+    return normalized
+
+
 def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     """Durably append records. A flush boundary is a transaction boundary."""
     import csv
@@ -67,12 +109,20 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
         ]
         if not rows:
             return
-    fields = list(rows[0])
+    rows = _normalize_scientific_csv_rows(path, rows)
     if path.exists() and path.stat().st_size:
         with path.open(newline="") as f:
-            existing = next(csv.reader(f))
-        if existing != fields:
-            raise ValueError(f"CSV schema changed while appending {path}: {existing} != {fields}")
+            fields = next(csv.reader(f))
+        field_set = set(fields)
+        for row in rows:
+            extra = [key for key in row if key not in field_set]
+            if extra:
+                raise ValueError(
+                    f"CSV schema changed while appending {path}: "
+                    f"unexpected fields {extra}; existing fields {fields}"
+                )
+    else:
+        fields = list(rows[0])
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="raise")
         if f.tell() == 0:
