@@ -27,6 +27,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p artifacts/phase3
           cat .github/phase3/part*.b64 | base64 --decode > /tmp/phase3.py
           python - <<'PY'
           from pathlib import Path
@@ -38,7 +39,7 @@ jobs:
               raise RuntimeError(f'expected one MPS test patch target, found {text.count(old)}')
           path.write_text(text.replace(old, new, 1))
           PY
-          python /tmp/phase3.py
+          python /tmp/phase3.py 2>&1 | tee artifacts/phase3/apply.log
           rm -rf .github/phase3
       - name: Install pip-resolved experiment dependencies
         run: |
@@ -49,7 +50,6 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p artifacts/phase3
           python -m compileall -q src tests scripts 2>&1 | tee artifacts/phase3/compile.log
           ruff check src tests scripts 2>&1 | tee artifacts/phase3/ruff.log
           git diff --check
