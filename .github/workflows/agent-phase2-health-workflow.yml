@@ -63,21 +63,6 @@ jobs:
           if old in text:
               text = text.replace(old, new, 1)
 
-          old = (
-              '    })\\n'
-              '    write_json(run_dir / "run_complete.json", common_complete)\\n'
-              '    _log_train_progress(\\n'
-          )
-          new = (
-              '    })\\n'
-              '    (run_dir / "run_complete.json").write_text(\\n'
-              '        json.dumps(common_complete, indent=2, sort_keys=True, default=str) + "\\\\n"\\n'
-              '    )\\n'
-              '    _log_train_progress(\\n'
-          )
-          if old in text:
-              text = text.replace(old, new, 1)
-
           path.write_text(text)
           PY
       - name: Apply source changes
@@ -86,6 +71,27 @@ jobs:
           set -o pipefail
           mkdir -p artifacts/phase2
           python scripts/_agent_phase2_health_workflow.py 2>&1 | tee artifacts/phase2/apply.log
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/wwgpt/train.py')
+          text = path.read_text()
+          old = (
+              '    write_json(run_dir / "run_complete.json", common_complete)\n'
+              '    _log_train_progress(\n'
+          )
+          new = (
+              '    (run_dir / "run_complete.json").write_text(\n'
+              '        json.dumps(common_complete, indent=2, sort_keys=True, default=str) + "\\n"\n'
+              '    )\n'
+              '    _log_train_progress(\n'
+          )
+          if text.count(old) != 1:
+              raise RuntimeError(
+                  f'expected exactly one post-health completion write, found {text.count(old)}'
+              )
+          path.write_text(text.replace(old, new, 1))
+          PY
       - name: Restore helper sources before commit
         run: |
           git checkout -- scripts/_agent_phase2_health_workflow.py
