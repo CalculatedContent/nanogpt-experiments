@@ -151,20 +151,15 @@ def test_cached_terminal_rows_are_completion_summary_safe(tmp_path):
     assert activations[0]["layer_name"] == "blocks.0.attn.value"
 
 
-def test_subset_rows_use_the_existing_append_only_schema(tmp_path):
-    path = tmp_path / "records.csv"
-    append_csv_records(path, [{"step": 1, "loss": 2.0, "note": "first"}])
-    append_csv_records(path, [{"step": 2, "loss": 1.5}])
-
-    assert _rows(path) == [
-        {"step": "1", "loss": "2.0", "note": "first"},
-        {"step": "2", "loss": "1.5", "note": ""},
-    ]
-
-
-def test_unrelated_csv_schema_mismatches_remain_errors(tmp_path):
+def test_non_relaxation_csv_schemas_remain_strict(tmp_path):
     path = tmp_path / "metrics.csv"
-    append_csv_records(path, [{"step": 1, "loss": 2.0}])
+    append_csv_records(path, [{"step": 1, "loss": 2.0, "note": "first"}])
 
     with pytest.raises(ValueError, match="CSV schema changed"):
-        append_csv_records(path, [{"step": 2, "validation_loss": 1.5}])
+        append_csv_records(path, [{"step": 2, "loss": 1.5}])
+
+    with pytest.raises(ValueError, match="CSV schema changed"):
+        append_csv_records(
+            path,
+            [{"step": 2, "loss": 1.5, "note": "second", "unexpected": 1}],
+        )
