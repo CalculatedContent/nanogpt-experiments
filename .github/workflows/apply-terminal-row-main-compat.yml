@@ -1,0 +1,37 @@
+name: Apply terminal-row main compatibility
+
+on:
+  push:
+    branches:
+      - agent/fix-level0-2-end-to-end
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-level0-2-end-to-end
+          fetch-depth: 0
+      - name: Apply and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git apply --check .github/terminal-row-main-compat.patch
+          git apply .github/terminal-row-main-compat.patch
+          rm -f .github/terminal-row-main-compat.patch
+          rm -f .github/workflows/apply-terminal-row-main-compat.yml
+          python -m compileall -q src tests
+          git diff --check
+          git add -A
+          git commit -m "Align terminal relaxation rows with current main"
+          git push origin HEAD:agent/fix-level0-2-end-to-end
