@@ -89,7 +89,11 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
                         f"{fields} != {observed}"
                     )
     else:
-        fields = list(rows[0])
+        fields = (
+    list(dict.fromkeys(key for row in rows for key in row))
+    if path.name == "wwpgd_endpoint_relaxation.csv"
+    else list(rows[0])
+)
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="raise")
         if f.tell() == 0:
@@ -229,7 +233,7 @@ def inspect_checkpoint(path: Path):
     validate_checkpoint_keys(obj)
     keys=("checkpoint_schema_version","scientific_schema_version","run_directory","pair_id","optimizer_name","seed","level","token_multiplier","current_step","next_step","tokens_processed","training_reader_position","reader_position","gradient_accumulation_position","next_projection_event_index","completed_projection_event_indexes","compatibility","data_hash","tokenizer_hash","validation_probe_hash","training_probe_hash","weightwatcher_version","weightwatcher_configuration","wwpgd_commit","git_commit","device_type","precision_policy","created_at","saved_at")
     out={k: obj.get(k) for k in keys}
-    out.update({"sha256": sha, "size_bytes": size, "sha256_verified": True,"size_verified": True})
+    out.update({"sha256": sha, "size_bytes": size, "sha256_verified": True, "size_verified": True})
     return out
 
 def _load_json(path: Path) -> dict:

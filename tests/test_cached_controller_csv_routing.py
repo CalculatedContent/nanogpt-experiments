@@ -101,10 +101,9 @@ def test_cached_terminal_rows_are_completion_summary_safe(tmp_path):
         "action_type": "fast_endpoint_relaxation",
     }
 
-    append_csv_records(relaxation, [changed_row])
+    append_csv_records(relaxation, [terminal_row, changed_row])
     # Terminal rows intentionally omit movement fields. They are a valid subset of
     # the established relaxation schema and must remain parseable at completion.
-    append_csv_records(relaxation, [terminal_row])
     relaxation_rows = _read_complete_csv_rows(relaxation)
 
     # These are the exact access patterns used by the completion summary.
@@ -129,9 +128,9 @@ def test_cached_terminal_rows_are_completion_summary_safe(tmp_path):
     assert requested_gains == [0.02]
     assert applied_gains == [0.01]
     assert applied_changes == [0.001]
-    assert relaxation_rows[1]["controller_gain_requested"] is None
-    assert relaxation_rows[1]["changed"] is False
-    assert relaxation_rows[1]["converged"] is True
+    assert relaxation_rows[0]["controller_gain_requested"] is None
+    assert relaxation_rows[0]["changed"] is False
+    assert relaxation_rows[0]["converged"] is True
 
     append_csv_records(
         measurement,
