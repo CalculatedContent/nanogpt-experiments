@@ -33,6 +33,10 @@ jobs:
           from pathlib import Path
           path = Path('/tmp/phase3.py')
           text = path.read_text()
+          root_old = 'ROOT = Path(__file__).resolve().parents[1]'
+          if text.count(root_old) != 1:
+              raise RuntimeError(f'expected one repository-root patch target, found {text.count(root_old)}')
+          text = text.replace(root_old, 'ROOT = Path.cwd()', 1)
           old = 'monkeypatch.setattr(module, "_model_device", lambda _model: torch.device("mps"))'
           new = 'monkeypatch.setattr(module, "_model_device", lambda candidate: torch.device("mps") if candidate is model else torch.device("cpu"))'
           if text.count(old) != 1:
