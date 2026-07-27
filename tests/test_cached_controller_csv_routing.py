@@ -56,19 +56,109 @@ def test_cached_fast_rows_are_not_duplicated_into_controller_csv(tmp_path):
             "action_type": "slow_measurement",
         },
     ]
-    assert _rows(relaxation) == [
-        {
-            "optimizer_step": "76",
-            "layer_name": "blocks.0.attn.value",
-            "endpoint_measurement_step": "75",
-            "action_type": "fast_endpoint_relaxation",
-        },
-        {
-            "optimizer_step": "100",
-            "layer_name": "blocks.0.attn.value",
-            "endpoint_measurement_step": "75",
-            "action_type": "fast_endpoint_relaxation",
-        },
+    relaxation_rows = _rows(relaxation)
+    assert [
+        (
+            row["optimizer_step"],
+            row["layer_name"],
+            row["endpoint_measurement_step"],
+            row["action_type"],
+        )
+        for row in relaxation_rows
+    ] == [
+        ("76", "blocks.0.attn.value", "75", "fast_endpoint_relaxation"),
+        ("100", "blocks.0.attn.value", "75", "fast_endpoint_relaxation"),
+    ]
+
+
+def test_cached_terminal_rows_are_completion_summary_safe(tmp_path):
+    relaxation = tmp_path / "wwpgd_endpoint_relaxation.csv"
+    measurement = tmp_path / "wwpgd_endpoint_measurements.csv"
+
+    changed_row = {
+        "optimizer_step": 76,
+        "layer_name": "blocks.0.attn.value",
+        "endpoint_measurement_step": 75,
+        "controller_gain_requested": 0.02,
+        "controller_gain_applied": 0.01,
+        "requested_relative_frobenius_change": 0.002,
+        "applied_relative_frobenius_change": 0.001,
+        "changed": True,
+        "converged": False,
+        "invalidated": False,
+        "invalidation_reason": "",
+        "action_type": "fast_endpoint_relaxation",
+    }
+    terminal_row = {
+        "optimizer_step": 77,
+        "layer_name": "blocks.0.attn.value",
+        "endpoint_measurement_step": 75,
+        "changed": False,
+        "converged": True,
+        "invalidated": False,
+        "invalidation_reason": "endpoint_converged",
+        "action_type": "fast_endpoint_relaxation",
+    }
+
+    append_csv_records(relaxation, [changed_row])
+    # Terminal rows intentionally omit movement fields. They are a valid subset of
+    # the established relaxation schema and must remain parseable at completion.
+    append_csv_records(relaxation, [terminal_row])
+    relaxation_rows = _rows(relaxation)
+
+    # These are the exact access patterns used by the completion summary.
+    changed = [row for row in relaxation_rows if row.get("changed")]
+    requested_gains = [
+        float(row["controller_gain_requested"])
+        for row in relaxation_rows
+        if row.get("controller_gain_requested") is not None
+    ]
+    applied_gains = [
+        float(row["controller_gain_applied"])
+        for row in relaxation_rows
+        if row.get("controller_gain_applied") is not None
+    ]
+    applied_changes = [
+        float(row["applied_relative_frobenius_change"])
+        for row in changed
+        if row.get("applied_relative_frobenius_change") is not None
+    ]
+
+    assert len(changed) == 1
+    assert requested_gains == [0.02, 0.0]
+    assert applied_gains == [0.01, 0.0]
+    assert applied_changes == [0.001]
+
+    append_csv_records(
+        measurement,
+        [
+            {
+                "optimizer_step": 75,
+                "layer_name": "blocks.0.attn.value",
+                "cache_activated": True,
+                "action_type": "slow_measurement",
+            },
+            {
+                "optimizer_step": 75,
+                "layer_name": "blocks.0.attn.query",
+                "cache_activated": False,
+                "action_type": "slow_measurement",
+            },
+        ],
+    )
+    activations = [row for row in _rows(measurement) if row.get("cache_activated")]
+    assert len(activations) == 1
+    assert activations[0]["layer_name"] == "blocks.0.attn.value"
+
+
+def test_subset_rows_use_the_existing_append_only_schema(tmp_path):
+    path = tmp_path / "records.csv"
+    append_csv_records(path, [{"step": 1, "loss": 2.0, "note": "first"}])
+    append_csv_records(path, [{"step": 2, "loss": 1.5}])
+
+    assert _rows(path) == [
+        {"step": "1", "loss": "2.0", "note": "first"},
+        {"step": "2", "loss": "1.5", "note": ""},
     ]
 
 
