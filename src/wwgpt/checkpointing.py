@@ -48,48 +48,6 @@ def _sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-
-def _csv_truth(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"true", "1", "yes"}
-    return bool(value)
-
-
-def _normalize_scientific_csv_rows(
-    path: Path, rows: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Normalize values consumed later through ``csv.DictReader``.
-
-    DictReader returns missing numeric cells as ``""`` and false booleans as the
-    truthy string ``"False"``. Cached WWPGD completion summaries intentionally
-    consume these two append-only artifacts without pandas, so terminal no-op rows
-    need explicit numeric zeros and false flags need an empty representation.
-    """
-    normalized = [dict(row) for row in rows]
-    if path.name == "wwpgd_endpoint_relaxation.csv":
-        for row in normalized:
-            if str(row.get("action_type", "")) != "fast_endpoint_relaxation":
-                continue
-            for field in (
-                "controller_gain_requested",
-                "controller_gain_applied",
-                "requested_relative_frobenius_change",
-                "applied_relative_frobenius_change",
-            ):
-                if row.get(field) in (None, ""):
-                    row[field] = 0.0
-            for field in ("changed", "converged", "invalidated"):
-                if field in row:
-                    row[field] = "true" if _csv_truth(row[field]) else ""
-    elif path.name == "wwpgd_endpoint_measurements.csv":
-        for row in normalized:
-            if "cache_activated" in row:
-                row["cache_activated"] = (
-                    "true" if _csv_truth(row["cache_activated"]) else ""
-                )
-    return normalized
-
-
 def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     """Durably append records. A flush boundary is a transaction boundary."""
     import csv
@@ -99,8 +57,6 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     # Cached-endpoint fast-relaxation rows already have the dedicated
     # wwpgd_endpoint_relaxation.csv stream. Do not duplicate them into
     # wwpgd_controller.csv, whose stable schema is the slow measurement record.
-    # Filter per row so a custom schedule that measures and applies on the same
-    # flush boundary remains valid as well.
     if path.name == "wwpgd_controller.csv":
         rows = [
             row
@@ -109,14 +65,13 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
         ]
         if not rows:
             return
-    rows = _normalize_scientific_csv_rows(path, rows)
     if path.exists() and path.stat().st_size:
         with path.open(newline="") as f:
             fields = next(csv.reader(f))
         if path.name == "wwpgd_endpoint_relaxation.csv":
-            # Terminal convergence/invalidation rows are intentionally a subset
-            # of the full movement schema. Missing cells are allowed only here;
-            # any newly introduced field remains a hard schema error.
+            # Terminal convergence/invalidation rows intentionally omit movement
+            # fields. They may be a subset of the established relaxation schema,
+            # but introducing any new field remains a hard schema error.
             field_set = set(fields)
             for row in rows:
                 extra = [key for key in row if key not in field_set]
@@ -274,7 +229,7 @@ def inspect_checkpoint(path: Path):
     validate_checkpoint_keys(obj)
     keys=("checkpoint_schema_version","scientific_schema_version","run_directory","pair_id","optimizer_name","seed","level","token_multiplier","current_step","next_step","tokens_processed","training_reader_position","reader_position","gradient_accumulation_position","next_projection_event_index","completed_projection_event_indexes","compatibility","data_hash","tokenizer_hash","validation_probe_hash","training_probe_hash","weightwatcher_version","weightwatcher_configuration","wwpgd_commit","git_commit","device_type","precision_policy","created_at","saved_at")
     out={k: obj.get(k) for k in keys}
-    out.update({"sha256": sha, "size_bytes": size, "sha256_verified": True, "size_verified": True})
+    out.update({"sha256": sha, "size_bytes": size, "sha256_verified": True,"size_verified": True})
     return out
 
 def _load_json(path: Path) -> dict:
