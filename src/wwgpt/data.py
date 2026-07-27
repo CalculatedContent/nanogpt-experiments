@@ -536,6 +536,51 @@ def load_prepared_scientific_data(data_root: Path, level: int, token_multiplier:
     raise FileNotFoundError("no compatible scientific prepared data found; run scripts/download_data.sh first")
 
 
+def ensure_prepared_data(
+    data_root: Path,
+    level: int,
+    token_multiplier: int,
+    config_path: Path | None = None,
+    docs: Iterable[str] | None = None,
+    min_validation_tokens: int = 100_000,
+    *,
+    force_reprepare: bool = False,
+) -> TokenData:
+    """Reuse one exact immutable prepared-data identity when it already exists.
+
+    Scientific reruns and optimizer/extension ablations must consume the same
+    tokenizer and corpus identity.  Only a genuinely missing identity is
+    prepared; ambiguous or invalid existing identities remain hard errors.
+    """
+    if docs is None and not force_reprepare:
+        try:
+            existing = load_prepared_scientific_data(
+                data_root, level, token_multiplier, config_path
+            )
+        except FileNotFoundError as exc:
+            message = str(exc)
+            if "found 0" not in message and "no compatible scientific prepared data" not in message:
+                raise
+        else:
+            cfg = load_config(config_path, level)
+            if existing.data_manifest is None:
+                raise RuntimeError("prepared data is missing its manifest")
+            validate_evaluation_capacity(existing.data_manifest, cfg)
+            _log_prepare_progress(
+                f"reusing prepared data identity={existing.data_manifest.get('prepared_data_identity_hash')} "
+                f"root={existing.root}"
+            )
+            return existing
+    return prepare_data_for_mode(
+        data_root,
+        level,
+        token_multiplier,
+        config_path,
+        docs=docs,
+        min_validation_tokens=min_validation_tokens,
+    )
+
+
 class NonRepeatingTokenReader:
     def __init__(self, tokens: list[int], block_size: int):
         self.tokens = tokens; self.block_size = block_size; self.pos = 0
