@@ -46,6 +46,56 @@ jobs:
           python /tmp/phase3.py 2>&1 | tee artifacts/phase3/apply.log
           base64 --decode .github/phase3/build_experiment_config.b64 > scripts/build_experiment_config.py
           chmod +x scripts/build_experiment_config.py
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              if text.count(old) != 1:
+                  raise RuntimeError(f'{path}: expected one lint patch target, found {text.count(old)}')
+              target.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              'src/wwgpt/generalization_analysis.py',
+              '            lambda column: pd.to_numeric(column, errors="coerce") if column.name in {x_name, y_name} else column\n',
+              '            lambda column, x_name=x_name, y_name=y_name: pd.to_numeric(column, errors="coerce") if column.name in {x_name, y_name} else column\n',
+          )
+          replace_once(
+              'src/wwgpt/seed_analysis.py',
+              'from typing import Any, Iterable\n',
+              'from collections.abc import Iterable\nfrom typing import Any\n',
+          )
+          replace_once(
+              'src/wwgpt/wwpgd_diagnostics_analysis.py',
+              '''    for level, base, seed, run_dir in sorted(identities):
+        subset = lambda frame: frame[
+            frame.level.eq(level)
+            & frame.base_optimizer.eq(base)
+            & frame.seed.eq(seed)
+            & frame.run_dir.eq(run_dir)
+        ] if not frame.empty else frame
+''',
+              '''    for level, base, seed, run_dir in sorted(identities):
+        def subset(
+            frame,
+            *,
+            level=level,
+            base=base,
+            seed=seed,
+            run_dir=run_dir,
+        ):
+            if frame.empty:
+                return frame
+            return frame[
+                frame.level.eq(level)
+                & frame.base_optimizer.eq(base)
+                & frame.seed.eq(seed)
+                & frame.run_dir.eq(run_dir)
+            ]
+''',
+          )
+          PY
           rm -rf .github/phase3
       - name: Install pip-resolved experiment dependencies
         run: |
