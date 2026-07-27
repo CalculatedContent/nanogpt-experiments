@@ -814,11 +814,39 @@ def _model_diagnostic_metrics(model: torch.nn.Module) -> dict[str, float | int]:
     }
 
 
+def _csv_truth(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+def _csv_optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"nonfinite numeric value in completion CSV: {value!r}")
+    return parsed
+
+
 def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
     if not path.is_file():
         return []
     with path.open(newline="") as handle:
-        return list(csv.DictReader(handle))
+        rows: list[dict[str, object]] = list(csv.DictReader(handle))
+    for row in rows:
+        for field in ("changed", "converged", "invalidated", "cache_activated"):
+            if field in row:
+                row[field] = _csv_truth(row[field])
+        for field in (
+            "controller_gain_requested",
+            "controller_gain_applied",
+            "requested_relative_frobenius_change",
+            "applied_relative_frobenius_change",
+        ):
+            if field in row:
+                row[field] = _csv_optional_float(row[field])
+    return rows
 
 
 def _log_train_progress(message: str) -> None:

@@ -57,8 +57,6 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     # Cached-endpoint fast-relaxation rows already have the dedicated
     # wwpgd_endpoint_relaxation.csv stream. Do not duplicate them into
     # wwpgd_controller.csv, whose stable schema is the slow measurement record.
-    # Filter per row so a custom schedule that measures and applies on the same
-    # flush boundary remains valid as well.
     if path.name == "wwpgd_controller.csv":
         rows = [
             row
@@ -67,12 +65,35 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
         ]
         if not rows:
             return
-    fields = list(rows[0])
     if path.exists() and path.stat().st_size:
         with path.open(newline="") as f:
-            existing = next(csv.reader(f))
-        if existing != fields:
-            raise ValueError(f"CSV schema changed while appending {path}: {existing} != {fields}")
+            fields = next(csv.reader(f))
+        if path.name == "wwpgd_endpoint_relaxation.csv":
+            # Terminal convergence/invalidation rows intentionally omit movement
+            # fields. They may be a subset of the established relaxation schema,
+            # but introducing any new field remains a hard schema error.
+            field_set = set(fields)
+            for row in rows:
+                extra = [key for key in row if key not in field_set]
+                if extra:
+                    raise ValueError(
+                        f"CSV schema changed while appending {path}: "
+                        f"unexpected fields {extra}; existing fields {fields}"
+                    )
+        else:
+            for row in rows:
+                observed = list(row)
+                if observed != fields:
+                    raise ValueError(
+                        f"CSV schema changed while appending {path}: "
+                        f"{fields} != {observed}"
+                    )
+    else:
+        fields = (
+            list(dict.fromkeys(key for row in rows for key in row))
+            if path.name == "wwpgd_endpoint_relaxation.csv"
+            else list(rows[0])
+        )
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="raise")
         if f.tell() == 0:
