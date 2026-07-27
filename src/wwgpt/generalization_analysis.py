@@ -103,6 +103,8 @@ def collect_generalization_rows(
         level=level,
         token_multiplier=token_multiplier,
     )
+    if runs.empty or "base_optimizer" not in runs.columns:
+        return pd.DataFrame()
     if base_optimizer:
         base = normalize_arm(base_optimizer).removesuffix("_wwpgd")
         runs = runs[runs.base_optimizer.map(normalize_arm).eq(base)]
