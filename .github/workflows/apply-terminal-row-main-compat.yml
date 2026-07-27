@@ -20,18 +20,32 @@ jobs:
         with:
           ref: agent/fix-level0-2-end-to-end
           fetch-depth: 0
-      - name: Apply and commit
+      - name: Apply and commit source-only compatibility fix
         shell: bash
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git apply --check .github/terminal-row-main-compat.patch
-          git apply .github/terminal-row-main-compat.patch
-          rm -f .github/terminal-row-main-compat.patch
-          rm -f .github/workflows/apply-terminal-row-main-compat.yml
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/wwgpt/train.py")
+          text = path.read_text()
+          replacements = (
+              ('"controller_gain_requested": math.nan,', '"controller_gain_requested": None,'),
+              ('"controller_gain_applied": math.nan,', '"controller_gain_applied": None,'),
+              ('"requested_relative_frobenius_change": math.nan,', '"requested_relative_frobenius_change": None,'),
+              ('"applied_relative_frobenius_change": math.nan,', '"applied_relative_frobenius_change": None,'),
+          )
+          for old, new in replacements:
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one occurrence of {old!r}; found {count}")
+              text = text.replace(old, new)
+          path.write_text(text)
+          PY
           python -m compileall -q src tests
           git diff --check
-          git add -A
-          git commit -m "Align terminal relaxation rows with current main"
+          git add src/wwgpt/train.py
+          git commit -m "Align terminal relaxation values with current main"
           git push origin HEAD:agent/fix-level0-2-end-to-end
