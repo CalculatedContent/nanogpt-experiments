@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/fix-level0-2-end-to-end
+  pull_request:
+    branches:
+      - main
 
 jobs:
   export-source:
