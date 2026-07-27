@@ -1,4 +1,4 @@
-name: Apply final regression fixes
+name: Finalize repository validation fixes
 
 on:
   pull_request:
@@ -9,10 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  fix-and-validate:
+  fix-validate-and-commit:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       MPLBACKEND: Agg
     steps:
@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Apply final regression fixes
+      - name: Apply final source fixes
         shell: bash
         run: |
           set -euo pipefail
@@ -39,6 +39,7 @@ jobs:
                   raise RuntimeError(f"{path}: expected one patch target, found {count}")
               target.write_text(text.replace(old, new, 1))
 
+          # Empty legacy/smoke inputs must produce empty analysis tables, not crashes.
           replace_once(
               "src/wwgpt/seed_analysis.py",
               "    outputs: list[Path] = []\n    for identity, group in arm_summary.groupby(\n",
@@ -52,6 +53,7 @@ jobs:
               "        selected = pd.DataFrame(columns=grouping_columns)\n"
               "    for identity, group in arm_summary.groupby(\n",
           )
+
           replace_once(
               "src/wwgpt/weightwatcher_analysis.py",
               "    runs = filter_runs(\n"
@@ -69,6 +71,54 @@ jobs:
               "        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()\n"
               "    if base_optimizer:\n",
           )
+
+          replace_once(
+              "src/wwgpt/wwpgd_diagnostics_analysis.py",
+              "    runs = filter_runs(\n"
+              "        discover_completed_runs(Path(results_root)),\n"
+              "        level=level,\n"
+              "        token_multiplier=token_multiplier,\n"
+              "    )\n"
+              "    runs = runs[runs.extension.eq(\"wwpgd\")]\n"
+              "    if base_optimizer:\n"
+              "        base = normalize_arm(base_optimizer).removesuffix(\"_wwpgd\")\n"
+              "        runs = runs[runs.base_optimizer.map(normalize_arm).eq(base)]\n"
+              "    buckets: dict[str, list[pd.DataFrame]] = {\n",
+              "    runs = filter_runs(\n"
+              "        discover_completed_runs(Path(results_root)),\n"
+              "        level=level,\n"
+              "        token_multiplier=token_multiplier,\n"
+              "    )\n"
+              "    empty = {\n"
+              "        key: pd.DataFrame()\n"
+              "        for key in (\"internal\", \"measurements\", \"relaxations\", \"fast_steps\", \"controller\")\n"
+              "    }\n"
+              "    if runs.empty or \"extension\" not in runs.columns:\n"
+              "        return empty\n"
+              "    runs = runs[runs[\"extension\"].eq(\"wwpgd\")]\n"
+              "    if runs.empty:\n"
+              "        return empty\n"
+              "    if base_optimizer:\n"
+              "        if \"base_optimizer\" not in runs.columns:\n"
+              "            return empty\n"
+              "        base = normalize_arm(base_optimizer).removesuffix(\"_wwpgd\")\n"
+              "        runs = runs[runs[\"base_optimizer\"].map(normalize_arm).eq(base)]\n"
+              "    buckets: dict[str, list[pd.DataFrame]] = {\n",
+          )
+
+          # Preserve the detailed schema-v3 tables and the documented compatibility exports.
+          replace_once(
+              "src/wwgpt/weightwatcher_analysis.py",
+              "        \"weightwatcher_trap_rows.csv\": traps,\n"
+              "        \"weightwatcher_trap_seed_summary.csv\": trap_summary,\n"
+              "    }\n",
+              "        \"weightwatcher_trap_rows.csv\": traps,\n"
+              "        \"weightwatcher_trap_seed_summary.csv\": trap_summary,\n"
+              "        \"scientific_alpha.csv\": valid,\n"
+              "        \"trap_diagnostics.csv\": traps,\n"
+              "    }\n",
+          )
+
           notebook_path = Path("notebooks/04_scaling_laws.ipynb")
           notebook = json.loads(notebook_path.read_text())
           phrase = "LEVEL is intentionally not used as a filter"
@@ -78,22 +128,29 @@ jobs:
               notebook["cells"][0]["source"] = source.splitlines(True)
           notebook_path.write_text(json.dumps(notebook, indent=1) + "\n")
           PY
+
+          rm -f artifacts/local-readiness/local_readiness.json
+          rmdir artifacts/local-readiness 2>/dev/null || true
+          rmdir artifacts 2>/dev/null || true
           rm .github/workflows/agent-final-regression-fixes.yml
-      - name: Install package and validation tools
+
+      - name: Install pip-resolved dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-cache-dir -e ".[notebooks]"
           python -m pip install pytest ruff
-      - name: Validate source and tests
+
+      - name: Compile lint and test
         shell: bash
         run: |
           set -o pipefail
-          mkdir -p artifacts/final-regression
-          python -m compileall -q src tests scripts 2>&1 | tee artifacts/final-regression/compile.log
-          ruff check src tests scripts 2>&1 | tee artifacts/final-regression/ruff.log
-          pytest -q -m "not slow" --tb=short 2>&1 | tee artifacts/final-regression/pytest.log
+          mkdir -p /tmp/final-validation
+          python -m compileall -q src tests scripts 2>&1 | tee /tmp/final-validation/compile.log
+          ruff check src tests scripts 2>&1 | tee /tmp/final-validation/ruff.log
+          pytest -q -m "not slow" --tb=short 2>&1 | tee /tmp/final-validation/pytest.log
           git diff --check
-      - name: Validate pip-installed packages at Levels 0-2
+
+      - name: Run real pip-package Level 0-2 readiness
         shell: bash
         run: |
           set -o pipefail
@@ -101,13 +158,14 @@ jobs:
             --device cpu \
             --levels 0,1,2 \
             --optimizers adamw,stableadamw,muon \
-            --output artifacts/final-regression/local-readiness \
-            2>&1 | tee artifacts/final-regression/local-readiness.log
+            --output /tmp/final-validation/local-readiness \
+            2>&1 | tee /tmp/final-validation/local-readiness.log
+
       - name: Execute all seven schema-v3 notebooks
         shell: bash
         env:
           WWGPT_RESULTS_ROOT: tests/fixtures/schema_v3_results/experiments/level_00/multiplier_1
-          WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/final-regression/notebooks
+          WWGPT_NOTEBOOK_OUTPUT_DIR: /tmp/final-validation/notebooks
           WWGPT_ANALYSIS_PLAN: configs/analysis_plan_exploratory.yaml
           WWGPT_LEVEL: '0'
           WWGPT_TOKEN_MULTIPLIER: '1'
@@ -117,19 +175,13 @@ jobs:
           WWGPT_REUSE_ANALYSIS: '1'
         run: |
           set -o pipefail
-          ./scripts/run_analysis_notebooks.sh 2>&1 | tee artifacts/final-regression/notebooks.log
-          test "$(find artifacts/final-regression/notebooks/executed -name '*.ipynb' | wc -l)" -eq 7
-      - name: Upload validation evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-regression-validation
-          path: artifacts/final-regression/**
-          if-no-files-found: warn
-      - name: Commit validated fixes
+          ./scripts/run_analysis_notebooks.sh 2>&1 | tee /tmp/final-validation/notebooks.log
+          test "$(find /tmp/final-validation/notebooks/executed -name '*.ipynb' | wc -l)" -eq 7
+
+      - name: Commit validated repository
         run: |
           git config user.name "OpenAI Codex"
           git config user.email "codex@openai.com"
           git add -A
-          git commit -m "Fix final analysis regressions"
+          git commit -m "Finalize local Level 0-2 experiment workflow"
           git push origin HEAD:agent/final-local-mac-readiness
