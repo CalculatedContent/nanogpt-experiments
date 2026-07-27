@@ -145,7 +145,8 @@ jobs:
           ./scripts/run_analysis_notebooks.sh
           test "$(find "$WWGPT_NOTEBOOK_OUTPUT_DIR/executed" -name '*.ipynb' | wc -l)" -eq 7
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/repository_validation.csv"
-          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/single_level_selected_metrics.csv"
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/selected_checkpoint_effects_by_seed.csv"
+          test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/selected_checkpoint_effect_summary.csv"
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/cross_level_scaling_readiness.csv"
           test -f "$WWGPT_NOTEBOOK_OUTPUT_DIR/tables/wwpgd_diagnostic_health.csv"
       - name: Upload executed notebooks and analysis outputs
