@@ -46,7 +46,7 @@ jobs:
           python /tmp/phase3.py 2>&1 | tee artifacts/phase3/apply.log
           base64 --decode .github/phase3/build_experiment_config.b64 > scripts/build_experiment_config.py
           chmod +x scripts/build_experiment_config.py
-          base64 --decode .github/phase3/post_patch.b64 > /tmp/phase3_post.py
+          cat .github/phase3/post0*.b64 | base64 --decode > /tmp/phase3_post.py
           python /tmp/phase3_post.py 2>&1 | tee artifacts/phase3/post.log
           rm -rf .github/phase3
       - name: Install pip-resolved experiment dependencies
