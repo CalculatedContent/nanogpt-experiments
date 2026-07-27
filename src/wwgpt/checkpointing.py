@@ -113,14 +113,26 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     if path.exists() and path.stat().st_size:
         with path.open(newline="") as f:
             fields = next(csv.reader(f))
-        field_set = set(fields)
-        for row in rows:
-            extra = [key for key in row if key not in field_set]
-            if extra:
-                raise ValueError(
-                    f"CSV schema changed while appending {path}: "
-                    f"unexpected fields {extra}; existing fields {fields}"
-                )
+        if path.name == "wwpgd_endpoint_relaxation.csv":
+            # Terminal convergence/invalidation rows are intentionally a subset
+            # of the full movement schema. Missing cells are allowed only here;
+            # any newly introduced field remains a hard schema error.
+            field_set = set(fields)
+            for row in rows:
+                extra = [key for key in row if key not in field_set]
+                if extra:
+                    raise ValueError(
+                        f"CSV schema changed while appending {path}: "
+                        f"unexpected fields {extra}; existing fields {fields}"
+                    )
+        else:
+            for row in rows:
+                observed = list(row)
+                if observed != fields:
+                    raise ValueError(
+                        f"CSV schema changed while appending {path}: "
+                        f"{fields} != {observed}"
+                    )
     else:
         fields = list(rows[0])
     with path.open("a", newline="") as f:
