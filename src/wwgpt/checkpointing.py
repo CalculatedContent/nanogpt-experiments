@@ -90,10 +90,10 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
                     )
     else:
         fields = (
-    list(dict.fromkeys(key for row in rows for key in row))
-    if path.name == "wwpgd_endpoint_relaxation.csv"
-    else list(rows[0])
-)
+            list(dict.fromkeys(key for row in rows for key in row))
+            if path.name == "wwpgd_endpoint_relaxation.csv"
+            else list(rows[0])
+        )
     with path.open("a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="raise")
         if f.tell() == 0:
