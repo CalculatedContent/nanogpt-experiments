@@ -2,14 +2,35 @@
 
 This repository runs append-only, paired nanoGPT experiments comparing base optimizers with and without the repository's WW-PGD extension. It provides experiment infrastructure and descriptive analysis; it does **not** ship a scaling-law fit, acceleration conclusion, statistical-significance test, or alpha-generalization result.
 
-## Quick start
+## Quick start on a local MacBook
+
+Run the repository from its checked-out `main` branch and keep the prepared corpus and results under `/tmp`:
 
 ```bash
 ./scripts/setup_environment.sh
-./scripts/download_data.sh 0 /path/to/data 20
-./scripts/run_five_seeds.sh 0 /path/to/data /path/to/results 20
-./scripts/analyze_five_seeds.sh /path/to/results
+./scripts/run_one_pair.sh \
+  0 \
+  /tmp/nanogpt-experiments/data \
+  /tmp/nanogpt-experiments/results-level0 \
+  20 \
+  mps \
+  1337
 ```
+
+`run_one_pair.sh` prepares or reuses the exact level-specific data identity, runs the paired AdamW and AdamW+WWPGD arms, checks run health, analyzes the result, audits the experiment, and writes the reproducibility report.
+
+Run one bounded paired pilot at each of Levels 0, 1, and 2 with:
+
+```bash
+WWGPT_SEEDS=1337 WWGPT_RUN_NOTEBOOKS=0 \
+  ./scripts/run_level0_2_experiment.sh \
+  /tmp/nanogpt-experiments/data \
+  /tmp/nanogpt-experiments/results-level0-2 \
+  20 \
+  mps
+```
+
+Set `WWGPT_SEEDS=1337,2027,4099` only after the one-seed pilots complete and pass health and audit checks.
 
 A smoke test checks infrastructure only and is invalid for scientific conclusions:
 
