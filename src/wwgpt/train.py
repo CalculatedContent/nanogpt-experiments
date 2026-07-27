@@ -718,7 +718,7 @@ def _assert_extension_scope_unchanged(model, before: dict[str, torch.Tensor]) ->
         raise RuntimeError("WW-PGD extension changed ineligible model tensors: " + ", ".join(changed))
 
 
-def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_steps: int | None = None, resolved_lr_decay_steps: int | None = None, resolved_llrd_gamma: float | None = None) -> dict[str, object]:
+def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_steps: int | None = None, resolved_lr_decay_steps: int | None = None, resolved_llrd_gamma: float | None = None, learning_rate_resolution: dict[str, object] | None = None) -> dict[str, object]:
     """Return the fully resolved nanoGPT baseline settings recorded in run metadata."""
     model = cfg.model
     train = cfg.train
@@ -749,6 +749,7 @@ def resolved_baseline_hyperparameters(cfg: ExperimentConfig, *, resolved_warmup_
         "layernorm_bias": model.layernorm_bias,
         "model_architecture_version": model.model_architecture_version,
         "scheduler_implementation": SCHEDULER_IMPLEMENTATION,
+        "learning_rate_resolution": dict(learning_rate_resolution or {}),
     }
     if resolved_warmup_steps is not None:
         out["resolved_warmup_steps"] = resolved_warmup_steps
@@ -762,6 +763,63 @@ def _gradient_norm(parameters) -> torch.Tensor:
     if not norms:
         return torch.tensor(0.0)
     return torch.linalg.vector_norm(torch.stack(norms), ord=2)
+
+def _gradient_diagnostic_metrics(model: torch.nn.Module, suffix: str) -> dict[str, float | int]:
+    nonfinite = 0
+    maximum = 0.0
+    elements = 0
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        gradient = parameter.grad.detach()
+        elements += int(gradient.numel())
+        nonfinite += int((~torch.isfinite(gradient)).sum().detach().cpu())
+        if gradient.numel():
+            maximum = max(maximum, float(gradient.abs().max().detach().cpu()))
+    return {
+        f"gradient_nonfinite_element_count_{suffix}": nonfinite,
+        f"gradient_max_abs_{suffix}": maximum,
+        f"gradient_element_count_{suffix}": elements,
+    }
+
+
+def _model_diagnostic_metrics(model: torch.nn.Module) -> dict[str, float | int]:
+    from wwgpt.ww import is_projected_layer
+
+    total_sq = 0.0
+    eligible_sq = 0.0
+    maximum = 0.0
+    nonfinite = 0
+    parameter_count = 0
+    eligible_names = {
+        f"{name}.weight"
+        for name, module in model.named_modules()
+        if is_projected_layer(name) and getattr(module, "weight", None) is not None
+    }
+    for name, value in model.state_dict().items():
+        tensor = value.detach().float()
+        parameter_count += int(tensor.numel())
+        nonfinite += int((~torch.isfinite(tensor)).sum().cpu())
+        total_sq += float(torch.sum(tensor * tensor).cpu())
+        if name in eligible_names:
+            eligible_sq += float(torch.sum(tensor * tensor).cpu())
+        if tensor.numel():
+            maximum = max(maximum, float(tensor.abs().max().cpu()))
+    return {
+        "model_parameter_l2_norm": math.sqrt(max(total_sq, 0.0)),
+        "eligible_matrix_l2_norm": math.sqrt(max(eligible_sq, 0.0)),
+        "model_max_abs_parameter": maximum,
+        "model_nonfinite_parameter_count": nonfinite,
+        "model_parameter_element_count": parameter_count,
+    }
+
+
+def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="") as handle:
+        return list(csv.DictReader(handle))
+
 
 def _log_train_progress(message: str) -> None:
     print(f"[wwgpt run-multiseed] {message}", file=sys.stderr, flush=True)
@@ -1312,6 +1370,7 @@ def run_scientific_single(
             resolved_warmup_steps=resolved_warmup_steps,
             resolved_lr_decay_steps=resolved_lr_decay_steps,
             resolved_llrd_gamma=resolved_llrd_gamma,
+            learning_rate_resolution=bundle.learning_rate_resolution,
         ),
         "training_schedule_hash": sha256_bytes(json.dumps({"seed": seed, "level": level, "token_multiplier": token_multiplier, "steps": steps, "batch": cfg.train.batch_size, "training_sampling": cfg.train.training_sampling}, sort_keys=True).encode()),
         "resolved_stochastic_seeds": resolved_seeds,
@@ -1398,7 +1457,7 @@ def run_scientific_single(
     if cached_mode:
         adaptive = cfg.wwpgd.adaptive
         man.update({
-            "endpoint_measurement_source": adaptive.measurement_source,
+            "endpoint_measurement_source": "measurement.alpha_interval",
             "endpoint_measurement_interval": endpoint_measurement_interval,
             "endpoint_apply_interval": adaptive.apply_interval,
             "expected_endpoint_measurement_steps": expected_endpoint_measurement_steps,
@@ -1584,12 +1643,19 @@ def run_scientific_single(
             (loss / cfg.train.gradient_accumulation).backward()
             train_loss_value += float(loss.detach().cpu())
         grad_before_clip = _gradient_norm(model.parameters())
+        gradient_diagnostics_before = _gradient_diagnostic_metrics(model, "before_clip")
         if cfg.train.grad_clip > 0.0:
             grad = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
             grad_after_clip = _gradient_norm(model.parameters())
+            gradient_diagnostics_after = _gradient_diagnostic_metrics(model, "after_clip")
         else:
             grad = grad_before_clip
             grad_after_clip = grad_before_clip
+            gradient_diagnostics_after = dict(gradient_diagnostics_before)
+            gradient_diagnostics_after = {
+                key.replace("before_clip", "after_clip"): value
+                for key, value in gradient_diagnostics_after.items()
+            }
         timings["forward_backward_seconds"] += time.perf_counter() - fb_started
         lr_update_rows = apply_lr_schedule(bundle, step - 1, steps, resolved_warmup_steps, cfg.train)
         lr_rows.extend(lr_update_rows)
@@ -1657,9 +1723,15 @@ def run_scientific_single(
             last_loss = validation_probe_loss
             latest_validation_loss = validation_probe_loss
             if validation_probe_loss < best_validation_loss:
+                previous_best_step = best_validation_step
                 best_validation_loss = validation_probe_loss
                 best_validation_step = step
-                torch.save(model.state_dict(), ckpt / f"best_val_step_{step:06d}_{seed}.pt")
+                best_path = ckpt / f"best_val_step_{step:06d}_{seed}.pt"
+                torch.save(model.state_dict(), best_path)
+                if previous_best_step and previous_best_step != step:
+                    (ckpt / f"best_val_step_{previous_best_step:06d}_{seed}.pt").unlink(
+                        missing_ok=True
+                    )
             metric_rows.append(
                 {
                     "step": step,
@@ -1671,6 +1743,9 @@ def run_scientific_single(
                     "gradient_norm": float(grad_before_clip.detach().cpu()),
                     "gradient_norm_before_clip": float(grad_before_clip.detach().cpu()),
                     "gradient_norm_after_clip": float(grad_after_clip.detach().cpu()),
+                    **gradient_diagnostics_before,
+                    **gradient_diagnostics_after,
+                    **_model_diagnostic_metrics(model),
                     "train_minibatch_loss": float(loss.detach().cpu()),
                     "train_loss": tm["loss"],
                     "train_cross_entropy": tm["loss"],
@@ -1858,6 +1933,7 @@ def run_scientific_single(
         final_record["final_checkpoint_path"] = final_record["checkpoint_path"]
         final_record["final_checkpoint_hash"] = final_record["checkpoint_hash"]
         final_record["training_probe_hash"] = final_record["train_probe_hash"]
+        final_record.update(_model_diagnostic_metrics(model))
         write_json(run_dir / "final_checkpoint_metrics.json", final_record)
 
         # Selection depends solely on validation loss. All three selected metrics are
@@ -1885,6 +1961,7 @@ def run_scientific_single(
             probe_hashes={"train_probe_hash": train_hash, "validation_probe_hash": val_hash, "test_probe_hash": test_hash})
         selected_record["selection_metric_value"] = best_validation_loss
         selected_record["training_probe_hash"] = selected_record["train_probe_hash"]
+        selected_record.update(_model_diagnostic_metrics(model))
         write_json(run_dir / "selected_checkpoint_metrics.json", selected_record)
         _write_csv(run_dir / "selected_checkpoint_metrics.csv", [selected_record], overwrite=True)
         model.load_state_dict(final_state)
@@ -1907,8 +1984,8 @@ def run_scientific_single(
                      "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step,
                      "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source}
     if cached_mode:
-        measurements = getattr(extension, "measurement_rows", [])
-        relaxations = getattr(extension, "relaxation_rows", [])
+        measurements = _read_complete_csv_rows(run_dir / "wwpgd_endpoint_measurements.csv")
+        relaxations = _read_complete_csv_rows(run_dir / "wwpgd_endpoint_relaxation.csv")
         counters = getattr(extension, "counters", {})
         changed = [r for r in relaxations if r.get("changed")]
         requested_gains = [float(r["controller_gain_requested"]) for r in relaxations if r.get("controller_gain_requested") is not None]
@@ -1952,6 +2029,17 @@ def run_scientific_single(
             "mean_applied_hardness": sum(applied)/len(applied) if applied else 0.0, "max_applied_hardness": max(applied, default=0.0),
             "mean_relative_frobenius_change": sum(rels)/len(rels) if rels else 0.0, "maximum_relative_frobenius_change": max(rels, default=0.0)})
     write_json(run_dir / "run_complete.json", common_complete)
+    from wwgpt.run_health import generate_run_health
+    health = generate_run_health(run_dir)
+    common_complete.update({
+        "run_health_ready_for_analysis": health["ready_for_analysis"],
+        "run_health_info_count": health["counts"]["INFO"],
+        "run_health_warning_count": health["counts"]["WARNING"],
+        "run_health_error_count": health["counts"]["ERROR"],
+    })
+    (run_dir / "run_complete.json").write_text(
+        json.dumps(common_complete, indent=2, sort_keys=True, default=str) + "\n"
+    )
     _log_train_progress(
         f"completed run pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )

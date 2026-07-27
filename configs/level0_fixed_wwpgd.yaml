@@ -37,7 +37,7 @@ model:
   linear_bias: false
   layernorm_bias: true
   init_mode: nanogpt_normal_0p02
-  profile_name: scaling_level0_adaptive_alpha
+  profile_name: scaling_level0_fixed_wwpgd
   mlp_mult: 4
 train:
   batch_size: 16
@@ -75,7 +75,8 @@ wwpgd:
   warmup_events: 0
   ramp_events: 0
   adaptive:
-    mode: alpha_distance
+    mode: uniform
+    max_hardness: 0.25
     direction: both
     apply_mode: cached_endpoint_relaxation
     start_step: 60

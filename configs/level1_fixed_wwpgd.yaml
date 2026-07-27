@@ -1,7 +1,7 @@
 scientific_schema_version: 3
 measurement:
-  alpha_interval: 25
-  trap_diagnostic_interval: 50
+  alpha_interval: 250
+  trap_diagnostic_interval: 250
   alpha_randomize: false
   trap_randomize: true
 model_architecture_version: nanogpt_separate_qkv_tied_head_v2
@@ -26,9 +26,9 @@ tokenizer: null
 tokenizer_revision: null
 composite_spectral_analysis_enabled: false
 model:
-  n_layer: 1
-  n_head: 1
-  n_embd: 64
+  n_layer: 2
+  n_head: 2
+  n_embd: 128
   block_size: 256
   vocab_size: 8192
   dropout: 0.0
@@ -37,7 +37,7 @@ model:
   linear_bias: false
   layernorm_bias: true
   init_mode: nanogpt_normal_0p02
-  profile_name: scaling_level0_adaptive_alpha
+  profile_name: scaling_level1_fixed_wwpgd
   mlp_mult: 4
 train:
   batch_size: 16
@@ -50,8 +50,8 @@ train:
   weight_decay: 0.1
   grad_clip: 1.0
   eval_interval: 25
-  spectral_interval: 50
-  checkpoint_interval: 50
+  spectral_interval: 250
+  checkpoint_interval: 250
   eval_batches: 20
   training_sampling: random_window
   evaluation_sampling: random_per_eval
@@ -62,7 +62,7 @@ train:
   llrd_min_multiplier: 0.5
   lr_scale_rule: fixed
   lr_reference_tokens_per_step: 4096
-  wwpgd_interval: 25
+  wwpgd_interval: 250
 wwpgd:
   enabled: true
   extension: wwpgd
@@ -75,10 +75,11 @@ wwpgd:
   warmup_events: 0
   ramp_events: 0
   adaptive:
-    mode: alpha_distance
+    mode: uniform
+    max_hardness: 0.25
     direction: both
     apply_mode: cached_endpoint_relaxation
-    start_step: 60
+    start_step: 500
     min_observations: 2
     alpha_ema_beta: 0.8
     max_D: 0.15
@@ -90,7 +91,7 @@ wwpgd:
     max_cumulative_relative_frobenius_change_per_refresh: 0.025
     max_relative_frobenius_change_per_step: 0.001
     endpoint_stop_relative_distance: 0.0001
-    max_endpoint_age_steps: 50
+    max_endpoint_age_steps: 500
     stale_distance_multiplier: 2.0
     skip_fast_apply_on_measurement_step: true
     cache_endpoint_on_cpu: false
