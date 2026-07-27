@@ -58,7 +58,7 @@ for level in 0 1 2; do
     wwgpt run-multiseed \
       --level "$level" \
       --config "$config" \
-      --analysis-plan configs/analysis.plan_exploratory.yaml \
+      --analysis-plan configs/analysis_plan_exploratory.yaml \
       --data-root /tmp/wwgpt-preflight-data \
       --results-root /tmp/wwgpt-preflight-results \
       --token-multiplier 20 \
