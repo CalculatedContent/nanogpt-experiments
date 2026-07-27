@@ -1,0 +1,135 @@
+name: Apply final regression fixes
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/final-local-mac-readiness
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply final regression fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              target = Path(path)
+              text = target.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f"{path}: expected one patch target, found {count}")
+              target.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/wwgpt/seed_analysis.py",
+              "    outputs: list[Path] = []\n    for identity, group in arm_summary.groupby(\n",
+              "    outputs: list[Path] = []\n"
+              "    grouping_columns = [\"level\", \"token_multiplier\", \"base_optimizer\", \"metric\"]\n"
+              "    if not set(grouping_columns).issubset(arm_summary.columns):\n"
+              "        arm_summary = pd.DataFrame(columns=grouping_columns)\n"
+              "    if not set(grouping_columns).issubset(paired_summary.columns):\n"
+              "        paired_summary = pd.DataFrame(columns=grouping_columns)\n"
+              "    if not set(grouping_columns).issubset(selected.columns):\n"
+              "        selected = pd.DataFrame(columns=grouping_columns)\n"
+              "    for identity, group in arm_summary.groupby(\n",
+          )
+          replace_once(
+              "src/wwgpt/weightwatcher_analysis.py",
+              "    runs = filter_runs(\n"
+              "        discover_completed_runs(Path(results_root)),\n"
+              "        level=level,\n"
+              "        token_multiplier=token_multiplier,\n"
+              "    )\n"
+              "    if base_optimizer:\n",
+              "    runs = filter_runs(\n"
+              "        discover_completed_runs(Path(results_root)),\n"
+              "        level=level,\n"
+              "        token_multiplier=token_multiplier,\n"
+              "    )\n"
+              "    if runs.empty:\n"
+              "        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()\n"
+              "    if base_optimizer:\n",
+          )
+          notebook_path = Path("notebooks/04_scaling_laws.ipynb")
+          notebook = json.loads(notebook_path.read_text())
+          phrase = "LEVEL is intentionally not used as a filter"
+          source = "".join(notebook["cells"][0].get("source", []))
+          if phrase not in source:
+              source += "LEVEL is intentionally not used as a filter in this cross-level notebook.\n"
+              notebook["cells"][0]["source"] = source.splitlines(True)
+          notebook_path.write_text(json.dumps(notebook, indent=1) + "\n")
+          PY
+          rm .github/workflows/agent-final-regression-fixes.yml
+      - name: Install package and validation tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e ".[notebooks]"
+          python -m pip install pytest ruff
+      - name: Validate source and tests
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/final-regression
+          python -m compileall -q src tests scripts 2>&1 | tee artifacts/final-regression/compile.log
+          ruff check src tests scripts 2>&1 | tee artifacts/final-regression/ruff.log
+          pytest -q -m "not slow" --tb=short 2>&1 | tee artifacts/final-regression/pytest.log
+          git diff --check
+      - name: Validate pip-installed packages at Levels 0-2
+        shell: bash
+        run: |
+          set -o pipefail
+          wwgpt local-readiness \
+            --device cpu \
+            --levels 0,1,2 \
+            --optimizers adamw,stableadamw,muon \
+            --output artifacts/final-regression/local-readiness \
+            2>&1 | tee artifacts/final-regression/local-readiness.log
+      - name: Execute all seven schema-v3 notebooks
+        shell: bash
+        env:
+          WWGPT_RESULTS_ROOT: tests/fixtures/schema_v3_results/experiments/level_00/multiplier_1
+          WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/final-regression/notebooks
+          WWGPT_ANALYSIS_PLAN: configs/analysis_plan_exploratory.yaml
+          WWGPT_LEVEL: '0'
+          WWGPT_TOKEN_MULTIPLIER: '1'
+          WWGPT_BASE_OPTIMIZER: adamw
+          WWGPT_NOTEBOOK_STRICT: '0'
+          WWGPT_RUN_ANALYSIS: '0'
+          WWGPT_REUSE_ANALYSIS: '1'
+        run: |
+          set -o pipefail
+          ./scripts/run_analysis_notebooks.sh 2>&1 | tee artifacts/final-regression/notebooks.log
+          test "$(find artifacts/final-regression/notebooks/executed -name '*.ipynb' | wc -l)" -eq 7
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-regression-validation
+          path: artifacts/final-regression/**
+          if-no-files-found: warn
+      - name: Commit validated fixes
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          git commit -m "Fix final analysis regressions"
+          git push origin HEAD:agent/final-local-mac-readiness
