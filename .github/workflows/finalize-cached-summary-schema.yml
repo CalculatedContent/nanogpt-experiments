@@ -30,21 +30,15 @@ jobs:
 
           checkpointing = Path("src/wwgpt/checkpointing.py")
           text = checkpointing.read_text()
-          old = '''    else:
-              fields = list(rows[0])
-          with path.open("a", newline="") as f:
-          '''
-          new = '''    else:
-              fields = (
-                  list(dict.fromkeys(key for row in rows for key in row))
-                  if path.name == "wwpgd_endpoint_relaxation.csv"
-                  else list(rows[0])
-              )
-          with path.open("a", newline="") as f:
-          '''
-          if old not in text:
-              raise SystemExit("first-write schema block was not found")
-          text = text.replace(old, new, 1)
+          function_start = text.index("def append_csv_records(")
+          target = "        fields = list(rows[0])"
+          target_start = text.index(target, function_start)
+          replacement = '''        fields = (
+              list(dict.fromkeys(key for row in rows for key in row))
+              if path.name == "wwpgd_endpoint_relaxation.csv"
+              else list(rows[0])
+          )'''
+          text = text[:target_start] + replacement + text[target_start + len(target):]
           text = text.replace(
               '"sha256_verified": True,"size_verified": True',
               '"sha256_verified": True, "size_verified": True',
@@ -54,18 +48,16 @@ jobs:
 
           test_path = Path("tests/test_cached_controller_csv_routing.py")
           tests = test_path.read_text()
-          old_test = '''    append_csv_records(relaxation, [changed_row])
-              # Terminal rows intentionally omit movement fields. They are a valid subset of
-              # the established relaxation schema and must remain parseable at completion.
-              append_csv_records(relaxation, [terminal_row])
-          '''
-          new_test = '''    # A terminal row may be first in the initial batch. The writer must build
-              # the relaxation header from the union without losing later movement fields.
-              append_csv_records(relaxation, [terminal_row, changed_row])
-          '''
-          if old_test not in tests:
-              raise SystemExit("terminal-row regression setup was not found")
-          tests = tests.replace(old_test, new_test, 1)
+          changed_call = "    append_csv_records(relaxation, [changed_row])\n"
+          terminal_call = "    append_csv_records(relaxation, [terminal_row])\n"
+          if changed_call not in tests or terminal_call not in tests:
+              raise SystemExit("terminal-row regression calls were not found")
+          tests = tests.replace(
+              changed_call,
+              "    append_csv_records(relaxation, [terminal_row, changed_row])\n",
+              1,
+          )
+          tests = tests.replace(terminal_call, "", 1)
           tests = tests.replace(
               'assert relaxation_rows[1]["controller_gain_requested"] is None\n'
               '    assert relaxation_rows[1]["changed"] is False\n'
