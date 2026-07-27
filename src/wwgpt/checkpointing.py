@@ -55,16 +55,18 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
         return
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     # Cached-endpoint fast-relaxation rows already have the dedicated
-    # wwpgd_endpoint_relaxation.csv stream.  Do not duplicate them into
+    # wwpgd_endpoint_relaxation.csv stream. Do not duplicate them into
     # wwpgd_controller.csv, whose stable schema is the slow measurement record.
-    if (
-        path.name == "wwpgd_controller.csv"
-        and all(
-            str(row.get("action_type", "")) == "fast_endpoint_relaxation"
+    # Filter per row so a custom schedule that measures and applies on the same
+    # flush boundary remains valid as well.
+    if path.name == "wwpgd_controller.csv":
+        rows = [
+            row
             for row in rows
-        )
-    ):
-        return
+            if str(row.get("action_type", "")) != "fast_endpoint_relaxation"
+        ]
+        if not rows:
+            return
     fields = list(rows[0])
     if path.exists() and path.stat().st_size:
         with path.open(newline="") as f:
