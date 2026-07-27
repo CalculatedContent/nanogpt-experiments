@@ -1,9 +1,9 @@
 name: Apply final analysis and Mac workflow changes
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/final-local-mac-readiness
+      - main
 
 permissions:
   contents: write
