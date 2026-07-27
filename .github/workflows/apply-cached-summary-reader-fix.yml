@@ -1,9 +1,6 @@
 name: Apply cached summary reader fix
 
 on:
-  push:
-    branches:
-      - agent/fix-cached-summary-empty-values
   pull_request:
     branches:
       - main
@@ -33,12 +30,8 @@ jobs:
 
           path = Path("src/wwgpt/train.py")
           text = path.read_text()
-          old = '''def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
-              if not path.is_file():
-                  return []
-              with path.open(newline="") as handle:
-                  return list(csv.DictReader(handle))
-          '''
+          start = text.index("def _read_complete_csv_rows(")
+          end = text.index("\n\ndef _log_train_progress", start)
           new = '''def _csv_truth(value: object) -> bool:
               if isinstance(value, bool):
                   return value
@@ -48,11 +41,10 @@ jobs:
           def _csv_optional_float(value: object) -> float | None:
               if value in (None, ""):
                   return None
-              try:
-                  parsed = float(value)
-              except (TypeError, ValueError):
-                  return None
-              return parsed if math.isfinite(parsed) else None
+              parsed = float(value)
+              if not math.isfinite(parsed):
+                  raise ValueError(f"nonfinite numeric value in completion CSV: {value!r}")
+              return parsed
 
 
           def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
@@ -74,9 +66,7 @@ jobs:
                           row[field] = _csv_optional_float(row[field])
               return rows
           '''
-          if old not in text:
-              raise SystemExit("expected _read_complete_csv_rows source was not found")
-          path.write_text(text.replace(old, new, 1))
+          path.write_text(text[:start] + new + text[end:])
           PY
       - name: Commit patch
         shell: bash
