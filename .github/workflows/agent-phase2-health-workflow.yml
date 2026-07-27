@@ -21,16 +21,75 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Disambiguate the train patch helper
-        run: python scripts/_fix_phase2_helper.py
+      - name: Normalize the phase-two source helper
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/_agent_phase2_health_workflow.py')
+          text = path.read_text()
+
+          old = (
+              "replace_once(\n"
+              "    train_path,\n"
+              "    '        \"scheduler_implementation\": SCHEDULER_IMPLEMENTATION,\\n',\n"
+              "    '        \"scheduler_implementation\": SCHEDULER_IMPLEMENTATION,\\n'\n"
+              "    '        \"learning_rate_resolution\": dict(learning_rate_resolution or {}),\\n',\n"
+              ")\n"
+          )
+          new = (
+              "replace_once(\n"
+              "    train_path,\n"
+              "    '        \"model_architecture_version\": model.model_architecture_version,\\n'\n"
+              "    '        \"scheduler_implementation\": SCHEDULER_IMPLEMENTATION,\\n',\n"
+              "    '        \"model_architecture_version\": model.model_architecture_version,\\n'\n"
+              "    '        \"scheduler_implementation\": SCHEDULER_IMPLEMENTATION,\\n'\n"
+              "    '        \"learning_rate_resolution\": dict(learning_rate_resolution or {}),\\n',\n"
+              ")\n"
+          )
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = (
+              'def _model_diagnostic_metrics(model: torch.nn.Module) -> dict[str, float | int]:\\n'
+              '    total_sq = 0.0\\n'
+          )
+          new = (
+              'def _model_diagnostic_metrics(model: torch.nn.Module) -> dict[str, float | int]:\\n'
+              '    from wwgpt.ww import is_projected_layer\\n\\n'
+              '    total_sq = 0.0\\n'
+          )
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = (
+              '    })\\n'
+              '    write_json(run_dir / "run_complete.json", common_complete)\\n'
+              '    _log_train_progress(\\n'
+          )
+          new = (
+              '    })\\n'
+              '    (run_dir / "run_complete.json").write_text(\\n'
+              '        json.dumps(common_complete, indent=2, sort_keys=True, default=str) + "\\\\n"\\n'
+              '    )\\n'
+              '    _log_train_progress(\\n'
+          )
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+          PY
       - name: Apply source changes
         shell: bash
         run: |
           set -o pipefail
           mkdir -p artifacts/phase2
           python scripts/_agent_phase2_health_workflow.py 2>&1 | tee artifacts/phase2/apply.log
-      - name: Restore helper source before commit
-        run: git checkout -- scripts/_agent_phase2_health_workflow.py
+      - name: Restore helper sources before commit
+        run: |
+          git checkout -- scripts/_agent_phase2_health_workflow.py
+          git checkout -- scripts/_fix_phase2_helper.py
       - name: Install package and tools
         run: |
           python -m pip install --upgrade pip
