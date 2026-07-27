@@ -1,4 +1,4 @@
-name: Apply final empty-analysis regression fix
+name: Apply final generalization regression fix
 
 on:
   pull_request:
