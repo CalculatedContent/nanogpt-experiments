@@ -823,22 +823,6 @@ def _csv_truth(value: object) -> bool:
 def _csv_optional_float(value: object) -> float | None:
     if value in (None, ""):
         return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
-
-
-def _csv_truth(value: object) -> bool:
-    if isinstance(value, bool):
-        return value
-    return str(value or "").strip().lower() in {"true", "1", "yes"}
-
-
-def _csv_optional_float(value: object) -> float | None:
-    if value in (None, ""):
-        return None
     parsed = float(value)
     if not math.isfinite(parsed):
         raise ValueError(f"nonfinite numeric value in completion CSV: {value!r}")
