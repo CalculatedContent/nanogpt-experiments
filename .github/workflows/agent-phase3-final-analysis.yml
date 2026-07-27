@@ -44,6 +44,8 @@ jobs:
           path.write_text(text.replace(old, new, 1))
           PY
           python /tmp/phase3.py 2>&1 | tee artifacts/phase3/apply.log
+          base64 --decode .github/phase3/build_experiment_config.b64 > scripts/build_experiment_config.py
+          chmod +x scripts/build_experiment_config.py
           rm -rf .github/phase3
       - name: Install pip-resolved experiment dependencies
         run: |
