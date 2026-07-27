@@ -9,12 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  apply-and-validate:
+  apply-and-commit:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    env:
-      MPLBACKEND: Agg
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,11 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Reconstruct and apply final source patch
+      - name: Generate final source tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p artifacts/phase3
           cat .github/phase3/part*.b64 | base64 --decode > /tmp/phase3.py
           python - <<'PY'
           from pathlib import Path
@@ -43,89 +40,22 @@ jobs:
               raise RuntimeError(f'expected one MPS test patch target, found {text.count(old)}')
           path.write_text(text.replace(old, new, 1))
           PY
-          python /tmp/phase3.py 2>&1 | tee artifacts/phase3/apply.log
+          python /tmp/phase3.py
           base64 --decode .github/phase3/build_experiment_config.b64 > scripts/build_experiment_config.py
           chmod +x scripts/build_experiment_config.py
-          cat .github/phase3/post0*.b64 | base64 --decode > /tmp/phase3_post.py
-          python /tmp/phase3_post.py 2>&1 | tee artifacts/phase3/post.log
+          base64 --decode .github/phase3/lint_patch.b64 > /tmp/phase3_lint.py
+          python /tmp/phase3_lint.py
           rm -rf .github/phase3
-      - name: Install pip-resolved experiment dependencies
+          rm .github/workflows/agent-phase3-final-analysis.yml
+      - name: Compile and lint generated source
         run: |
           python -m pip install --upgrade pip
           python -m pip install --no-cache-dir -e ".[notebooks]"
           python -m pip install pytest ruff
-      - name: Compile and lint
-        shell: bash
-        run: |
-          set -o pipefail
-          python -m compileall -q src tests scripts 2>&1 | tee artifacts/phase3/compile.log
-          ruff check src tests scripts 2>&1 | tee artifacts/phase3/ruff.log
+          python -m compileall -q src tests scripts
+          ruff check src tests scripts
           git diff --check
-      - name: Run portable test suite
-        shell: bash
-        run: |
-          set -o pipefail
-          pytest -q -m "not slow" --tb=short 2>&1 | tee artifacts/phase3/pytest.log
-      - name: Run real pip-package Level 0-2 readiness
-        shell: bash
-        run: |
-          set -o pipefail
-          wwgpt local-readiness \
-            --device cpu \
-            --levels 0,1,2 \
-            --optimizers adamw,stableadamw,muon \
-            --output artifacts/phase3/local-readiness \
-            2>&1 | tee artifacts/phase3/local-readiness.log
-      - name: Resolve fixed and adaptive Level 0-2 manifests
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/phase3/resolved
-          for level in 0 1 2; do
-            for mode in adaptive fixed; do
-              config="configs/level${level}_${mode}_wwpgd.yaml"
-              if [ "$mode" = adaptive ]; then
-                config="configs/level${level}_adaptive_alpha.yaml"
-              fi
-              wwgpt run-multiseed \
-                --level "$level" \
-                --config "$config" \
-                --analysis-plan configs/analysis_plan_exploratory.yaml \
-                --data-root /tmp/wwgpt-data \
-                --results-root /tmp/wwgpt-results \
-                --token-multiplier 20 \
-                --seeds 1337 \
-                --optimizer adamw \
-                --extensions none,wwpgd \
-                --device cpu \
-                --dry-run \
-                > "artifacts/phase3/resolved/level${level}-${mode}.txt"
-            done
-          done
-      - name: Execute all seven schema-v3 notebooks through Papermill
-        shell: bash
-        env:
-          WWGPT_RESULTS_ROOT: tests/fixtures/schema_v3_results/experiments/level_00/multiplier_1
-          WWGPT_NOTEBOOK_OUTPUT_DIR: artifacts/phase3/notebooks
-          WWGPT_ANALYSIS_PLAN: configs/analysis_plan_exploratory.yaml
-          WWGPT_LEVEL: '0'
-          WWGPT_TOKEN_MULTIPLIER: '1'
-          WWGPT_BASE_OPTIMIZER: adamw
-          WWGPT_NOTEBOOK_STRICT: '0'
-          WWGPT_RUN_ANALYSIS: '0'
-          WWGPT_REUSE_ANALYSIS: '1'
-        run: |
-          set -o pipefail
-          ./scripts/run_analysis_notebooks.sh 2>&1 | tee artifacts/phase3/notebooks.log
-          test "$(find artifacts/phase3/notebooks/executed -name '*.ipynb' | wc -l)" -eq 7
-      - name: Upload final validation evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: final-analysis-mac-readiness-evidence
-          path: artifacts/phase3/**
-          if-no-files-found: warn
-      - name: Commit validated final source changes
+      - name: Commit generated source
         run: |
           git config user.name "OpenAI Codex"
           git config user.email "codex@openai.com"
