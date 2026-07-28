@@ -1,0 +1,107 @@
+name: Apply Linux analysis process exit fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/release-readiness-audit
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e . pytest
+      - name: Patch completed postprocessing command exits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/wwgpt/cli.py')
+          text = path.read_text()
+          marker = "def _seeds(s: str | None) -> list[int] | None:\n    return None if not s else [int(x) for x in s.split(',') if x]\n\n\n"
+          helper = "def _seeds(s: str | None) -> list[int] | None:\n    return None if not s else [int(x) for x in s.split(',') if x]\n\n\ndef _exit_after_flush(status: int = 0) -> None:\n    \"\"\"Exit a completed CLI command without waiting on library worker threads.\"\"\"\n    sys.stderr.flush()\n    sys.stdout.flush()\n    os._exit(status)\n\n\n"
+          if 'def _exit_after_flush(status: int = 0)' not in text:
+              if marker not in text:
+                  raise SystemExit('seed helper marker not found')
+              text = text.replace(marker, helper, 1)
+
+          old = '    elif args.cmd=="analyze-results": print(analyze_results(args.results_root, args.analysis_plan))\n'
+          new = '    elif args.cmd=="analyze-results":\n        print(analyze_results(args.results_root, args.analysis_plan), flush=True)\n        _exit_after_flush(0)\n'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new.strip() not in text:
+              raise SystemExit('analyze-results branch not found')
+
+          old = "        sys.stderr.flush()\n        sys.stdout.flush()\n        # Some streaming dataset backends can leave non-daemon workers alive after all artifacts\n        # have been written. Exit the CLI process deterministically so shell wrappers can finish.\n        os._exit(0)\n"
+          new = "        # Some data and analysis backends can leave non-daemon workers alive after all\n        # artifacts have been written. Exit deterministically so shell wrappers finish.\n        _exit_after_flush(0)\n"
+          if old in text:
+              text = text.replace(old, new, 1)
+
+          old = '    elif args.cmd=="generate-reproducibility-report":\n        print(\n            write_reproducibility_report(\n                args.experiment_root,\n                strict=args.strict,\n                analysis_plan=args.analysis_plan,\n            )\n        )\n'
+          new = '    elif args.cmd=="generate-reproducibility-report":\n        print(\n            write_reproducibility_report(\n                args.experiment_root,\n                strict=args.strict,\n                analysis_plan=args.analysis_plan,\n            ),\n            flush=True,\n        )\n        _exit_after_flush(0)\n'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new.strip() not in text:
+              raise SystemExit('reproducibility-report branch not found')
+          path.write_text(text)
+
+          tests = Path('tests/test_release_readiness_audit.py')
+          test_text = tests.read_text()
+          addition = '''
+
+          def test_postprocessing_cli_exits_after_flushing_completed_artifacts() -> None:
+              source = Path("src/wwgpt/cli.py").read_text()
+              assert "def _exit_after_flush(status: int = 0)" in source
+              assert 'elif args.cmd=="analyze-results":\\n        print(' in source
+              assert 'elif args.cmd=="generate-reproducibility-report":' in source
+              assert source.count("_exit_after_flush(0)") >= 3
+          '''
+          if 'test_postprocessing_cli_exits_after_flushing_completed_artifacts' not in test_text:
+              tests.write_text(test_text + addition)
+          PY
+          rm -f .github/workflows/apply-linux-analysis-exit.yml
+          rm -f .github/workflows/apply-linux-cli-exit-fix.yml
+      - name: Validate exact Linux clean-process path
+        env:
+          MPLBACKEND: Agg
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests scripts
+          bash -n scripts/*.sh
+          pytest -q \
+            tests/test_release_readiness_audit.py \
+            tests/test_acceleration_analysis.py \
+            tests/test_level012_full_pipeline.py
+          timeout 300 ./scripts/run_bounded_level012_acceptance.sh /tmp/linux-analysis-exit-acceptance
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/wwgpt/cli.py tests/test_release_readiness_audit.py \
+            .github/workflows/apply-linux-analysis-exit.yml \
+            .github/workflows/apply-linux-cli-exit-fix.yml
+          git diff --cached --check
+          git commit -m 'Exit completed postprocessing commands deterministically'
+          git push origin HEAD:agent/release-readiness-audit
