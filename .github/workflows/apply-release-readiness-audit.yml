@@ -1,4 +1,4 @@
-name: Apply release-readiness audit patch
+name: Apply release-readiness audit source patch
 
 on:
   pull_request:
@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 jobs:
-  apply-audit:
+  apply-source:
     if: github.actor != 'github-actions[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
@@ -21,7 +21,7 @@ jobs:
         with:
           ref: agent/release-readiness-audit
           fetch-depth: 0
-      - name: Apply exact validated patch
+      - name: Apply exact validated non-workflow patch
         shell: bash
         run: |
           set -euo pipefail
@@ -31,17 +31,14 @@ jobs:
             > /tmp/release-audit.patch
           echo 'fbc0bdcf8f8df12b68009cd14c496aa0c272f8d0457e4b2eaf599bc450fa8f0d  /tmp/release-audit.patch' \
             | sha256sum --check --strict
-          git apply --index --whitespace=error-all /tmp/release-audit.patch
-          rm -rf .release-audit
-          rm -f .github/workflows/apply-release-readiness-audit.yml
-          rm -f .github/workflows/export-release-audit-wheelhouse.yml
-          rm -f .github/workflows/export-release-audit-snapshot.yml
-          git add -A
+          git apply --index --whitespace=error-all \
+            --exclude=.github/workflows/ci.yml \
+            /tmp/release-audit.patch
           git diff --cached --check
           python -m compileall -q src tests scripts
           bash -n scripts/*.sh
           git diff --cached --stat
-      - name: Commit validated release tree
+      - name: Commit validated source tree
         shell: bash
         run: |
           set -euo pipefail
