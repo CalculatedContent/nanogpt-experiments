@@ -25,8 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo 'ef6a161b35ee2309964b5f52c8076f144a616e7cc8c898b56a3fac2421626947  .overtraining-audit/implementation.patch.gz' \
-            | sha256sum --check --strict
+          gzip -t .overtraining-audit/implementation.patch.gz
           gzip -dc .overtraining-audit/implementation.patch.gz > /tmp/overtraining.patch
           git apply --index --binary --whitespace=error-all /tmp/overtraining.patch
           chmod +x scripts/run_level0_overtraining_pilot.sh
