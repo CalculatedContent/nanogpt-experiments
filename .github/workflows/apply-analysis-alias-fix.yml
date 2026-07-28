@@ -1,0 +1,188 @@
+name: Apply analysis alias fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-analysis-duplicate-metrics
+          fetch-depth: 0
+      - name: Apply source and regression patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          analysis_path = Path("src/wwgpt/acceleration_analysis.py")
+          text = analysis_path.read_text()
+          curve_start = text.index("def _curve(frame: pd.DataFrame) -> pd.DataFrame:")
+          curve_end = text.index("\n\ndef threshold_crossing", curve_start)
+          curve_replacement = '''def _column_series(frame: pd.DataFrame, name: str) -> pd.Series | None:
+              """Return one coalesced Series even when a label occurs more than once."""
+              positions = [
+                  index for index, column in enumerate(frame.columns) if column == name
+              ]
+              if not positions:
+                  return None
+              selected = frame.iloc[:, positions]
+              result = selected.iloc[:, 0]
+              for index in range(1, selected.shape[1]):
+                  result = result.combine_first(selected.iloc[:, index])
+              return result
+
+
+          def _coalesce_aliases(
+              frame: pd.DataFrame, aliases: dict[str, tuple[str, ...]]
+          ) -> pd.DataFrame:
+              """Canonicalize aliases without creating duplicate column labels."""
+              result = frame.copy()
+              for canonical, fallback_names in aliases.items():
+                  merged: pd.Series | None = None
+                  present: list[str] = []
+                  for name in (canonical, *fallback_names):
+                      values = _column_series(result, name)
+                      if values is None:
+                          continue
+                      present.append(name)
+                      merged = values if merged is None else merged.combine_first(values)
+                  if merged is None:
+                      continue
+                  result = result.drop(columns=list(dict.fromkeys(present)))
+                  result[canonical] = merged
+              return result
+
+
+          def _curve(frame: pd.DataFrame) -> pd.DataFrame:
+              d = _coalesce_aliases(
+                  frame,
+                  {
+                      "tokens_seen": ("tokens_processed",),
+                      "validation_loss": ("val_loss",),
+                      "elapsed_seconds": ("elapsed_time",),
+                  },
+              )
+              required = {"tokens_seen", "validation_loss"}
+              if not required <= set(d):
+                  raise ValueError(f"curve is missing columns: {sorted(required - set(d))}")
+              for col in (
+                  "tokens_seen",
+                  "validation_loss",
+                  "step",
+                  "elapsed_seconds",
+                  "base_optimizer_seconds",
+                  "total_elapsed_seconds",
+              ):
+                  if col in d:
+                      d[col] = pd.to_numeric(d[col], errors="coerce")
+              d = d.dropna(subset=["tokens_seen", "validation_loss"]).sort_values(
+                  "tokens_seen"
+              )
+              return d.drop_duplicates("tokens_seen", keep="last").reset_index(drop=True)
+          '''
+          text = text[:curve_start] + curve_replacement + text[curve_end:]
+
+          join_start = text.index("def _backward_validation_join(")
+          block_start = text.index("    a = alpha.copy()", join_start)
+          block_end = text.index(
+              '    if not {"validation_step", "validation_loss"} <= set(m):',
+              block_start,
+          )
+          join_replacement = '''    a = alpha.copy()
+              a["optimizer_step"] = pd.to_numeric(a["optimizer_step"], errors="coerce")
+              m = _coalesce_aliases(
+                  metrics,
+                  {
+                      "validation_step": ("step", "optimizer_step"),
+                      "validation_loss": ("val_loss",),
+                  },
+              )
+          '''
+          text = text[:block_start] + join_replacement + text[block_end:]
+          analysis_path.write_text(text)
+
+          test_path = Path("tests/test_acceleration_analysis.py")
+          tests = test_path.read_text()
+          tests = tests.replace(
+              "    _backward_validation_join,\n    analyze_acceleration_pairs,",
+              "    _backward_validation_join,\n    _curve,\n    analyze_acceleration_pairs,",
+              1,
+          )
+          marker = "def test_known_two_x_speedup_and_artifacts(tmp_path):\n"
+          regression = '''def production_curve(tokens, losses):
+              return pd.DataFrame(
+                  {
+                      "step": range(1, len(tokens) + 1),
+                      "tokens_processed": tokens,
+                      "validation_loss": losses,
+                      "val_loss": losses,
+                      "elapsed_time": [float(value) / 10.0 for value in tokens],
+                      "total_elapsed_seconds": [float(value) / 10.0 for value in tokens],
+                  }
+              )
+
+
+          def test_curve_coalesces_production_canonical_and_legacy_columns():
+              normalized = _curve(
+                  production_curve([100, 200, 300], [3.0, 2.0, 1.0])
+              )
+              assert normalized.columns.tolist().count("validation_loss") == 1
+              assert normalized.validation_loss.tolist() == [3.0, 2.0, 1.0]
+              assert normalized.tokens_seen.tolist() == [100, 200, 300]
+              assert "val_loss" not in normalized
+
+
+          def test_exploratory_analysis_accepts_production_metric_schema(tmp_path):
+              plan = tmp_path / "plan.yaml"
+              plan.write_text("mode: exploratory\\nprimary_outcomes: []\\n")
+              pairs = [
+                  {
+                      "seed": 1337,
+                      "base_optimizer": "adamw",
+                      "baseline": production_curve(
+                          [100, 200, 300], [3.0, 2.0, 1.0]
+                      ),
+                      "wwpgd": production_curve(
+                          [100, 200, 300], [3.0, 1.9, 0.9]
+                      ),
+                  }
+              ]
+              analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+              assert (tmp_path / "out/analysis_plan_manifest.json").is_file()
+              assert (tmp_path / "out/acceleration_by_seed.csv").is_file()
+
+
+          '''
+          if marker not in tests:
+              raise SystemExit("acceleration-analysis insertion marker not found")
+          tests = tests.replace(marker, regression + marker, 1)
+          tests = tests.replace(
+              'metrics = pd.DataFrame({"step": [10, 20], "validation_loss": [3.0, 2.0]})',
+              'metrics = pd.DataFrame({"step": [10, 20], "validation_loss": [3.0, 2.0], "val_loss": [3.0, 2.0]})',
+              1,
+          )
+          test_path.write_text(tests)
+          PY
+      - name: Commit and push source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/wwgpt/acceleration_analysis.py tests/test_acceleration_analysis.py
+          git commit -m "Coalesce duplicate analysis metric aliases"
+          git push origin HEAD:agent/fix-analysis-duplicate-metrics
