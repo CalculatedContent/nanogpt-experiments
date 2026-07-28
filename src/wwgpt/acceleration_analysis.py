@@ -230,6 +230,22 @@ def wall_clock_acceleration(baseline: dict[str, Any], intervention: dict[str, An
     return left is not None and right is not None and float(right) < float(left)
 
 
+def _trapezoidal_integral(y: np.ndarray, x: np.ndarray) -> float:
+    """Integrate on NumPy 1.x, NumPy 2.x, or a stripped compatibility build."""
+    integration = getattr(np, "trapezoid", None)
+    if integration is None:
+        integration = getattr(np, "trapz", None)
+    if integration is not None:
+        return float(integration(y, x))
+    x_values = np.asarray(x, dtype=float)
+    y_values = np.asarray(y, dtype=float)
+    if len(x_values) < 2:
+        return 0.0
+    widths = np.diff(x_values)
+    heights = (y_values[:-1] + y_values[1:]) * 0.5
+    return float(np.sum(widths * heights))
+
+
 def paired_auc(baseline: pd.DataFrame, wwpgd: pd.DataFrame) -> dict[str, Any]:
     a, b = _curve(baseline), _curve(wwpgd)
     lo = max(float(a.tokens_seen.min()), float(b.tokens_seen.min()))
@@ -241,8 +257,8 @@ def paired_auc(baseline: pd.DataFrame, wwpgd: pd.DataFrame) -> dict[str, Any]:
                            b.tokens_seen[(b.tokens_seen >= lo) & (b.tokens_seen <= hi)]])
     ay = np.interp(grid, a.tokens_seen, a.validation_loss)
     by = np.interp(grid, b.tokens_seen, b.validation_loss)
-    integration = getattr(np, "trapezoid", np.trapz)
-    aa, ba = float(integration(ay, grid)), float(integration(by, grid))
+    aa = _trapezoidal_integral(ay, grid)
+    ba = _trapezoidal_integral(by, grid)
     return {"common_token_start": lo, "common_token_end": hi, "baseline_auc": aa,
             "wwpgd_auc": ba, "paired_auc_difference": aa - ba, "status": "observed common support"}
 

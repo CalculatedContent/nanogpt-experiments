@@ -142,8 +142,9 @@ def test_noisy_dip_is_not_sustained_and_not_reached_is_none():
     assert sustained_tokens_to_threshold(curve([0, 10], [3, 2.5]), 2.0) is None
 
 
-def test_paired_auc_supports_numpy_one_without_trapezoid(monkeypatch):
+def test_paired_auc_supports_numpy_without_integration_aliases(monkeypatch):
     monkeypatch.delattr(np, "trapezoid", raising=False)
+    monkeypatch.delattr(np, "trapz", raising=False)
     result = paired_auc(curve([0, 50, 100], [3, 2, 1]), curve([0, 50, 100], [3, 2, 1]))
     assert result["paired_auc_difference"] == 0
 
