@@ -1,15 +1,20 @@
 name: Apply validated fixed-corpus overtraining implementation
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/add-overtraining-mode
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
 
 jobs:
   apply-overtraining:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/add-overtraining-mode'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
