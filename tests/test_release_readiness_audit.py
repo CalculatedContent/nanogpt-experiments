@@ -5,9 +5,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import wwgpt.reproducibility as reproducibility
+from wwgpt.generalization_analysis import _auc
 
 
 def test_audit_cli_exits_nonzero_for_invalid_experiment(tmp_path: Path) -> None:
@@ -65,3 +68,15 @@ def test_postprocessing_cli_exits_after_flushing_completed_artifacts() -> None:
     assert 'elif args.cmd=="analyze-results":\n        print(' in source
     assert 'elif args.cmd=="generate-reproducibility-report":' in source
     assert source.count("_exit_after_flush(0)") >= 3
+
+
+def test_generalization_auc_supports_numpy_without_integration_aliases(monkeypatch) -> None:
+    monkeypatch.delattr(np, "trapezoid", raising=False)
+    monkeypatch.delattr(np, "trapz", raising=False)
+    frame = pd.DataFrame(
+        {
+            "tokens_seen": [0.0, 50.0, 100.0],
+            "validation_loss": [3.0, 2.0, 1.0],
+        }
+    )
+    assert _auc(frame, "validation_loss") == pytest.approx(2.0)

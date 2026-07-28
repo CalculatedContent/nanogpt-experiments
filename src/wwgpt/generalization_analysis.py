@@ -37,6 +37,22 @@ def _finite(value: Any) -> float:
     return value if math.isfinite(value) else math.nan
 
 
+def _trapezoidal_integral(y: Any, x: Any) -> float:
+    """Integrate across NumPy releases, including builds without alias APIs."""
+    integration = getattr(np, "trapezoid", None)
+    if integration is None:
+        integration = getattr(np, "trapz", None)
+    if integration is not None:
+        return float(integration(y, x))
+    x_values = np.asarray(x, dtype=float)
+    y_values = np.asarray(y, dtype=float)
+    if len(x_values) < 2:
+        return 0.0
+    return float(
+        np.sum(np.diff(x_values) * (y_values[:-1] + y_values[1:]) * 0.5)
+    )
+
+
 def _auc(frame: pd.DataFrame, metric: str) -> float:
     if frame.empty or metric not in frame:
         return math.nan
@@ -47,7 +63,7 @@ def _auc(frame: pd.DataFrame, metric: str) -> float:
         return math.nan
     ordered = pd.DataFrame({"x": x[valid], "y": y[valid]}).sort_values("x").drop_duplicates("x")
     span = float(ordered.x.iloc[-1] - ordered.x.iloc[0])
-    return float(np.trapz(ordered.y, ordered.x) / span) if span > 0 else math.nan
+    return _trapezoidal_integral(ordered.y, ordered.x) / span if span > 0 else math.nan
 
 
 def _run_diagnostics(run: Path) -> dict[str, float]:
