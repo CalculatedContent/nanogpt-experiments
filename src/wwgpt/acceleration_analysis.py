@@ -123,17 +123,66 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
     return artifact
 
 
+def _column_series(frame: pd.DataFrame, name: str) -> pd.Series | None:
+    """Return one coalesced Series even when a label occurs more than once."""
+    positions = [
+        index for index, column in enumerate(frame.columns) if column == name
+    ]
+    if not positions:
+        return None
+    selected = frame.iloc[:, positions]
+    result = selected.iloc[:, 0]
+    for index in range(1, selected.shape[1]):
+        result = result.combine_first(selected.iloc[:, index])
+    return result
+
+
+def _coalesce_aliases(
+    frame: pd.DataFrame, aliases: dict[str, tuple[str, ...]]
+) -> pd.DataFrame:
+    """Canonicalize aliases without creating duplicate column labels."""
+    result = frame.copy()
+    for canonical, fallback_names in aliases.items():
+        merged: pd.Series | None = None
+        present: list[str] = []
+        for name in (canonical, *fallback_names):
+            values = _column_series(result, name)
+            if values is None:
+                continue
+            present.append(name)
+            merged = values if merged is None else merged.combine_first(values)
+        if merged is None:
+            continue
+        result = result.drop(columns=list(dict.fromkeys(present)))
+        result[canonical] = merged
+    return result
+
+
 def _curve(frame: pd.DataFrame) -> pd.DataFrame:
-    aliases = {"tokens_processed": "tokens_seen", "val_loss": "validation_loss",
-               "elapsed_time": "elapsed_seconds"}
-    d = frame.rename(columns={k: v for k, v in aliases.items() if k in frame}).copy()
+    d = _coalesce_aliases(
+        frame,
+        {
+            "tokens_seen": ("tokens_processed",),
+            "validation_loss": ("val_loss",),
+            "elapsed_seconds": ("elapsed_time",),
+        },
+    )
     required = {"tokens_seen", "validation_loss"}
     if not required <= set(d):
         raise ValueError(f"curve is missing columns: {sorted(required - set(d))}")
-    for col in ("tokens_seen", "validation_loss", "step", "elapsed_seconds",
-                "base_optimizer_seconds", "total_elapsed_seconds"):
-        if col in d: d[col] = pd.to_numeric(d[col], errors="coerce")
-    d = d.dropna(subset=["tokens_seen", "validation_loss"]).sort_values("tokens_seen")
+    for col in (
+        "tokens_seen",
+        "validation_loss",
+        "step",
+        "elapsed_seconds",
+        "base_optimizer_seconds",
+        "total_elapsed_seconds",
+    ):
+        if col in d:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna(subset=["tokens_seen", "validation_loss"]).sort_values(
+        "tokens_seen"
+    )
     return d.drop_duplicates("tokens_seen", keep="last").reset_index(drop=True)
 
 
@@ -427,9 +476,13 @@ def _backward_validation_join(alpha: pd.DataFrame, metrics: pd.DataFrame) -> pd.
     """
     a = alpha.copy()
     a["optimizer_step"] = pd.to_numeric(a["optimizer_step"], errors="coerce")
-    m = metrics.rename(columns={"step": "validation_step", "val_loss": "validation_loss"}).copy()
-    if "validation_step" not in m and "optimizer_step" in m:
-        m = m.rename(columns={"optimizer_step": "validation_step"})
+    m = _coalesce_aliases(
+        metrics,
+        {
+            "validation_step": ("step", "optimizer_step"),
+            "validation_loss": ("val_loss",),
+        },
+    )
     if not {"validation_step", "validation_loss"} <= set(m):
         a["validation_step"] = np.nan; a["validation_loss"] = np.nan
         return a
