@@ -54,25 +54,41 @@ def plan_budget(param_count: int, token_multiplier: int, batch_size: int, block_
 
 
 
-def resolve_optimizer_steps(budget_steps: int, configured_max_steps: int | None) -> int:
+def resolve_optimizer_steps(
+    budget_steps: int,
+    configured_max_steps: int | None,
+    *,
+    allow_overtraining: bool = False,
+) -> int:
     """Resolve the base optimizer-update horizon for scientific training.
 
-    ``configured_max_steps`` is an optional cap on completed base optimizer
-    updates. It is not a microbatch count, gradient-accumulation iteration
-    count, evaluation cadence, or WW-PGD call count. A supplied cap can only
-    keep or reduce the budget-derived optimizer-step count; it never increases
-    training beyond the token budget.
+    By default, ``configured_max_steps`` is only a cap on completed base
+    optimizer updates and therefore cannot exceed the nominal token-budget
+    horizon.  ``allow_overtraining`` is an explicit research-protocol opt-in:
+    when enabled, ``configured_max_steps`` must be supplied and must exceed the
+    nominal horizon.  The prepared corpus identity remains nominal; training
+    may revisit that fixed corpus only through the configured sampling policy.
     """
     budget_steps = int(budget_steps)
     if budget_steps < 1:
         raise ValueError("budget-derived optimizer steps must be >= 1")
     if configured_max_steps is None:
+        if allow_overtraining:
+            raise ValueError("allow_overtraining requires train.max_steps")
         resolved = budget_steps
     else:
         configured_max_steps = int(configured_max_steps)
         if configured_max_steps < 1:
             raise ValueError("train.max_steps must be a positive integer or null")
-        resolved = min(budget_steps, configured_max_steps)
+        if allow_overtraining:
+            if configured_max_steps <= budget_steps:
+                raise ValueError(
+                    "allow_overtraining requires train.max_steps to exceed the "
+                    "budget-derived optimizer-step horizon"
+                )
+            resolved = configured_max_steps
+        else:
+            resolved = min(budget_steps, configured_max_steps)
     if resolved < 1:
         raise ValueError("resolved optimizer steps must be >= 1")
     return resolved

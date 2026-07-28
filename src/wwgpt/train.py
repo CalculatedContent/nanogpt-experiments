@@ -1397,25 +1397,68 @@ def _state_hash(state: dict[str, torch.Tensor]) -> str:
     return sha256_bytes(b"".join(state[k].detach().cpu().numpy().tobytes() for k in sorted(state)))
 
 
-def _optimizer_step_resolution(cfg: ExperimentConfig, token_multiplier: int, parameter_count_used: int) -> dict[str, int | str | None]:
-    tokens_per_step = cfg.train.batch_size * cfg.model.block_size * cfg.train.gradient_accumulation
+def _optimizer_step_resolution(
+    cfg: ExperimentConfig,
+    token_multiplier: int,
+    parameter_count_used: int,
+) -> dict[str, int | float | str | bool | None]:
+    tokens_per_step = (
+        cfg.train.batch_size
+        * cfg.model.block_size
+        * cfg.train.gradient_accumulation
+    )
     if cfg.train.max_train_tokens is not None:
         budget_target_tokens = int(cfg.train.max_train_tokens)
-        budget_derived_steps = max(1, math.ceil(budget_target_tokens / tokens_per_step))
+        budget_derived_steps = max(
+            1, math.ceil(budget_target_tokens / tokens_per_step)
+        )
         budget_source = "max_train_tokens"
     else:
         budget_target_tokens = int(parameter_count_used * token_multiplier)
-        budget_derived_steps = max(1, math.ceil(budget_target_tokens / tokens_per_step))
+        budget_derived_steps = max(
+            1, math.ceil(budget_target_tokens / tokens_per_step)
+        )
         budget_source = "token_multiplier"
-    resolved_steps = resolve_optimizer_steps(budget_derived_steps, cfg.train.max_steps)
+    resolved_steps = resolve_optimizer_steps(
+        budget_derived_steps,
+        cfg.train.max_steps,
+        allow_overtraining=cfg.train.allow_overtraining,
+    )
+    nominal_realized_tokens = budget_derived_steps * tokens_per_step
     resolved_tokens = resolved_steps * tokens_per_step
+    overtraining_active = resolved_steps > budget_derived_steps
+    if overtraining_active:
+        step_limit_source = "overtraining_max_steps"
+    elif cfg.train.max_steps is not None and resolved_steps < budget_derived_steps:
+        step_limit_source = "configured_max_steps"
+    else:
+        step_limit_source = budget_source
     return {
         "budget_derived_optimizer_steps": budget_derived_steps,
+        "nominal_optimizer_steps": budget_derived_steps,
         "configured_max_steps": cfg.train.max_steps,
+        "allow_overtraining": bool(cfg.train.allow_overtraining),
+        "overtraining_active": overtraining_active,
+        "protocol_kind": (
+            "fixed_corpus_overtraining"
+            if overtraining_active
+            else "nominal_token_budget"
+        ),
+        "valid_for_scaling_law_fit": not overtraining_active,
         "resolved_optimizer_steps": resolved_steps,
+        "overtraining_optimizer_steps": max(
+            0, resolved_steps - budget_derived_steps
+        ),
         "tokens_per_optimizer_step": tokens_per_step,
+        "nominal_realized_train_tokens": nominal_realized_tokens,
         "resolved_train_tokens": resolved_tokens,
-        "optimizer_step_limit_source": "configured_max_steps" if cfg.train.max_steps is not None and resolved_steps < budget_derived_steps else budget_source,
+        "overtraining_tokens": max(
+            0, resolved_tokens - nominal_realized_tokens
+        ),
+        "actual_to_nominal_token_ratio": (
+            resolved_tokens / max(nominal_realized_tokens, 1)
+        ),
+        "optimizer_step_limit_source": step_limit_source,
         "budget_source": budget_source,
         "requested_tokens": budget_target_tokens,
     }
@@ -1487,11 +1530,17 @@ def run_scientific_single(
     resolution = _optimizer_step_resolution(cfg, token_multiplier, parameter_count_used)
     tokens_per_step = int(resolution["tokens_per_optimizer_step"])
     budget_derived_steps = int(resolution["budget_derived_optimizer_steps"])
+    nominal_optimizer_steps = int(resolution["nominal_optimizer_steps"])
+    nominal_realized_tokens = int(resolution["nominal_realized_train_tokens"])
     budget_source = str(resolution["budget_source"])
     budget_target_tokens = int(resolution["requested_tokens"])
     steps = int(resolution["resolved_optimizer_steps"])
     target_tokens = int(resolution["resolved_train_tokens"])
     realized_tokens = target_tokens
+    overtraining_active = bool(resolution["overtraining_active"])
+    overtraining_optimizer_steps = int(resolution["overtraining_optimizer_steps"])
+    overtraining_tokens = int(resolution["overtraining_tokens"])
+    protocol_kind = str(resolution["protocol_kind"])
     optimizer_step_limit_source = str(resolution["optimizer_step_limit_source"])
     resolved_lr_decay_steps = resolve_lr_decay_steps(steps, cfg.train.lr_decay_steps)
     resolved_warmup_steps = resolve_warmup_steps(steps, cfg.train.warmup_ratio, cfg.train.warmup_steps, cfg.train.lr_decay_steps)
@@ -1522,6 +1571,10 @@ def run_scientific_single(
     man = {
         "smoke_test": False,
         "valid_for_science": True,
+        "valid_for_scaling_law_fit": bool(resolution["valid_for_scaling_law_fit"]),
+        "training_protocol": protocol_kind,
+        "allow_overtraining": bool(cfg.train.allow_overtraining),
+        "overtraining_active": overtraining_active,
         "level": level,
         "token_multiplier": token_multiplier,
         "seed": seed,
@@ -1538,8 +1591,15 @@ def run_scientific_single(
         "realized_tokens": realized_tokens,
         "realized_train_tokens": realized_tokens,
         "budget_derived_optimizer_steps": budget_derived_steps,
+        "nominal_optimizer_steps": nominal_optimizer_steps,
+        "nominal_realized_train_tokens": nominal_realized_tokens,
         "configured_max_steps": cfg.train.max_steps,
         "resolved_optimizer_steps": steps,
+        "overtraining_optimizer_steps": overtraining_optimizer_steps,
+        "overtraining_tokens": overtraining_tokens,
+        "actual_to_nominal_token_ratio": float(
+            resolution["actual_to_nominal_token_ratio"]
+        ),
         "optimizer_steps": steps,
         "total_optimizer_steps": steps,
         "tokens_per_optimizer_step": tokens_per_step,
@@ -1627,7 +1687,7 @@ def run_scientific_single(
         "composite specification version": "raw_and_composite_v1",
         "estimated_flops": 6
         * GPT(cfg.model).parameter_report().total_parameters
-        * int(data.data_manifest["realized_tokens"]),
+        * realized_tokens,
         "spectral_estimator": "weightwatcher",
         "spectral_estimator_version": "",
         "wwpgd_implementation": "ww_pgd" if extension_name in INTERVENTION_EXTENSIONS else "none",
@@ -1694,7 +1754,7 @@ def run_scientific_single(
         "resolved_optimizer_steps": steps,
     }
     compatibility = _compatibility(cfg, data, init_hash, validation_probe_hash, training_probe_hash)
-    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": budget_target_tokens, "realized_tokens": realized_tokens, "resolved_optimizer_steps": steps, "optimizer_step_limit_source": optimizer_step_limit_source, "optimizer_fingerprint": man["optimizer_fingerprint"], **code_version})
+    compatibility.update({"optimizer_name": optimizer_name, "optimizer_class": type(bundle.optimizers[0]).__name__, "immediate_projection_spectral": immediate_projection_spectral, "weightwatcher_configuration": {"detX": True, "randomize": False, "plot": False}, "seed": seed, "level": level, "token_multiplier": token_multiplier, "requested_tokens": budget_target_tokens, "realized_tokens": realized_tokens, "nominal_optimizer_steps": nominal_optimizer_steps, "nominal_realized_train_tokens": nominal_realized_tokens, "allow_overtraining": bool(cfg.train.allow_overtraining), "overtraining_active": overtraining_active, "training_protocol": protocol_kind, "resolved_optimizer_steps": steps, "optimizer_step_limit_source": optimizer_step_limit_source, "optimizer_fingerprint": man["optimizer_fingerprint"], **code_version})
     resume_mismatches = {}
     if resume:
         action, selected, resume_mismatches = _select_resume_run(run_parent / optimizer_name, expected_identity, compatibility, allow_code_version_mismatch=allow_code_version_mismatch)
@@ -1726,6 +1786,14 @@ def run_scientific_single(
             "unique_training_token_guarantee": man["unique_training_token_guarantee"],
             "window_overlap_possible": man["window_overlap_possible"],
             "actual_tokens_processed": man["actual_tokens_processed"],
+            "nominal_realized_train_tokens": nominal_realized_tokens,
+            "overtraining_tokens": overtraining_tokens,
+            "allow_overtraining": bool(cfg.train.allow_overtraining),
+            "overtraining_active": overtraining_active,
+            "training_protocol": protocol_kind,
+            "valid_for_scaling_law_fit": bool(
+                resolution["valid_for_scaling_law_fit"]
+            ),
             "unique_prepared_corpus_tokens": man["unique_prepared_corpus_tokens"],
             "expected_unique_sampled_positions": man["expected_unique_sampled_positions"],
         })
@@ -2056,7 +2124,7 @@ def run_scientific_single(
             metric_rows[-1].update(timings)
             metric_rows[-1]["total_elapsed_seconds"] = elapsed_prior + time.perf_counter() - start
             _log_train_progress(
-                f"progress pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} tokens={step * tokens_per_step}/{int(data.data_manifest['realized_tokens'])} train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} elapsed_s={elapsed:.1f} tokens_per_s={(step * tokens_per_step) / max(elapsed, 1e-9):.1f}"
+                f"progress pair={pair_id} optimizer={optimizer_name} seed={seed} step={step}/{steps} tokens={step * tokens_per_step}/{realized_tokens} train_loss={tm['loss']:.4f} val_loss={vm['loss']:.4f} elapsed_s={elapsed:.1f} tokens_per_s={(step * tokens_per_step) / max(elapsed, 1e-9):.1f}"
             )
         if cfg.composite_spectral_analysis_enabled and (step % (spectral_interval or cfg.train.spectral_interval) == 0 or step == steps):
             composite_rows.extend(composite_spectral_summary(model, step=step, tokens_seen=step * tokens_per_step, base_optimizer=base_optimizer, extension=extension_name, arm_name=optimizer_name, seed=seed, pair_id=pair_id))
@@ -2124,20 +2192,38 @@ def run_scientific_single(
     torch.save(model.state_dict(), final_path)
 
     # Checkpoint comparisons never mutate metrics.csv; it is the live-model time series.
+    final_record: dict[str, object] = {}
+    selected_record: dict[str, object] = {}
     if metric_rows:
         final_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         train_x, train_y, final_train_hash = fixed_probe(data.train[cfg.train.batch_size * cfg.model.block_size * 2:], cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
         val_x, val_y, final_val_hash = fixed_probe(data.val, cfg.model.block_size, cfg.train.batch_size, cfg.train.eval_batches)
         was_training = model.training
         model.eval()
+        final_test_hash = ""
+        final_test_metrics = None
         with torch.no_grad():
-            final_train_metrics, _ = _evaluate_probe_batches(model, train_x, train_y, selected_device)
-            final_val_metrics, _ = _evaluate_probe_batches(model, val_x, val_y, selected_device)
+            final_train_metrics, _ = _evaluate_probe_batches(
+                model, train_x, train_y, selected_device
+            )
+            final_val_metrics, _ = _evaluate_probe_batches(
+                model, val_x, val_y, selected_device
+            )
+            if data.test is not None and overtraining_active:
+                final_test_x, final_test_y, final_test_hash = fixed_probe(
+                    data.test,
+                    cfg.model.block_size,
+                    cfg.train.batch_size,
+                    cfg.train.eval_batches,
+                )
+                final_test_metrics, _ = _evaluate_probe_batches(
+                    model, final_test_x, final_test_y, selected_device
+                )
         final_record = _checkpoint_metric_row(
             checkpoint_path=final_path, checkpoint_hash=_file_sha256(final_path), step=steps,
             selection_metric="final_training_step", train_metrics=final_train_metrics,
-            validation_metrics=final_val_metrics, test_metrics=None,
-            probe_hashes={"train_probe_hash": final_train_hash, "validation_probe_hash": final_val_hash, "test_probe_hash": ""})
+            validation_metrics=final_val_metrics, test_metrics=final_test_metrics,
+            probe_hashes={"train_probe_hash": final_train_hash, "validation_probe_hash": final_val_hash, "test_probe_hash": final_test_hash})
         final_record["final_checkpoint_path"] = final_record["checkpoint_path"]
         final_record["final_checkpoint_hash"] = final_record["checkpoint_hash"]
         final_record["training_probe_hash"] = final_record["train_probe_hash"]
@@ -2181,15 +2267,69 @@ def run_scientific_single(
     _write_csv(run_dir / "lrs.csv", lr_rows, overwrite=resume)
     if extension_name in INTERVENTION_EXTENSIONS and immediate_projection_spectral:
         _write_csv(run_dir / "wwpgd_projection_spectral.csv", immediate_spectral_rows, overwrite=resume)
-    skip_counts={}
-    for r in controller_rows:
-        reason=str(r.get("skip_reason", ""))
-        if reason: skip_counts[reason]=skip_counts.get(reason,0)+1
-    common_complete={"step": steps, "final_val_loss": last_loss, "optimizer_step_count": optimizer_step_count,
-                     "wwpgd_call_count": wwpgd_call_count, "projected_matrix_count": projected_matrix_count,
-                     "budget_derived_optimizer_steps": budget_derived_steps, "configured_max_steps": cfg.train.max_steps,
-                     "resolved_optimizer_steps": steps, "tokens_per_optimizer_step": tokens_per_step,
-                     "resolved_train_tokens": realized_tokens, "optimizer_step_limit_source": optimizer_step_limit_source}
+    skip_counts = {}
+    for row in controller_rows:
+        reason = str(row.get("skip_reason", ""))
+        if reason:
+            skip_counts[reason] = skip_counts.get(reason, 0) + 1
+
+    def optional_metric(record: dict[str, object], key: str) -> float | None:
+        value = record.get(key)
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) else None
+
+    final_validation_loss = optional_metric(final_record, "validation_loss")
+    selected_validation_loss = optional_metric(selected_record, "validation_loss")
+    final_test_loss = optional_metric(final_record, "test_loss")
+    selected_test_loss = optional_metric(selected_record, "test_loss")
+    common_complete = {
+        "step": steps,
+        "final_val_loss": last_loss,
+        "optimizer_step_count": optimizer_step_count,
+        "wwpgd_call_count": wwpgd_call_count,
+        "projected_matrix_count": projected_matrix_count,
+        "budget_derived_optimizer_steps": budget_derived_steps,
+        "nominal_optimizer_steps": nominal_optimizer_steps,
+        "nominal_realized_train_tokens": nominal_realized_tokens,
+        "configured_max_steps": cfg.train.max_steps,
+        "allow_overtraining": bool(cfg.train.allow_overtraining),
+        "overtraining_active": overtraining_active,
+        "training_protocol": protocol_kind,
+        "valid_for_scaling_law_fit": bool(
+            resolution["valid_for_scaling_law_fit"]
+        ),
+        "overtraining_optimizer_steps": overtraining_optimizer_steps,
+        "overtraining_tokens": overtraining_tokens,
+        "actual_to_nominal_token_ratio": float(
+            resolution["actual_to_nominal_token_ratio"]
+        ),
+        "resolved_optimizer_steps": steps,
+        "tokens_per_optimizer_step": tokens_per_step,
+        "resolved_train_tokens": realized_tokens,
+        "optimizer_step_limit_source": optimizer_step_limit_source,
+        "best_validation_step": best_validation_step,
+        "best_validation_loss_observed": (
+            best_validation_loss if math.isfinite(best_validation_loss) else None
+        ),
+        "final_checkpoint_validation_loss": final_validation_loss,
+        "validation_selected_checkpoint_validation_loss": selected_validation_loss,
+        "validation_loss_delta_final_minus_selected": (
+            final_validation_loss - selected_validation_loss
+            if final_validation_loss is not None
+            and selected_validation_loss is not None
+            else None
+        ),
+        "final_checkpoint_test_loss": final_test_loss,
+        "validation_selected_checkpoint_test_loss": selected_test_loss,
+        "test_loss_delta_final_minus_selected": (
+            final_test_loss - selected_test_loss
+            if final_test_loss is not None and selected_test_loss is not None
+            else None
+        ),
+    }
     if cached_mode:
         measurements = _read_complete_csv_rows(run_dir / "wwpgd_endpoint_measurements.csv")
         relaxations = _read_complete_csv_rows(run_dir / "wwpgd_endpoint_relaxation.csv")
@@ -2278,7 +2418,13 @@ def _trial_manifest(pair_id: str, level: int, token_multiplier: int, seed: int, 
         "model_config": asdict(cfg.model), "model_configuration_hash": stable_hash(cfgd.get("model", {})),
         "data_manifest": data.data_manifest, "data_hash": data.corpus_hash,
         "tokenizer_manifest": data.tokenizer_manifest, "tokenizer_hash": data.tokenizer_manifest.get("tokenizer_hash"),
-        "initialization_hash": init_hash, "train": asdict(cfg.train), "token_budget": {"realized_tokens": data.data_manifest.get("realized_tokens"), "token_multiplier": token_multiplier, **resolution},
+        "initialization_hash": init_hash,
+        "train": asdict(cfg.train),
+        "training_protocol": resolution["protocol_kind"],
+        "allow_overtraining": resolution["allow_overtraining"],
+        "overtraining_active": resolution["overtraining_active"],
+        "valid_for_scaling_law_fit": resolution["valid_for_scaling_law_fit"],
+        "token_budget": {"prepared_realized_tokens": data.data_manifest.get("realized_tokens"), "token_multiplier": token_multiplier, **resolution},
     }
     arms = []
     for base in CANONICAL_TRIAL_BASES:
@@ -2340,7 +2486,15 @@ def run_multiseed_scientific(
 
     cfg = load_config(config_path, level)
     from wwgpt.acceleration_analysis import plan_manifest
+    from wwgpt.scaling import selected_parameter_count
+
     frozen_plan = plan_manifest(analysis_plan_path) if analysis_plan_path is not None else None
+    report = GPT(cfg.model).parameter_report()
+    protocol_resolution = _optimizer_step_resolution(
+        cfg,
+        token_multiplier,
+        selected_parameter_count(report, cfg.parameter_count_convention),
+    )
     data = load_prepared_scientific_data(data_root, level, token_multiplier, config_path) if config_path is not None else load_prepared_scientific_data(data_root, level, token_multiplier)
     exp_root = (
         results_root / "experiments" / f"level_{level:02d}" / f"multiplier_{token_multiplier}"
@@ -2392,6 +2546,11 @@ def run_multiseed_scientific(
                 "base_optimizer": optimizer,
                 "extensions": extensions or ["none", "wwpgd"],
                 "arms": [make_arm_name(optimizer, e) for e in (extensions or ["none", "wwpgd"])],
+                "training_protocol": protocol_resolution["protocol_kind"],
+                "allow_overtraining": protocol_resolution["allow_overtraining"],
+                "overtraining_active": protocol_resolution["overtraining_active"],
+                "valid_for_scaling_law_fit": protocol_resolution["valid_for_scaling_law_fit"],
+                "token_budget": protocol_resolution,
                 } | (frozen_plan or {}),
             )
         for ext in (extensions or ["none", "wwpgd"]):

@@ -84,6 +84,7 @@ jobs:
             tests/test_cached_endpoint_relaxation.py \
             tests/test_level012_cached_end_to_end.py \
             tests/test_level012_full_pipeline.py \
+            tests/test_overtraining_mode.py \
             tests/test_local_level_scripts.py \
             tests/test_pass6_resume_analysis_cli_ci.py \
             tests/test_release_readiness_audit.py \
@@ -133,6 +134,7 @@ jobs:
           pytest -q \
             tests/test_acceleration_analysis.py \
             tests/test_level012_full_pipeline.py \
+            tests/test_overtraining_mode.py \
             tests/test_pass6_resume_analysis_cli_ci.py \
             tests/test_release_readiness_audit.py \
             tests/test_source_structure.py
@@ -179,6 +181,15 @@ jobs:
               | tail -n +2 > "artifacts/resolved-pilot-manifests/level${level}.json"
             python -m json.tool "artifacts/resolved-pilot-manifests/level${level}.json" >/dev/null
           done
+          wwgpt run-multiseed \
+            --level 0 \
+            --config configs/level0_overtraining_pilot.yaml \
+            --data-root /tmp/wwgpt-data \
+            --results-root /tmp/wwgpt-overtraining-results \
+            --token-multiplier 20 \
+            --device cpu \
+            --dry-run \
+            | tail -n +2 > artifacts/resolved-pilot-manifests/level0-overtraining.json
           python - <<'PY'
           import json
           from pathlib import Path
@@ -188,6 +199,17 @@ jobs:
               1: (250, 500, 0.002049),
               2: (1000, 3000, 0.000511),
           }
+          overtraining = json.loads(
+              Path(
+                  "artifacts/resolved-pilot-manifests/level0-overtraining.json"
+              ).read_text()
+          )
+          assert overtraining["nominal_optimizer_steps"] == 242
+          assert overtraining["resolved_optimizer_steps"] == 1000
+          assert overtraining["overtraining_active"] is True
+          assert overtraining["training_protocol"] == "fixed_corpus_overtraining"
+          assert overtraining["valid_for_scaling_law_fit"] is False
+          assert overtraining["optimizer_step_limit_source"] == "overtraining_max_steps"
           for level, (interval, first_active, gain) in expected.items():
               payload = json.loads(
                   Path(f"artifacts/resolved-pilot-manifests/level{level}.json").read_text()

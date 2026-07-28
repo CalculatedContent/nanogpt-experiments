@@ -10,8 +10,13 @@ import yaml
 from wwgpt.analysis import analyze_results
 from wwgpt.config import DEFAULT_SEEDS
 from wwgpt.data import ensure_prepared_data
-from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
-from wwgpt.train import run_multiseed_scientific, run_canonical_trials, smoke
+from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count
+from wwgpt.train import (
+    _optimizer_step_resolution,
+    run_canonical_trials,
+    run_multiseed_scientific,
+    smoke,
+)
 from wwgpt.device import device_summary, save_device_manifest, run_device_preflight
 from wwgpt.integrity import audit_experiment
 from wwgpt.checkpointing import inspect_checkpoint, validate_resume
@@ -58,40 +63,84 @@ def _resolved_config(args):
     return load_config(_resolve_config_path(args), args.level)
 
 
-def _budget_summary(cfg, token_multiplier: int) -> dict[str, int]:
+def _budget_summary(
+    cfg,
+    token_multiplier: int,
+    *,
+    resolve_training_horizon: bool = True,
+) -> dict[str, object]:
     from wwgpt.model import GPT
-    from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS, plan_budget, selected_parameter_count, resolve_optimizer_steps
+    from wwgpt.scaling import (
+        PARAMETER_COUNT_CONVENTIONS,
+        plan_budget,
+        selected_parameter_count,
+    )
 
     report = GPT(cfg.model).parameter_report()
-    param_count = selected_parameter_count(report, cfg.parameter_count_convention)
+    param_count = selected_parameter_count(
+        report, cfg.parameter_count_convention
+    )
     old_total_count = selected_parameter_count(report, "total")
-    budget = plan_budget(param_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
-    old_budget = plan_budget(old_total_count, token_multiplier, cfg.train.batch_size, cfg.model.block_size, cfg.train.gradient_accumulation, 10**18)
-    budget_steps = int(budget.steps)
-    resolved_steps = resolve_optimizer_steps(budget_steps, cfg.train.max_steps)
-    resolved_train_tokens = resolved_steps * int(budget.tokens_per_step)
+    budget = plan_budget(
+        param_count,
+        token_multiplier,
+        cfg.train.batch_size,
+        cfg.model.block_size,
+        cfg.train.gradient_accumulation,
+        10**18,
+    )
+    old_budget = plan_budget(
+        old_total_count,
+        token_multiplier,
+        cfg.train.batch_size,
+        cfg.model.block_size,
+        cfg.train.gradient_accumulation,
+        10**18,
+    )
+    resolution_cfg = cfg
+    if not resolve_training_horizon:
+        resolution_cfg = replace(
+            cfg,
+            train=replace(
+                cfg.train,
+                max_steps=None,
+                allow_overtraining=False,
+            ),
+        )
+    resolution = _optimizer_step_resolution(
+        resolution_cfg,
+        token_multiplier,
+        param_count,
+    )
     return {
         "parameter_count_convention": cfg.parameter_count_convention,
-        "parameter_count_convention_definition": PARAMETER_COUNT_CONVENTIONS[cfg.parameter_count_convention],
+        "parameter_count_convention_definition": PARAMETER_COUNT_CONVENTIONS[
+            cfg.parameter_count_convention
+        ],
         "parameter_count": int(param_count),
         "selected_parameter_count": int(param_count),
         "old_total_parameter_count": int(old_total_count),
         "old_total_requested_tokens": int(old_budget.requested_tokens),
         "old_total_realized_tokens": int(old_budget.realized_tokens),
-        "old_vs_selected_realized_token_delta": int(budget.realized_tokens - old_budget.realized_tokens),
+        "old_vs_selected_realized_token_delta": int(
+            budget.realized_tokens - old_budget.realized_tokens
+        ),
         "token_multiplier": int(token_multiplier),
         "requested_tokens": int(budget.requested_tokens),
         "realized_tokens": int(budget.realized_tokens),
-        "budget_derived_optimizer_steps": budget_steps,
-        "configured_max_steps": cfg.train.max_steps,
-        "resolved_optimizer_steps": resolved_steps,
-        "optimizer_step_limit_source": "configured_max_steps" if cfg.train.max_steps is not None and resolved_steps < budget_steps else "token_multiplier",
-        "resolved_train_tokens": resolved_train_tokens,
+        "prepared_corpus_realized_tokens": int(budget.realized_tokens),
+        "training_horizon_applied": bool(resolve_training_horizon),
+        **resolution,
+        "actual_tokens_processed": int(resolution["resolved_train_tokens"]),
         "tokens_per_step": int(budget.tokens_per_step),
-        "estimated_optimizer_steps": resolved_steps,
+        "estimated_optimizer_steps": int(
+            resolution["resolved_optimizer_steps"]
+        ),
         "sequence_count": int(budget.sequence_count),
         "optimizer_step_count": int(budget.optimizer_step_count),
-        "realized_tokens_per_selected_parameter": float(budget.tokens_per_selected_parameter),
+        "realized_tokens_per_selected_parameter": float(
+            budget.tokens_per_selected_parameter
+        ),
         "parameter_report": report.__dict__,
     }
 
@@ -126,7 +175,11 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
     from dataclasses import asdict
 
     cfg = _resolved_config(args)
-    budget = _budget_summary(cfg, args.token_multiplier)
+    budget = _budget_summary(
+        cfg,
+        args.token_multiplier,
+        resolve_training_horizon=args.cmd != "prepare-data",
+    )
     from wwgpt.adaptive_wwpgd import validate_adaptive_level_schedule
     cached_endpoint_mode = (
         cfg.wwpgd.enabled
@@ -164,7 +217,24 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
         "configured_max_steps": budget["configured_max_steps"],
         "cli_max_steps": cli_max_steps,
         "resolved_optimizer_steps": budget["resolved_optimizer_steps"],
-        "optimizer_step_limit_source": "cli_max_steps" if cli_max_steps is not None and budget["resolved_optimizer_steps"] <= budget["budget_derived_optimizer_steps"] else budget["optimizer_step_limit_source"],
+        "optimizer_step_limit_source": (
+            "overtraining_max_steps"
+            if budget["overtraining_active"]
+            else "cli_max_steps"
+            if cli_max_steps is not None
+            and budget["resolved_optimizer_steps"]
+            < budget["budget_derived_optimizer_steps"]
+            else budget["optimizer_step_limit_source"]
+        ),
+        "allow_overtraining": budget["allow_overtraining"],
+        "overtraining_active": budget["overtraining_active"],
+        "training_protocol": budget["protocol_kind"],
+        "valid_for_scaling_law_fit": budget["valid_for_scaling_law_fit"],
+        "nominal_optimizer_steps": budget["nominal_optimizer_steps"],
+        "nominal_realized_train_tokens": budget["nominal_realized_train_tokens"],
+        "overtraining_optimizer_steps": budget["overtraining_optimizer_steps"],
+        "overtraining_tokens": budget["overtraining_tokens"],
+        "actual_to_nominal_token_ratio": budget["actual_to_nominal_token_ratio"],
         "resolved_train_tokens": budget["resolved_train_tokens"],
         "scaling_law_accounting": {"selected_convention": budget["parameter_count_convention"], "definition": budget["parameter_count_convention_definition"], "comparison_old_total_vs_selected": {"old_total_parameter_count": budget["old_total_parameter_count"], "old_total_requested_tokens": budget["old_total_requested_tokens"], "old_total_realized_tokens": budget["old_total_realized_tokens"], "selected_parameter_count": budget["selected_parameter_count"], "selected_requested_tokens": budget["requested_tokens"], "selected_realized_tokens": budget["realized_tokens"]}},
         "level_multiplier_table": _level_multiplier_table(cfg, args.level, args.token_multiplier),
@@ -249,6 +319,10 @@ def _config_with_run_overrides(args):
         ("lr_reference_tokens_per_step", "lr_reference_tokens_per_step", train_updates),
         ("max_train_tokens", "max_train_tokens", train_updates),
         ("max_steps", "max_steps", train_updates),
+        ("allow_overtraining", "allow_overtraining", train_updates),
+        ("training_sampling", "training_sampling", train_updates),
+        ("evaluation_sampling", "evaluation_sampling", train_updates),
+        ("test_evaluation_mode", "test_evaluation_mode", train_updates),
         ("wwpgd_interval", "wwpgd_interval", train_updates),
         ("learning_rate", "learning_rate", train_updates),
         ("epsilon", "epsilon", train_updates),
@@ -359,6 +433,27 @@ def main() -> None:
         parser.add_argument("--matrix-lr-multiplier", action="append", default=[])
         parser.add_argument("--lr-scale-rule", choices=["fixed","linear_batch","sqrt_batch"])
         parser.add_argument("--lr-reference-tokens-per-step", type=int)
+        parser.add_argument(
+            "--allow-overtraining",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=(
+                "Explicitly allow --max-steps to exceed the nominal token-budget "
+                "horizon while revisiting one fixed prepared corpus."
+            ),
+        )
+        parser.add_argument(
+            "--training-sampling",
+            choices=["random_window", "non_repeating"],
+        )
+        parser.add_argument(
+            "--evaluation-sampling",
+            choices=["random_per_eval", "fixed_probe"],
+        )
+        parser.add_argument(
+            "--test-evaluation-mode",
+            choices=["final_checkpoint", "diagnostic_periodic"],
+        )
         parser.add_argument("--muon-learning-rate", type=float); parser.add_argument("--muon-momentum", type=float)
         parser.add_argument("--muon-newton-schulz-steps", type=int)
         parser.add_argument("--stable-learning-rate", type=float); parser.add_argument("--stable-beta1", type=float)
