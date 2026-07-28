@@ -44,13 +44,17 @@ jobs:
         shell: bash
         run: |
           root=artifacts/bounded-level012-release
-          mkdir -p "$root"
+          console=/tmp/bounded-level012-console.log
+          rm -f "$console"
           set +e
           ./scripts/run_bounded_level012_acceptance.sh "$root" \
-            >"$root/console.log" 2>&1
+            >"$console" 2>&1
           status=$?
-          printf '%s\n' "$status" >"$root/exit-code.txt"
           set -e
+          mkdir -p "$root"
+          cp "$console" "$root/console.log"
+          printf '%s\n' "$status" >"$root/exit-code.txt"
+          python -m pip freeze >"$root/pip-freeze.txt"
       - name: Upload captured result root
         if: always()
         uses: actions/upload-artifact@v4
