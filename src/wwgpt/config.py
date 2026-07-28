@@ -62,6 +62,9 @@ class TrainConfig:
     lr_decay_steps: int | None = None
     # Optional cap on completed base optimizer updates; not microbatches, gradient-accumulation iterations, evaluation events, or WW-PGD calls.
     max_steps: int | None = None
+    # Explicitly permit max_steps to extend beyond the nominal token-budget
+    # horizon while revisiting one fixed prepared corpus. Off by default.
+    allow_overtraining: bool = False
     grad_clip: float = 1.0
     eval_interval: int = 10
     checkpoint_interval: int = 50
@@ -115,6 +118,26 @@ class TrainConfig:
             raise ValueError("warmup_steps must be >= 0 when supplied")
         if self.lr_decay_steps is not None and self.lr_decay_steps < 1:
             raise ValueError("lr_decay_steps must be >= 1 when supplied")
+        if self.allow_overtraining:
+            if self.max_steps is None:
+                raise ValueError("allow_overtraining requires train.max_steps")
+            if self.max_train_tokens is not None:
+                raise ValueError(
+                    "allow_overtraining uses the nominal token-multiplier budget; "
+                    "train.max_train_tokens must be null"
+                )
+            if self.training_sampling != "random_window":
+                raise ValueError(
+                    "allow_overtraining requires train.training_sampling=random_window"
+                )
+            if self.evaluation_sampling != "fixed_probe":
+                raise ValueError(
+                    "allow_overtraining requires train.evaluation_sampling=fixed_probe"
+                )
+            if self.test_evaluation_mode != "final_checkpoint":
+                raise ValueError(
+                    "allow_overtraining requires train.test_evaluation_mode=final_checkpoint"
+                )
 
 
 @dataclass(frozen=True)
@@ -235,6 +258,26 @@ def validate_train_config(cfg: TrainConfig) -> None:
             raise ValueError(f"train.{name} must be >= 1")
     if cfg.max_steps is not None and cfg.max_steps < 1:
         raise ValueError("train.max_steps must be a positive integer or null")
+    if cfg.allow_overtraining:
+        if cfg.max_steps is None:
+            raise ValueError("allow_overtraining requires train.max_steps")
+        if cfg.max_train_tokens is not None:
+            raise ValueError(
+                "allow_overtraining uses the nominal token-multiplier budget; "
+                "train.max_train_tokens must be null"
+            )
+        if cfg.training_sampling != "random_window":
+            raise ValueError(
+                "allow_overtraining requires train.training_sampling=random_window"
+            )
+        if cfg.evaluation_sampling != "fixed_probe":
+            raise ValueError(
+                "allow_overtraining requires train.evaluation_sampling=fixed_probe"
+            )
+        if cfg.test_evaluation_mode != "final_checkpoint":
+            raise ValueError(
+                "allow_overtraining requires train.test_evaluation_mode=final_checkpoint"
+            )
     if cfg.wwpgd_interval is not None and cfg.wwpgd_interval < 1:
         raise ValueError("train.wwpgd_interval must be >= 1 when supplied")
     if cfg.training_sampling not in VALID_TRAINING_SAMPLING:

@@ -90,3 +90,67 @@ def test_train_max_steps_loads_null_and_positive(tmp_path):
 def test_train_max_steps_rejects_non_positive(tmp_path, value):
     with pytest.raises(ValueError, match="train.max_steps"):
         load_config(_write_config(tmp_path, {"train": {"max_steps": value}}), level=0)
+
+
+def test_overtraining_requires_an_explicit_controlled_protocol(tmp_path):
+    with pytest.raises(ValueError, match="requires train.max_steps"):
+        load_config(
+            _write_config(
+                tmp_path,
+                {
+                    "train": {
+                        "allow_overtraining": True,
+                        "evaluation_sampling": "fixed_probe",
+                    }
+                },
+            ),
+            level=0,
+        )
+
+    with pytest.raises(ValueError, match="training_sampling=random_window"):
+        load_config(
+            _write_config(
+                tmp_path,
+                {
+                    "train": {
+                        "allow_overtraining": True,
+                        "max_steps": 1000,
+                        "training_sampling": "non_repeating",
+                        "evaluation_sampling": "fixed_probe",
+                    }
+                },
+            ),
+            level=0,
+        )
+
+    with pytest.raises(ValueError, match="evaluation_sampling=fixed_probe"):
+        load_config(
+            _write_config(
+                tmp_path,
+                {
+                    "train": {
+                        "allow_overtraining": True,
+                        "max_steps": 1000,
+                    }
+                },
+            ),
+            level=0,
+        )
+
+    cfg = load_config(
+        _write_config(
+            tmp_path,
+            {
+                "train": {
+                    "allow_overtraining": True,
+                    "max_steps": 1000,
+                    "training_sampling": "random_window",
+                    "evaluation_sampling": "fixed_probe",
+                    "test_evaluation_mode": "final_checkpoint",
+                }
+            },
+        ),
+        level=0,
+    )
+    assert cfg.train.allow_overtraining is True
+    assert cfg.train.max_steps == 1000

@@ -137,6 +137,97 @@ def test_run_multiseed_dry_run_reports_step_resolution(tmp_path):
     assert "max_steps: 2" in override.read_text()
 
 
+def test_max_steps_above_budget_remains_a_cap_without_overtraining_opt_in(tmp_path):
+    cp = _run_cli(
+        "run-multiseed",
+        "--level",
+        "0",
+        "--config",
+        "configs/level0_adaptive_alpha.yaml",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--results-root",
+        str(tmp_path / "results"),
+        "--token-multiplier",
+        "20",
+        "--max-steps",
+        "1000",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["nominal_optimizer_steps"] == 242
+    assert payload["resolved_optimizer_steps"] == 242
+    assert payload["overtraining_active"] is False
+    assert payload["training_protocol"] == "nominal_token_budget"
+    assert payload["valid_for_scaling_law_fit"] is True
+
+
+def test_run_multiseed_dry_run_explicit_overtraining_extends_horizon(tmp_path):
+    cp = _run_cli(
+        "run-multiseed",
+        "--level",
+        "0",
+        "--config",
+        "configs/level0_adaptive_alpha.yaml",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--results-root",
+        str(tmp_path / "results"),
+        "--token-multiplier",
+        "20",
+        "--max-steps",
+        "1000",
+        "--allow-overtraining",
+        "--training-sampling",
+        "random_window",
+        "--evaluation-sampling",
+        "fixed_probe",
+        "--test-evaluation-mode",
+        "final_checkpoint",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["nominal_optimizer_steps"] == 242
+    assert payload["resolved_optimizer_steps"] == 1000
+    assert payload["optimizer_step_limit_source"] == "overtraining_max_steps"
+    assert payload["training_protocol"] == "fixed_corpus_overtraining"
+    assert payload["allow_overtraining"] is True
+    assert payload["overtraining_active"] is True
+    assert payload["valid_for_scaling_law_fit"] is False
+    assert payload["overtraining_optimizer_steps"] == 758
+    assert payload["resolved_train_tokens"] == 4_096_000
+    assert payload["nominal_realized_train_tokens"] == 991_232
+    assert payload["overtraining_tokens"] == 3_104_768
+    assert payload["resolved_config"]["train"]["evaluation_sampling"] == "fixed_probe"
+
+
+def test_run_multiseed_overtraining_rejects_uncontrolled_protocol(tmp_path):
+    cp = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "wwgpt.cli",
+            "run-multiseed",
+            "--level",
+            "0",
+            "--data-root",
+            str(tmp_path / "data"),
+            "--results-root",
+            str(tmp_path / "results"),
+            "--token-multiplier",
+            "20",
+            "--max-steps",
+            "1000",
+            "--allow-overtraining",
+            "--dry-run",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert cp.returncode != 0
+    assert "evaluation_sampling=fixed_probe" in cp.stderr
+
+
 def test_run_canonical_trials_accepts_max_steps_override_in_dry_run(tmp_path):
     cp = _run_cli(
         "run-canonical-trials",

@@ -18,6 +18,16 @@ def test_yaml_cap_below_budget_is_honored_and_cap_above_does_not_increase():
     assert resolve_optimizer_steps(10, 30) == 10
 
 
+def test_explicit_overtraining_extends_beyond_nominal_budget_only_when_opted_in():
+    assert resolve_optimizer_steps(10, 30, allow_overtraining=True) == 30
+    with pytest.raises(ValueError, match="requires train.max_steps"):
+        resolve_optimizer_steps(10, None, allow_overtraining=True)
+    with pytest.raises(ValueError, match="to exceed"):
+        resolve_optimizer_steps(10, 10, allow_overtraining=True)
+    with pytest.raises(ValueError, match="to exceed"):
+        resolve_optimizer_steps(10, 3, allow_overtraining=True)
+
+
 @pytest.mark.parametrize("grad_accum", [1, 4])
 def test_gradient_accumulation_changes_tokens_per_step_not_step_semantics(grad_accum):
     plan = plan_budget(100, 20, batch_size=2, block_size=5, grad_accum=grad_accum, available_tokens=10**9)
@@ -40,6 +50,38 @@ def test_canonical_trial_manifest_records_resolved_steps_for_all_six_arms():
     assert tb["optimizer_step_limit_source"] == "configured_max_steps"
     assert len(manifest["arms"]) == 6
     assert {json.dumps(arm["token_budget"], sort_keys=True) for arm in manifest["arms"]} == {json.dumps(tb, sort_keys=True)}
+
+
+def test_canonical_trial_manifest_records_fixed_corpus_overtraining_protocol():
+    cfg = ExperimentConfig(
+        model=ModelConfig(
+            n_layer=1, n_head=1, n_embd=64, block_size=4, vocab_size=16
+        ),
+        train=TrainConfig(
+            batch_size=1,
+            gradient_accumulation=1,
+            max_steps=13_000,
+            allow_overtraining=True,
+            training_sampling="random_window",
+            evaluation_sampling="fixed_probe",
+            test_evaluation_mode="final_checkpoint",
+            lr_schedule="constant",
+        ),
+        wwpgd=WWPGDConfig(extension="none"),
+    )
+    manifest = _trial_manifest("trial", 0, 1, 123, cfg, TinyData(), "init")
+    shared = manifest["shared"]
+    budget = shared["token_budget"]
+    assert shared["training_protocol"] == "fixed_corpus_overtraining"
+    assert shared["overtraining_active"] is True
+    assert shared["valid_for_scaling_law_fit"] is False
+    assert budget["nominal_optimizer_steps"] == 12_384
+    assert budget["resolved_optimizer_steps"] == 13_000
+    assert budget["overtraining_optimizer_steps"] == 616
+    assert budget["nominal_realized_train_tokens"] == 49_536
+    assert budget["resolved_train_tokens"] == 52_000
+    assert budget["overtraining_tokens"] == 2_464
+    assert budget["optimizer_step_limit_source"] == "overtraining_max_steps"
 
 
 def test_resume_selection_rejects_conflicting_resolved_step_horizon(tmp_path):

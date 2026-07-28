@@ -32,6 +32,27 @@ WWGPT_SEEDS=1337 WWGPT_RUN_NOTEBOOKS=0 \
 
 Set `WWGPT_SEEDS=1337,2027,4099` only after the one-seed pilots complete and pass health and audit checks.
 
+### Fixed-corpus Level 0 overtraining pilot
+
+The nominal multiplier-20 corpus can be reused for an explicitly labeled
+overtraining protocol. This is opt-in: without `allow_overtraining`,
+`max_steps` remains a cap and cannot extend the token-budget horizon. The pilot
+configuration uses a fixed validation probe, revisits the immutable training
+corpus through random-window sampling, excludes the run from scaling-law fits,
+and records both nominal and actual token counts.
+
+```bash
+./scripts/run_level0_overtraining_pilot.sh \
+  /tmp/nanogpt-experiments/data \
+  /tmp/nanogpt-experiments/results-level0-overtraining \
+  mps \
+  1337,2027,4099
+```
+
+The supplied pilot extends Level 0 from 242 to 1,000 optimizer steps and uses a
+late, lower-dose, below-target-only WW-PGD intervention. It is a development
+protocol, not evidence that WW-PGD improves generalization.
+
 A smoke test checks infrastructure only and is invalid for scientific conclusions:
 
 ```bash

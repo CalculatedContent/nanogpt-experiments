@@ -223,6 +223,80 @@ def generate_run_health(run_dir: Path) -> dict[str, Any]:
                 value=duplicates,
             )
 
+    allow_overtraining = bool(manifest.get("allow_overtraining", False))
+    overtraining_active = bool(manifest.get("overtraining_active", False))
+    if overtraining_active:
+        train_cfg = manifest.get("optimizer_hyperparameters") or {}
+        if not allow_overtraining:
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "overtraining is active without explicit allow_overtraining opt-in",
+            )
+        if manifest.get("training_protocol") != "fixed_corpus_overtraining":
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "overtraining run is missing the fixed-corpus protocol label",
+            )
+        if manifest.get("valid_for_scaling_law_fit") is not False:
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "overtraining run must be excluded from scaling-law fits",
+            )
+        if train_cfg.get("training_sampling") != "random_window":
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "overtraining requires random-window corpus revisitation",
+            )
+        if train_cfg.get("evaluation_sampling") != "fixed_probe":
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "overtraining requires a fixed validation probe",
+            )
+        if data.get("sampling_with_replacement") is not True:
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "run-local data manifest must record sampling with replacement",
+            )
+        try:
+            actual_tokens = int(manifest["realized_train_tokens"])
+            nominal_tokens = int(manifest["nominal_realized_train_tokens"])
+        except (KeyError, TypeError, ValueError):
+            _finding(
+                findings,
+                "ERROR",
+                "overtraining_protocol",
+                "unable to resolve nominal and actual overtraining token counts",
+            )
+        else:
+            if actual_tokens <= nominal_tokens:
+                _finding(
+                    findings,
+                    "ERROR",
+                    "overtraining_protocol",
+                    "overtraining token count does not exceed the nominal budget",
+                    value=actual_tokens,
+                    threshold=nominal_tokens,
+                )
+    elif allow_overtraining:
+        _finding(
+            findings,
+            "ERROR",
+            "overtraining_protocol",
+            "allow_overtraining was enabled but the resolved horizon was not extended",
+        )
+
     required_probe = None
     try:
         train_cfg = manifest.get("optimizer_hyperparameters") or {}

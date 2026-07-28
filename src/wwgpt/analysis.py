@@ -182,6 +182,9 @@ def load_run_artifacts(run_dir: Path) -> dict[str, Any]:
     d = {"run_dir": run_dir, "manifest": read_json_file(run_dir / "manifest.json"), "manifest.json": read_json_file(run_dir / "manifest.json"), "complete": read_json_file(run_dir / "run_complete.json"), "run_complete.json": read_json_file(run_dir / "run_complete.json")}
     d["metrics"] = normalize_metrics(load_csv_file(run_dir / "metrics.csv")); d["metrics.csv"] = d["metrics"]
     d["selected_checkpoint_metrics"] = read_json_file(run_dir / "selected_checkpoint_metrics.json")
+    d["final_checkpoint_metrics"] = read_json_file(
+        run_dir / "final_checkpoint_metrics.json"
+    )
     d["alpha_measurements"] = load_csv_file(run_dir / "alpha_measurements.csv")
     d["weightwatcher_aggregates"] = load_csv_file(run_dir / "weightwatcher_aggregates.csv")
     d["spectral"] = normalize_spectral_records(load_csv_file(run_dir / "spectral.csv")); d["spectral.csv"] = d["spectral"]
@@ -470,12 +473,98 @@ def paired_curve_differences(pairs: list[tuple[pd.DataFrame, pd.DataFrame]], x_c
 # report export
 def build_run_inventory(runs: list[dict[str, Any]]) -> pd.DataFrame:
     rows = []
-    for r in runs:
-        art = load_run_artifacts(Path(r["run_dir"])); m = art["metrics"]; man = r.get("manifest") or art["manifest"]
-        selected = art.get("selected_checkpoint_metrics", {})
-        final = m.sort_values("tokens_seen" if "tokens_seen" in m.columns else "step").tail(1) if not m.empty else pd.DataFrame()
-        rows.append({"seed": r.get("seed"), "level": r.get("level", man.get("level")), "token_multiplier": r.get("token_multiplier", man.get("token_multiplier")), "pair_id": r.get("pair_id"), "optimizer_raw": r.get("optimizer_raw"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension"), "run_dir": str(r.get("run_dir")), "final_validation_loss": selected.get("validation_loss", final["validation_loss"].iloc[0] if len(final) and "validation_loss" in final else np.nan), "minimum_validation_loss": pd.to_numeric(m.get("validation_loss"), errors="coerce").min() if "validation_loss" in m else np.nan, "final_test_loss": selected.get("test_loss", np.nan), "realized_tokens": _manifest_value(man, "realized_tokens"), "scientific_schema_version": man.get("scientific_schema_version")})
+    for run in runs:
+        artifacts = load_run_artifacts(Path(run["run_dir"]))
+        metrics = artifacts["metrics"]
+        manifest = run.get("manifest") or artifacts["manifest"]
+        selected = artifacts.get("selected_checkpoint_metrics", {})
+        final_checkpoint = artifacts.get("final_checkpoint_metrics", {})
+        completion = artifacts.get("complete", {})
+        final_row = (
+            metrics.sort_values(
+                "tokens_seen" if "tokens_seen" in metrics.columns else "step"
+            ).tail(1)
+            if not metrics.empty
+            else pd.DataFrame()
+        )
+        selected_validation = selected.get(
+            "validation_loss",
+            final_row["validation_loss"].iloc[0]
+            if len(final_row) and "validation_loss" in final_row
+            else np.nan,
+        )
+        rows.append(
+            {
+                "seed": run.get("seed"),
+                "level": run.get("level", manifest.get("level")),
+                "token_multiplier": run.get(
+                    "token_multiplier", manifest.get("token_multiplier")
+                ),
+                "pair_id": run.get("pair_id"),
+                "optimizer_raw": run.get("optimizer_raw"),
+                "optimizer_family": run.get("optimizer_family"),
+                "base_optimizer": run.get("base_optimizer"),
+                "extension": run.get("extension"),
+                "run_dir": str(run.get("run_dir")),
+                # Retain the historical field while making checkpoint semantics
+                # explicit in additional columns.
+                "final_validation_loss": selected_validation,
+                "selected_checkpoint_validation_loss": selected_validation,
+                "selected_checkpoint_test_loss": selected.get(
+                    "test_loss", np.nan
+                ),
+                "final_checkpoint_validation_loss": final_checkpoint.get(
+                    "validation_loss", np.nan
+                ),
+                "final_checkpoint_test_loss": final_checkpoint.get(
+                    "test_loss", np.nan
+                ),
+                "validation_loss_delta_final_minus_selected": completion.get(
+                    "validation_loss_delta_final_minus_selected", np.nan
+                ),
+                "test_loss_delta_final_minus_selected": completion.get(
+                    "test_loss_delta_final_minus_selected", np.nan
+                ),
+                "minimum_validation_loss": (
+                    pd.to_numeric(
+                        metrics.get("validation_loss"), errors="coerce"
+                    ).min()
+                    if "validation_loss" in metrics
+                    else np.nan
+                ),
+                "final_test_loss": selected.get("test_loss", np.nan),
+                "training_protocol": manifest.get(
+                    "training_protocol", "nominal_token_budget"
+                ),
+                "allow_overtraining": manifest.get(
+                    "allow_overtraining", False
+                ),
+                "overtraining_active": manifest.get(
+                    "overtraining_active", False
+                ),
+                "valid_for_scaling_law_fit": manifest.get(
+                    "valid_for_scaling_law_fit", True
+                ),
+                "nominal_optimizer_steps": manifest.get(
+                    "nominal_optimizer_steps"
+                ),
+                "resolved_optimizer_steps": manifest.get(
+                    "resolved_optimizer_steps"
+                ),
+                "nominal_realized_train_tokens": manifest.get(
+                    "nominal_realized_train_tokens"
+                ),
+                "realized_tokens": _manifest_value(
+                    manifest, "realized_tokens"
+                ),
+                "overtraining_tokens": manifest.get("overtraining_tokens", 0),
+                "scientific_schema_version": manifest.get(
+                    "scientific_schema_version"
+                ),
+            }
+        )
     return pd.DataFrame(rows)
+
 
 def build_pair_audit(candidates: list[PairCandidate]) -> pd.DataFrame:
     return select_canonical_pairs(candidates)[1]
