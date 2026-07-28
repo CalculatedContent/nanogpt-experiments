@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 import pandas as pd, torch
 from wwgpt.ww import measured_projection_spectral_rows
@@ -46,3 +47,14 @@ def test_integrity_rejects_legacy_fabricated_scan(tmp_path):
     pd.DataFrame([{'alpha_before':2.5,'alpha_after':2.4}]).to_csv(run/'wwpgd_projection_spectral.csv', index=False)
     summary=audit_experiment(tmp_path)
     assert 'legacy_or_missing_measured_provenance_fields' in (tmp_path/'analysis'/'integrity_audit.csv').read_text()
+
+
+def test_production_modules_have_no_duplicate_top_level_definitions():
+    for path in Path("src").rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        definitions: dict[str, list[int]] = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                definitions.setdefault(node.name, []).append(node.lineno)
+        duplicates = {name: lines for name, lines in definitions.items() if len(lines) > 1}
+        assert not duplicates, (path, duplicates)

@@ -116,3 +116,81 @@ def test_local_runner_prepares_before_optimizer_loop() -> None:
     assert 'wwgpt check-health' in text
     assert '--wwpgd-max-endpoint-fraction-per-refresh' in text
     assert '--wwpgd-candidate-device' in text
+
+
+def test_experiment_health_ignores_superseded_incomplete_attempt(tmp_path: Path) -> None:
+    complete = _valid_run(tmp_path)
+    abandoned = complete.parent / "run_99999999_abandoned"
+    abandoned.mkdir()
+    (abandoned / "manifest.json").write_text((complete / "manifest.json").read_text())
+
+    report = generate_experiment_health(tmp_path)
+    assert report["ready_for_analysis"] is True
+    assert report["run_count"] == 1
+    assert report["total_attempt_count"] == 2
+    assert report["excluded_superseded_attempt_count"] == 1
+
+
+def test_run_health_reports_malformed_optional_alpha_schema_without_crashing(
+    tmp_path: Path,
+) -> None:
+    run = _valid_run(tmp_path)
+    pd.DataFrame(
+        [{"optimizer_step": 1, "layer_name": "blocks.0.attn.key", "not_alpha": 2.5}]
+    ).to_csv(run / "alpha_measurements.csv", index=False)
+
+    report = generate_run_health(run)
+
+    assert report["ready_for_analysis"] is False
+    assert any(
+        row["check"] == "artifact_schema"
+        and "alpha_measurements.csv" in row["message"]
+        for row in report["findings"]
+    )
+
+
+def test_run_health_reports_unreadable_optional_csv_without_crashing(
+    tmp_path: Path,
+) -> None:
+    run = _valid_run(tmp_path)
+    (run / "alpha_measurements.csv").write_text('alpha,"unterminated\n')
+
+    report = generate_run_health(run)
+
+    assert report["ready_for_analysis"] is False
+    assert any(
+        row["check"] == "artifact_parse"
+        and "alpha_measurements.csv" in row["message"]
+        for row in report["findings"]
+    )
+
+
+def test_run_health_reports_malformed_wwpgd_optional_schemas_without_crashing(
+    tmp_path: Path,
+) -> None:
+    run = _valid_run(tmp_path, extension="wwpgd")
+    _write_json(
+        run / "run_complete.json",
+        {"step": 1, "wwpgd_call_count": 1, "stock_wwpgd_invocation_count": 1},
+    )
+    pd.DataFrame(
+        [{"optimizer_step": 1, "layer_name": "blocks.0.attn.key", "other": 1}]
+    ).to_csv(run / "wwpgd_internal_diagnostics.csv", index=False)
+    pd.DataFrame(
+        [{"optimizer_step": 1, "layer_name": "blocks.0.attn.key", "other": 1}]
+    ).to_csv(run / "wwpgd_endpoint_measurements.csv", index=False)
+    pd.DataFrame(
+        [{"optimizer_step": 1, "layer_name": "blocks.0.attn.key", "other": 1}]
+    ).to_csv(run / "wwpgd_endpoint_relaxation.csv", index=False)
+
+    report = generate_run_health(run)
+
+    assert report["ready_for_analysis"] is False
+    schema_messages = [
+        row["message"]
+        for row in report["findings"]
+        if row["check"] == "artifact_schema"
+    ]
+    assert any("wwpgd_internal_diagnostics.csv" in message for message in schema_messages)
+    assert any("wwpgd_endpoint_measurements.csv" in message for message in schema_messages)
+    assert any("wwpgd_endpoint_relaxation.csv" in message for message in schema_messages)

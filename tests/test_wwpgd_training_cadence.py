@@ -16,6 +16,7 @@ from wwgpt.train import run_scientific_single
 def _tiny_data(tokens: int = 256):
     train = list(range(3, tokens + 3))
     val = list(range(tokens + 3, tokens * 2 + 3))
+    test = list(reversed(train))
     return SimpleNamespace(
         train=train,
         val=val,
@@ -25,10 +26,13 @@ def _tiny_data(tokens: int = 256):
             "dataset_config": "tiny",
             "dataset_revision": "test",
             "realized_tokens": len(train),
+            "validation_tokens": len(val),
+            "test_tokens": len(test),
             "validation_document_count": 1,
+            "test_document_count": 1,
         },
         tokenizer_manifest={"tokenizer_hash": "tiny-tokenizer"},
-        test=None,
+        test=test,
     )
 
 

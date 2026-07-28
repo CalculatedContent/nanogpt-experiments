@@ -450,7 +450,7 @@ def _audit_diagnostics(
 
 
 def _discover_arms(layout: Path) -> dict[str, Path]:
-    found: dict[str, Path] = {}
+    candidates: dict[str, list[Path]] = {}
     for manifest_path in layout.rglob("manifest.json"):
         run = manifest_path.parent
         if not (run.name.startswith("run_") or run == layout):
@@ -461,13 +461,20 @@ def _discover_arms(layout: Path) -> dict[str, Path]:
         )
         if not arm:
             continue
-        previous = found.get(arm)
-        if previous is None or (
-            (run / "run_complete.json").is_file()
-            and not (previous / "run_complete.json").is_file()
-        ):
-            found[arm] = run
-    return found
+        candidates.setdefault(arm, []).append(run)
+
+    def recency(run: Path) -> tuple[int, float, str]:
+        complete = int((run / "run_complete.json").is_file())
+        try:
+            newest = max(
+                [run.stat().st_mtime]
+                + [path.stat().st_mtime for path in run.rglob("*") if path.is_file()]
+            )
+        except OSError:
+            newest = 0.0
+        return complete, newest, run.name
+
+    return {arm: max(runs, key=recency) for arm, runs in candidates.items()}
 
 
 def audit_arm(run: Path, required_arm: str | None = None) -> dict[str, Any]:
@@ -515,7 +522,13 @@ def audit_arm(run: Path, required_arm: str | None = None) -> dict[str, Any]:
         )
         if target is None:
             reasons.append("target_alpha_missing")
-        if _contains_key(manifest, "q"):
+        user_config_sections = (
+            manifest.get("resolved_config"),
+            manifest.get("config"),
+            manifest.get("extension_hyperparameters"),
+            manifest.get("wwpgd_adaptive_config"),
+        )
+        if any(_contains_key(section, "q") for section in user_config_sections):
             reasons.append("user_configured_q_exposed")
 
     _audit_metrics(metrics, schema, reasons)
@@ -713,6 +726,66 @@ def audit_run(run: Path) -> dict[str, Any]:
     }
 
 
+def _layout_recency(layout: Path) -> tuple[float, str]:
+    try:
+        newest = max(
+            [layout.stat().st_mtime]
+            + [path.stat().st_mtime for path in layout.rglob("*") if path.is_file()]
+        )
+    except OSError:
+        newest = 0.0
+    return newest, layout.name
+
+
+def _layout_identity(layout: Path) -> tuple[Any, ...]:
+    """Return the scientific identity used to supersede failed layout retries."""
+    kind = "pair" if (layout / "pair_manifest.json").is_file() else "trial"
+    manifest_path = layout / f"{kind}_manifest.json"
+    layout_manifest, _ = _load_json(manifest_path)
+    arms = _discover_arms(layout)
+    run_manifest: dict[str, Any] = {}
+    if arms:
+        run_manifest, _ = _load_json(next(iter(arms.values())) / "manifest.json")
+    level = layout_manifest.get("level", run_manifest.get("level"))
+    multiplier = layout_manifest.get(
+        "token_multiplier", run_manifest.get("token_multiplier")
+    )
+    seed = layout_manifest.get(
+        "seed", layout_manifest.get("scientific_seed", run_manifest.get("seed"))
+    )
+    base = normalize_arm(
+        layout_manifest.get("base_optimizer")
+        or run_manifest.get("base_optimizer")
+        or ""
+    )
+    if level is None and multiplier is None and seed is None and not base:
+        return kind, str(layout.resolve())
+    return kind, level, multiplier, seed, base
+
+
+def _select_current_trial_audits(
+    layouts: list[Path],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for layout in layouts:
+        record = audit_trial(layout)
+        grouped.setdefault(_layout_identity(layout), []).append(record)
+
+    selected: list[dict[str, Any]] = []
+    excluded: list[str] = []
+    for candidates in grouped.values():
+        eligible = [record for record in candidates if record["publication_eligible"]]
+        chosen = max(
+            eligible or candidates,
+            key=lambda record: _layout_recency(Path(record["trial_dir"])),
+        )
+        selected.append(chosen)
+        excluded.extend(
+            record["trial_dir"] for record in candidates if record is not chosen
+        )
+    return sorted(selected, key=lambda record: record["trial_dir"]), sorted(excluded)
+
+
 def audit_experiment(root: Path) -> Path:
     root = Path(root)
     analysis = root / "analysis"
@@ -724,14 +797,25 @@ def audit_experiment(root: Path) -> Path:
             for path in root.rglob(name)
         }
     )
-    trials = [audit_trial(layout) for layout in layouts]
-    runs = sorted(
-        {
-            path.parent
-            for path in root.rglob("manifest.json")
-            if path.parent.name.startswith("run_") or path.parent.name.startswith("run_legacy")
-        }
-    )
+    trials, excluded_layouts = _select_current_trial_audits(layouts)
+    if trials:
+        runs = sorted(
+            {
+                Path(arm["run_dir"])
+                for trial in trials
+                for arm in trial["arms"].values()
+                if arm.get("run_dir")
+            }
+        )
+    else:
+        runs = sorted(
+            {
+                path.parent
+                for path in root.rglob("manifest.json")
+                if path.parent.name.startswith("run_")
+                or path.parent.name.startswith("run_legacy")
+            }
+        )
     rows = [audit_run(run) for run in runs]
     fields = list(rows[0]) if rows else [
         "run_dir",
@@ -755,6 +839,9 @@ def audit_experiment(root: Path) -> Path:
         "valid_for_publication": eligible,
         "failures": [row for row in rows if not row["valid_for_publication"]],
         "trial_count": len(trials),
+        "total_layout_attempt_count": len(layouts),
+        "excluded_superseded_layout_count": len(excluded_layouts),
+        "excluded_superseded_layouts": excluded_layouts,
         "publication_eligible_trials": sum(
             trial["publication_eligible"] for trial in trials
         ),

@@ -18,7 +18,7 @@ DEVICE="${5:-auto}"
 SEEDS="${6:-1337}"
 CONFIG="configs/level${LEVEL}_adaptive_alpha.yaml"
 ANALYSIS_PLAN="${WWGPT_ANALYSIS_PLAN:-configs/analysis_plan_exploratory.yaml}"
-RESUME="${WWGPT_RESUME:-0}"
+RESUME="${WWGPT_RESUME:-1}"
 
 case "$LEVEL" in
   0|1|2) ;;
@@ -33,7 +33,18 @@ if [ ! -f "$CONFIG" ]; then
   exit 2
 fi
 
-mkdir -p "$DATA_ROOT" "$RESULTS_ROOT"
+CACHE_ROOT="${WWGPT_CACHE_ROOT:-$(dirname "$DATA_ROOT")/cache}"
+export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HUB_CACHE}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+mkdir -p \
+  "$DATA_ROOT" \
+  "$RESULTS_ROOT" \
+  "$HF_DATASETS_CACHE" \
+  "$HF_HUB_CACHE"
 
 echo "[one-pair] prepare/reuse data level=$LEVEL root=$DATA_ROOT" >&2
 wwgpt prepare-data \
@@ -61,9 +72,17 @@ fi
 echo "[one-pair] run AdamW and AdamW+WWPGD level=$LEVEL seeds=$SEEDS" >&2
 wwgpt run-multiseed "${RUN_ARGS[@]}"
 
-wwgpt check-health --experiment-root "$RESULTS_ROOT"
-wwgpt analyze-results "$RESULTS_ROOT" --analysis-plan "$ANALYSIS_PLAN"
-wwgpt audit-experiment --experiment-root "$RESULTS_ROOT"
-wwgpt generate-reproducibility-report --experiment-root "$RESULTS_ROOT"
+LEVEL_LAYOUT="$RESULTS_ROOT/experiments/level_$(printf '%02d' "$LEVEL")/multiplier_$TOKEN_MULTIPLIER"
+if [ ! -d "$LEVEL_LAYOUT" ]; then
+  echo "missing completed level layout: $LEVEL_LAYOUT" >&2
+  exit 1
+fi
+wwgpt check-health --experiment-root "$LEVEL_LAYOUT"
+wwgpt analyze-results "$LEVEL_LAYOUT" --analysis-plan "$ANALYSIS_PLAN"
+wwgpt audit-experiment --experiment-root "$LEVEL_LAYOUT"
+wwgpt generate-reproducibility-report \
+  --experiment-root "$LEVEL_LAYOUT" \
+  --analysis-plan "$ANALYSIS_PLAN" \
+  --strict
 
 echo "[one-pair] complete level=$LEVEL results=$RESULTS_ROOT" >&2

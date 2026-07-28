@@ -14,7 +14,15 @@ import pandas as pd
 from wwgpt.adaptive_wwpgd import matrix_type
 from wwgpt.ww import alpha_measurement_exclusion_reason
 
-KEYS = ["arm_name", "seed", "optimizer_step", "tokens_seen"]
+KEYS = [
+    "pair_id",
+    "level",
+    "token_multiplier",
+    "arm_name",
+    "seed",
+    "optimizer_step",
+    "tokens_seen",
+]
 METRICS = ["median_alpha", "mean_alpha", "median_absolute_alpha_error",
            "mean_absolute_alpha_error", "maximum_absolute_alpha_error",
            "fraction_inside_configured_target_deadband", "fraction_above_target_band",
@@ -88,6 +96,11 @@ def prepare_alpha_measurements(run_dir: Path, manifest: dict[str, Any]) -> pd.Da
     frame = pd.read_csv(run_dir / "alpha_measurements.csv")
     if frame.empty: return frame
     frame = frame.copy()
+    frame["pair_id"] = frame.get("pair_id", manifest.get("pair_id", ""))
+    frame["level"] = frame.get("level", manifest.get("level"))
+    frame["token_multiplier"] = frame.get(
+        "token_multiplier", manifest.get("token_multiplier")
+    )
     frame["arm_name"] = frame.get("arm_name", manifest.get("arm_name", manifest.get("optimizer_name", "")))
     frame["seed"] = frame.get("seed", manifest.get("seed"))
     frame["target_alpha"] = target
@@ -136,13 +149,27 @@ def analyze_alpha_trajectories(runs: list[Any], output_dir: Path) -> None:
     step["pairing_base_optimizer"] = step.arm_name.astype(str).str.replace("_wwpgd(?:_reference)?$", "", regex=True)
     base = step[~step.arm_name.astype(str).str.contains("wwpgd")]
     treated = step[step.arm_name.astype(str).str.contains("wwpgd")]
-    paired = treated.merge(base, on=["pairing_base_optimizer", "seed", "optimizer_step", "tokens_seen"], suffixes=("_wwpgd", "_baseline"))
+    paired = treated.merge(
+        base,
+        on=[
+            "pair_id",
+            "level",
+            "token_multiplier",
+            "pairing_base_optimizer",
+            "seed",
+            "optimizer_step",
+            "tokens_seen",
+        ],
+        suffixes=("_wwpgd", "_baseline"),
+    )
     if len(paired):
         paired["paired_median_alpha_distance_difference"] = paired["median_absolute_alpha_error_wwpgd"] - paired["median_absolute_alpha_error_baseline"]
         paired["paired_mean_alpha_distance_difference"] = paired["mean_absolute_alpha_error_wwpgd"] - paired["mean_absolute_alpha_error_baseline"]
     paired.to_csv(output_dir / "paired_alpha_distance_differences.csv", index=False)
     for metric, filename, ylabel in [("median_absolute_alpha_error", "alpha_distance_trajectories.png", "Median |alpha - target alpha|"), ("fraction_inside_configured_target_deadband", "fraction_near_target.png", "Fraction inside configured target deadband")]:
         fig, ax = plt.subplots(figsize=(8, 5))
-        for arm, group in step.groupby("arm_name"):
-            curve=group.groupby("tokens_seen")[metric].mean(); ax.plot(curve.index, curve.values, marker="o", label=arm)
+        for (level, multiplier, arm), group in step.groupby(
+            ["level", "token_multiplier", "arm_name"], dropna=False
+        ):
+            curve=group.groupby("tokens_seen")[metric].mean(); ax.plot(curve.index, curve.values, marker="o", label=f"L{level} M{multiplier} {arm}")
         ax.set(xlabel="Tokens seen", ylabel=ylabel); ax.legend(); fig.tight_layout(); fig.savefig(output_dir / filename, dpi=160); plt.close(fig)

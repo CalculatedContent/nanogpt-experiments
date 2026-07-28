@@ -67,7 +67,6 @@ def artifact_commits(run_dir: Path) -> dict[str, dict[str, object]]:
     return {name: csv_commit(run_dir / name) for name in INCREMENTAL_ARTIFACTS}
 
 
-
 def resolved_stochastic_seeds(user_seed: int, level: int, token_multiplier: int, *, split: str = "train", optimizer_identity: str | None = None) -> dict[str, int]:
     """Resolve stochastic seeds from stable scientific identity only.
 
@@ -915,9 +914,17 @@ def _model_diagnostic_metrics(model: torch.nn.Module) -> dict[str, float | int]:
 
 
 def _csv_truth(value: object) -> bool:
+    """Interpret values read through ``csv.DictReader`` without string truthiness."""
     if isinstance(value, bool):
         return value
-    return str(value or "").strip().lower() in {"true", "1", "yes"}
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        try:
+            return math.isfinite(float(value)) and float(value) != 0.0
+        except (TypeError, ValueError):
+            return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
 def _csv_optional_float(value: object) -> float | None:
@@ -947,20 +954,6 @@ def _read_complete_csv_rows(path: Path) -> list[dict[str, object]]:
             if field in row:
                 row[field] = _csv_optional_float(row[field])
     return rows
-
-
-def _csv_truth(value: object) -> bool:
-    """Interpret values read through ``csv.DictReader`` without string truthiness."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, (int, float)):
-        try:
-            return math.isfinite(float(value)) and float(value) != 0.0
-        except (TypeError, ValueError):
-            return False
-    return str(value).strip().lower() in {"true", "1", "yes", "y", "on"}
 
 
 def _finite_csv_float(value: object) -> float | None:
@@ -1349,14 +1342,10 @@ def run_single(
     _write_csv(run_dir / "spectral.csv", spectral_rows)
     if optimizer_name in {"adamw_wwpgd", "adamw_wwpgd_reference"}:
         _write_csv(run_dir / "wwpgd_projection.csv", proj_rows)
-    (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
-    skip_counts={}
-    for r in controller_rows:
-        reason=str(r.get("skip_reason", ""))
-        if reason: skip_counts[reason]=skip_counts.get(reason,0)+1
-    applied=[float(r.get("combined_hardness_applied", 0.0) or 0.0) for r in controller_rows]
-    rels=[float(r.get("relative_frobenius_change_applied", 0.0) or 0.0) for r in controller_rows if math.isfinite(float(r.get("relative_frobenius_change_applied", 0.0) or 0.0))]
+    # Completion metadata must exist before the marker.  Consumers use the marker
+    # as the final transaction boundary even for infrastructure-only smoke runs.
     write_json(run_dir / "run_complete.json", {"step": steps, "final_val_loss": last_loss})
+    (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
     _log_train_progress(
         f"completed smoke run optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )
@@ -1406,7 +1395,6 @@ def select_device(override: str | None = None):
 
 def _state_hash(state: dict[str, torch.Tensor]) -> str:
     return sha256_bytes(b"".join(state[k].detach().cpu().numpy().tobytes() for k in sorted(state)))
-
 
 
 def _optimizer_step_resolution(cfg: ExperimentConfig, token_multiplier: int, parameter_count_used: int) -> dict[str, int | str | None]:
@@ -2234,22 +2222,42 @@ def run_scientific_single(
             "total_skipped_layers": sum(not bool(r.get("projected")) for r in controller_rows), "controller_skip_counts": skip_counts,
             "mean_applied_hardness": sum(applied)/len(applied) if applied else 0.0, "max_applied_hardness": max(applied, default=0.0),
             "mean_relative_frobenius_change": sum(rels)/len(rels) if rels else 0.0, "maximum_relative_frobenius_change": max(rels, default=0.0)})
-    write_json(run_dir / "run_complete.json", common_complete)
+    completion_path = run_dir / "run_complete.json"
+    events_path = run_dir / "events.jsonl"
     from wwgpt.run_health import generate_run_health
-    health = generate_run_health(run_dir)
-    common_complete.update({
-        "run_health_ready_for_analysis": health["ready_for_analysis"],
-        "run_health_info_count": health["counts"]["INFO"],
-        "run_health_warning_count": health["counts"]["WARNING"],
-        "run_health_error_count": health["counts"]["ERROR"],
-    })
-    (run_dir / "run_complete.json").write_text(
-        json.dumps(common_complete, indent=2, sort_keys=True, default=str) + "\n"
-    )
-    # Mark the run complete only after summary generation and health checks have
-    # succeeded. A post-training finalization failure must remain resumable and
-    # must never advertise a completed scientific run.
-    (run_dir / "events.jsonl").write_text(json.dumps({"event": "complete"}) + "\n")
+    # A stale event marker must never survive into a resumed finalization attempt.
+    events_path.unlink(missing_ok=True)
+    try:
+        # Health validation expects a completion payload, so publish it only as a
+        # provisional transaction record and remove it on any subsequent failure.
+        write_json(completion_path, common_complete)
+        health = generate_run_health(run_dir)
+        if not health["ready_for_analysis"]:
+            raise RuntimeError(
+                "run health validation failed: "
+                + json.dumps(
+                    health.get("findings", []), sort_keys=True, default=str
+                )
+            )
+        common_complete.update({
+            "run_health_ready_for_analysis": health["ready_for_analysis"],
+            "run_health_info_count": health["counts"]["INFO"],
+            "run_health_warning_count": health["counts"]["WARNING"],
+            "run_health_error_count": health["counts"]["ERROR"],
+        })
+        completion_path.write_text(
+            json.dumps(common_complete, indent=2, sort_keys=True, default=str)
+            + "\n"
+        )
+        # Publish the event marker last. Its presence therefore means summary and
+        # health finalization both succeeded.
+        events_path.write_text(json.dumps({"event": "complete"}) + "\n")
+    except BaseException:
+        # Any finalization failure leaves a resumable incomplete run rather than
+        # a false-positive completion that future --resume calls would skip.
+        completion_path.unlink(missing_ok=True)
+        events_path.unlink(missing_ok=True)
+        raise
     _log_train_progress(
         f"completed run pair={pair_id} optimizer={optimizer_name} seed={seed} steps={steps} final_val_loss={last_loss:.4f} output={run_dir}"
     )

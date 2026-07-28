@@ -243,9 +243,19 @@ def _tiny_scientific_fixture():
     data = TokenData(
         train=[i % 32 for i in range(400)],
         val=[i % 32 for i in range(100, 260)],
+        test=[i % 32 for i in range(200, 360)],
         vocab_size=32,
         corpus_hash="fixture-corpus",
-        data_manifest={"dataset_name":"fixture","dataset_config":"fixture","dataset_revision":"fixture","realized_tokens":8},
+        data_manifest={
+            "dataset_name": "fixture",
+            "dataset_config": "fixture",
+            "dataset_revision": "fixture",
+            "realized_tokens": 8,
+            "validation_tokens": 160,
+            "test_tokens": 160,
+            "validation_document_count": 1,
+            "test_document_count": 1,
+        },
         tokenizer_manifest={"tokenizer_hash":"fixture-tokenizer"},
     )
     seed = resolved_stochastic_seeds(1234, 0, 20)["model_init_seed"]
@@ -282,6 +292,17 @@ def test_paired_arms_share_initialization_reader_dropout_and_weight_decay(tmp_pa
 
     monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
     monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kwargs: [])
+    # This test isolates pairing invariants and intentionally stubs WWPGD action
+    # generation. Health correctness is covered by the Level 0--2 end-to-end
+    # tests; return a successful health payload so the stubbed arm can finalize.
+    monkeypatch.setattr(
+        "wwgpt.run_health.generate_run_health",
+        lambda _run_dir: {
+            "ready_for_analysis": True,
+            "counts": {"INFO": 0, "WARNING": 0, "ERROR": 0},
+            "findings": [],
+        },
+    )
     cfg, data, init_state, init_hash = _tiny_scientific_fixture()
     adamw = run_scientific_single(tmp_path / "pair", "adamw", 1234, replace(cfg, wwpgd=replace(cfg.wwpgd, extension="none", enabled=False)), data, "pair", init_state, init_hash, 0, 20, device="cpu")
     wwpgd = run_scientific_single(tmp_path / "pair", "adamw", 1234, replace(cfg, wwpgd=replace(cfg.wwpgd, extension="wwpgd", enabled=True)), data, "pair", init_state, init_hash, 0, 20, device="cpu")

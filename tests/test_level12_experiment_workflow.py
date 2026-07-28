@@ -81,22 +81,24 @@ def _write_run(
     test_loss: float,
     test_perplexity: float,
     test_accuracy: float,
-) -> None:
+    pair_suffix: str = "",
+    run_name: str = "run_001",
+) -> Path:
     arm = "adamw" if extension == "none" else "adamw_wwpgd"
     run = (
         root
         / "experiments"
         / f"level_{level:02d}"
         / "multiplier_20"
-        / f"pair_{seed}"
+        / f"pair_{seed}{pair_suffix}"
         / arm
-        / "run_001"
+        / run_name
     )
     run.mkdir(parents=True)
     manifest = {
         "scientific_schema_version": 3,
         "valid_for_science": True,
-        "pair_id": f"pair_{seed}",
+        "pair_id": f"pair_{seed}{pair_suffix}",
         "seed": seed,
         "level": level,
         "token_multiplier": 20,
@@ -119,6 +121,74 @@ def _write_run(
     (run / "manifest.json").write_text(json.dumps(manifest))
     (run / "run_complete.json").write_text("{}")
     (run / "selected_checkpoint_metrics.json").write_text(json.dumps(selected))
+    return run
+
+
+def test_cross_level_analysis_selects_newest_complete_pair_without_mixing_arms(
+    tmp_path: Path,
+) -> None:
+    # Older complete pair: effect -1.0.
+    old_base = _write_run(
+        tmp_path,
+        level=0,
+        seed=1,
+        extension="none",
+        test_loss=10.0,
+        test_perplexity=20.0,
+        test_accuracy=0.2,
+        pair_suffix="_old",
+    )
+    old_ww = _write_run(
+        tmp_path,
+        level=0,
+        seed=1,
+        extension="wwpgd",
+        test_loss=9.0,
+        test_perplexity=19.0,
+        test_accuracy=0.3,
+        pair_suffix="_old",
+    )
+    # Newer complete pair: effect -0.25. Mixing newest arms independently could
+    # incorrectly produce a different effect, so both arms must share pair_id.
+    new_base = _write_run(
+        tmp_path,
+        level=0,
+        seed=1,
+        extension="none",
+        test_loss=5.0,
+        test_perplexity=10.0,
+        test_accuracy=0.4,
+        pair_suffix="_new",
+    )
+    new_ww = _write_run(
+        tmp_path,
+        level=0,
+        seed=1,
+        extension="wwpgd",
+        test_loss=4.75,
+        test_perplexity=9.75,
+        test_accuracy=0.45,
+        pair_suffix="_new",
+    )
+    for index, run in enumerate((old_base, old_ww, new_base, new_ww), start=1):
+        timestamp = 1_000 + index
+        for artifact in (
+            run / "manifest.json",
+            run / "run_complete.json",
+            run / "selected_checkpoint_metrics.json",
+        ):
+            artifact.touch()
+            artifact.chmod(0o644)
+            import os
+            os.utime(artifact, (timestamp, timestamp))
+
+    paired = analyze_cross_level_effects(tmp_path, tmp_path / "analysis")[
+        "cross_level_paired_effects_by_seed.csv"
+    ]
+    loss = paired[paired.metric.eq("test_loss")]
+    assert len(loss) == 1
+    assert loss.iloc[0].pair_id == "pair_1_new"
+    assert loss.iloc[0].paired_effect == pytest.approx(-0.25)
 
 
 def test_cross_level_analysis_pairs_seeds_and_reports_model_trend(

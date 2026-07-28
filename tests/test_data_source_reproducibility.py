@@ -112,3 +112,10 @@ def test_tokenizer_load_failure_does_not_silently_change_tokenization(monkeypatc
     cfg = replace(load_config(Path("configs/reproduction_fineweb.yaml"), level=0), tokenizer="not-gpt2")
     with pytest.raises(RuntimeError, match="Failed to load configured tokenizer.*refusing to change tokenization silently"):
         prepare_fineweb_gpt2_reproduction(tmp_path, cfg, docs=["a train doc", "a validation doc"])
+
+
+def test_level_shell_defaults_use_level_specific_configs() -> None:
+    download = Path("scripts/download_data.sh").read_text()
+    trials = Path("scripts/run_five_seeds.sh").read_text()
+    assert 'configs/level${LEVEL}_adaptive_alpha.yaml' in download
+    assert 'configs/level${LEVEL}_adaptive_alpha.yaml' in trials

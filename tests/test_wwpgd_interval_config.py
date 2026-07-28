@@ -22,7 +22,27 @@ def tiny_cfg(steps=6, interval=1):
 
 
 def tiny_data(tokens=256):
-    return SimpleNamespace(train=list(range(tokens)), val=list(range(tokens, tokens*2)), corpus_hash="c", data_manifest={"dataset_name":"d","dataset_config":"c","dataset_revision":"r","realized_tokens":tokens}, tokenizer_manifest={"tokenizer_hash":"t"}, test=None)
+    train = [value % 600 for value in range(tokens)]
+    val = [value % 600 for value in range(tokens, tokens * 2)]
+    test = [value % 600 for value in range(tokens * 2, tokens * 3)]
+    return SimpleNamespace(
+        train=train,
+        val=val,
+        test=test,
+        vocab_size=600,
+        corpus_hash="c",
+        data_manifest={
+            "dataset_name": "d",
+            "dataset_config": "c",
+            "dataset_revision": "r",
+            "realized_tokens": tokens,
+            "validation_tokens": len(val),
+            "test_tokens": len(test),
+            "validation_document_count": 1,
+            "test_document_count": 1,
+        },
+        tokenizer_manifest={"tokenizer_hash": "t"},
+    )
 
 
 def init_state(cfg):

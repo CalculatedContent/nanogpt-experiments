@@ -56,7 +56,7 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
                                 plan_path: str | Path) -> dict[str, Any]:
     """Bind analysis to the frozen training plan and count complete seed pairs."""
     plan, digest = load_analysis_plan(plan_path)
-    grouped: dict[tuple[str, Any], dict[str, dict[str, Any]]] = {}
+    grouped: dict[tuple[Any, Any, str, Any], dict[str, dict[str, Any]]] = {}
     recorded: list[str | None] = []
     trial_recorded: list[str | None] = []
     for run in runs:
@@ -71,25 +71,34 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
                 trial_recorded.append(str(trial_hash) if trial_hash else None)
         valid_for_science = run.get("valid_for_science", manifest.get("valid_for_science", True)) is True
         if is_complete and valid_for_science:
-            grouped.setdefault((str(run.get("base_optimizer")), run.get("seed")), {})[str(run.get("extension"))] = run
-    observed: dict[str, int] = {base: 0 for base, _seed in grouped}
+            key = (
+                manifest.get("level", run.get("level")),
+                manifest.get("token_multiplier", run.get("token_multiplier")),
+                str(run.get("base_optimizer")),
+                run.get("seed"),
+            )
+            grouped.setdefault(key, {})[str(run.get("extension"))] = run
+    observed: dict[str, int] = {}
+    observed_cells: dict[str, int] = {}
     identity_fields = ("initialization_hash", "model_configuration_hash", "tokenizer_hash",
                        "data_hash", "validation_probe_hash", "training_probe_hash",
                        "base_optimizer_fingerprint", "token_multiplier", "level", "target_alpha")
     invalid_pairs: list[str] = []
-    for (base, seed), arms in grouped.items():
+    for (level, multiplier, base, seed), arms in grouped.items():
         if {"none", "wwpgd"} <= set(arms):
             left, right = arms["none"].get("manifest", {}), arms["wwpgd"].get("manifest", {})
             mismatches = [key for key in identity_fields
                           if left.get(key) is not None and right.get(key) is not None
                           and left.get(key) != right.get(key)]
             if mismatches:
-                invalid_pairs.append(f"{base}/seed={seed} identity mismatch: {', '.join(mismatches)}")
+                invalid_pairs.append(f"level={level}/multiplier={multiplier}/{base}/seed={seed} identity mismatch: {', '.join(mismatches)}")
                 continue
             if any((arm.get("manifest") or {}).get("analysis_plan_sha256") != digest for arm in arms.values()):
-                invalid_pairs.append(f"{base}/seed={seed} does not carry the supplied frozen plan hash")
+                invalid_pairs.append(f"level={level}/multiplier={multiplier}/{base}/seed={seed} does not carry the supplied frozen plan hash")
                 continue
             observed[base] = observed.get(base, 0) + 1
+            cell = f"level={level},token_multiplier={multiplier},base_optimizer={base}"
+            observed_cells[cell] = observed_cells.get(cell, 0) + 1
     required = int(plan.get("confirmatory_paired_seeds") or 0)
     reasons: list[str] = []
     hash_status = "not_required"
@@ -107,13 +116,14 @@ def verify_analysis_eligibility(runs: list[dict[str, Any]], output_dir: str | Pa
         reasons.extend(invalid_pairs)
         if not observed:
             reasons.append("no complete baseline/WW-PGD seed pairs were observed")
-        for base, count in sorted(observed.items()):
+        for cell, count in sorted(observed_cells.items()):
             if count < required:
-                reasons.append(f"{base} has {count} complete paired seeds; confirmatory plan requires {required}")
+                reasons.append(f"{cell} has {count} complete paired seeds; confirmatory plan requires {required}")
     elif not observed:
         reasons.append("exploratory analysis requires at least one complete baseline/WW-PGD seed pair")
     artifact = {"analysis_mode": plan["mode"], "required_paired_seeds": required,
                 "observed_paired_seeds_by_optimizer": observed, "plan_hash_status": hash_status,
+                "observed_paired_seeds_by_design_cell": observed_cells,
                 "supplied_plan_sha256": digest, "recorded_plan_sha256": sorted({x for x in recorded if x}),
                 "eligible": not reasons, "exclusion_reasons": reasons}
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
@@ -220,6 +230,22 @@ def wall_clock_acceleration(baseline: dict[str, Any], intervention: dict[str, An
     return left is not None and right is not None and float(right) < float(left)
 
 
+def _trapezoidal_integral(y: np.ndarray, x: np.ndarray) -> float:
+    """Integrate on NumPy 1.x, NumPy 2.x, or a stripped compatibility build."""
+    integration = getattr(np, "trapezoid", None)
+    if integration is None:
+        integration = getattr(np, "trapz", None)
+    if integration is not None:
+        return float(integration(y, x))
+    x_values = np.asarray(x, dtype=float)
+    y_values = np.asarray(y, dtype=float)
+    if len(x_values) < 2:
+        return 0.0
+    widths = np.diff(x_values)
+    heights = (y_values[:-1] + y_values[1:]) * 0.5
+    return float(np.sum(widths * heights))
+
+
 def paired_auc(baseline: pd.DataFrame, wwpgd: pd.DataFrame) -> dict[str, Any]:
     a, b = _curve(baseline), _curve(wwpgd)
     lo = max(float(a.tokens_seen.min()), float(b.tokens_seen.min()))
@@ -231,7 +257,8 @@ def paired_auc(baseline: pd.DataFrame, wwpgd: pd.DataFrame) -> dict[str, Any]:
                            b.tokens_seen[(b.tokens_seen >= lo) & (b.tokens_seen <= hi)]])
     ay = np.interp(grid, a.tokens_seen, a.validation_loss)
     by = np.interp(grid, b.tokens_seen, b.validation_loss)
-    aa, ba = float(np.trapezoid(ay, grid)), float(np.trapezoid(by, grid))
+    aa = _trapezoidal_integral(ay, grid)
+    ba = _trapezoidal_integral(by, grid)
     return {"common_token_start": lo, "common_token_end": hi, "baseline_auc": aa,
             "wwpgd_auc": ba, "paired_auc_difference": aa - ba, "status": "observed common support"}
 
@@ -244,9 +271,21 @@ def _at_budget(curve: pd.DataFrame, budget: float) -> float | None:
 
 def _exploratory_thresholds(pairs: list[dict[str, Any]]) -> list[float]:
     lows, highs = [], []
-    for p in pairs:
-        for arm in (p["baseline"], p["wwpgd"]):
-            d = _curve(arm); lows.append(d.validation_loss.min()); highs.append(d.validation_loss.max())
+    for pair in pairs:
+        baseline, wwpgd = pair.get("baseline"), pair.get("wwpgd")
+        if baseline is None or wwpgd is None:
+            continue
+        curves = (_curve(baseline), _curve(wwpgd))
+        if any(curve.empty for curve in curves):
+            continue
+        for curve in curves:
+            lows.append(float(curve.validation_loss.min()))
+            highs.append(float(curve.validation_loss.max()))
+    if not lows:
+        raise ValueError(
+            "exploratory threshold selection requires at least one complete "
+            "baseline/WWPGD pair with finite validation-loss curves"
+        )
     lo, hi = max(lows), min(highs)
     return [float(x) for x in np.linspace(lo, hi, 5)[1:-1]] if hi > lo else [float(lo)]
 
@@ -279,7 +318,7 @@ def _sign_flip_pvalue(values: np.ndarray) -> tuple[float, int, str]:
 
 def _paired_inference(effects: pd.DataFrame, mode: str) -> pd.DataFrame:
     rows = []
-    keys = ["base_optimizer", "metric", "threshold", "token_budget"]
+    keys = ["level", "token_multiplier", "base_optimizer", "metric", "threshold", "token_budget"]
     for key, group in effects.groupby(keys, dropna=False, sort=True):
         values = pd.to_numeric(group["paired_effect"], errors="coerce").dropna().to_numpy(float)
         low, high = _percentile_bootstrap(values)
@@ -313,21 +352,22 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
     accel, aucs, audits, effects, missing = [], [], [], [], []
     for p in pairs:
         seed, base = p.get("seed"), p.get("base_optimizer")
+        level, multiplier = p.get("level"), p.get("token_multiplier")
         if p.get("baseline") is None or p.get("wwpgd") is None:
             pattern = "both_arms_missing" if p.get("baseline") is None and p.get("wwpgd") is None else (
                 "baseline_arm_missing" if p.get("baseline") is None else "wwpgd_arm_missing")
             for threshold in thresholds:
-                missing.append({"seed": seed, "base_optimizer": base, "threshold": threshold,
+                missing.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "threshold": threshold,
                                 "baseline_status": "arm missing" if p.get("baseline") is None else "arm observed",
                                 "wwpgd_status": "arm missing" if p.get("wwpgd") is None else "arm observed",
                                 "missingness_pattern": pattern, "complete_pair": False})
             continue
         a, w = _curve(p["baseline"]), _curve(p["wwpgd"])
-        auc = {"seed": seed, "base_optimizer": base, "analysis_mode": mode,
+        auc = {"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "analysis_mode": mode,
                "exploratory": mode == "exploratory", **paired_auc(a, w)}
         aucs.append(auc)
         if "paired_validation_loss_auc" in plan.get("primary_outcomes", []):
-            effects.append({"seed": seed, "base_optimizer": base, "metric": "paired_validation_loss_auc",
+            effects.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "metric": "paired_validation_loss_auc",
                             "threshold": np.nan, "token_budget": np.nan,
                             "paired_effect": auc["paired_auc_difference"], "effect_definition": "baseline minus wwpgd"})
         for threshold in thresholds:
@@ -335,7 +375,7 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
             au, wu = threshold_crossing(a, threshold, sustained=False), threshold_crossing(w, threshold, sustained=False)
             saved = ac["tokens"] - wc["tokens"] if ac["reached"] and wc["reached"] else None
             ratio = ac["tokens"] / wc["tokens"] if saved is not None and wc["tokens"] else None
-            row = {"seed": seed, "base_optimizer": base, "analysis_mode": mode,
+            row = {"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "analysis_mode": mode,
                    "exploratory": mode == "exploratory", "threshold": threshold,
                    "baseline_sustained_tokens": ac["tokens"], "wwpgd_sustained_tokens": wc["tokens"],
                    "baseline_status": ac["status"], "wwpgd_status": wc["status"],
@@ -356,20 +396,20 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
             pattern = ("both_reached" if ac["reached"] and wc["reached"] else
                        "baseline_only_reached" if ac["reached"] else
                        "wwpgd_only_reached" if wc["reached"] else "neither_reached")
-            missing.append({"seed": seed, "base_optimizer": base, "threshold": threshold,
+            missing.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "threshold": threshold,
                             "baseline_status": ac["status"], "wwpgd_status": wc["status"],
                             "missingness_pattern": pattern, "complete_pair": bool(ac["reached"] and wc["reached"])})
             primary = set(plan.get("primary_outcomes", []))
             if "sustained_tokens_to_threshold" in primary:
-                effects.append({"seed": seed, "base_optimizer": base, "metric": "sustained_tokens_to_threshold",
+                effects.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "metric": "sustained_tokens_to_threshold",
                                 "threshold": threshold, "token_budget": np.nan, "paired_effect": saved,
                                 "effect_definition": "baseline tokens minus wwpgd tokens"})
             if "tokens_saved" in primary:
-                effects.append({"seed": seed, "base_optimizer": base, "metric": "tokens_saved",
+                effects.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "metric": "tokens_saved",
                                 "threshold": threshold, "token_budget": np.nan, "paired_effect": saved,
                                 "effect_definition": "baseline tokens minus wwpgd tokens"})
             if "speedup_ratio" in primary:
-                effects.append({"seed": seed, "base_optimizer": base, "metric": "speedup_ratio",
+                effects.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "metric": "speedup_ratio",
                                 "threshold": threshold, "token_budget": np.nan,
                                 "paired_effect": ratio - 1 if ratio is not None else None,
                                 "effect_definition": "baseline/wwpgd ratio minus null value 1"})
@@ -378,13 +418,13 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
             if "validation_loss_at_fixed_token_budgets" in primary and threshold == thresholds[0]:
                 for budget in budgets:
                     av, wv = _at_budget(a, budget), _at_budget(w, budget)
-                    effects.append({"seed": seed, "base_optimizer": base,
+                    effects.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base,
                                     "metric": "validation_loss_at_fixed_token_budget", "threshold": np.nan,
                                     "token_budget": budget,
                                     "paired_effect": av - wv if av is not None and wv is not None else None,
                                     "effect_definition": "baseline loss minus wwpgd loss"})
             for arm, sustained, first in (("baseline", ac, au), ("wwpgd", wc, wu)):
-                audits.append({"seed": seed, "base_optimizer": base, "arm": arm, "threshold": threshold,
+                audits.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base, "arm": arm, "threshold": threshold,
                                "analysis_mode": mode, "exploratory": mode == "exploratory",
                                "first_crossing_tokens": first["tokens"],
                                "first_crossing_status": first["status"], "sustained_crossing_tokens": sustained["tokens"],
@@ -393,17 +433,17 @@ def analyze_acceleration_pairs(pairs: list[dict[str, Any]], output_dir: str | Pa
     adf, udf = pd.DataFrame(accel), pd.DataFrame(aucs)
     adf.to_csv(out / "acceleration_by_seed.csv", index=False); udf.to_csv(out / "validation_auc_by_seed.csv", index=False)
     pd.DataFrame(audits).to_csv(out / "threshold_crossing_audit.csv", index=False)
-    group = ["base_optimizer", "threshold", "analysis_mode"]
+    group = ["level", "token_multiplier", "base_optimizer", "threshold", "analysis_mode"]
     summary = adf.groupby(group, dropna=False).agg(seed_count=("seed", "size"), reached_pairs=("tokens_saved", "count"),
         mean_tokens_saved=("tokens_saved", "mean"), median_tokens_saved=("tokens_saved", "median"),
         mean_speedup_ratio=("speedup_ratio", "mean")).reset_index() if not adf.empty else pd.DataFrame()
     summary.to_csv(out / "acceleration_summary.csv", index=False)
-    effect_columns = ["seed", "base_optimizer", "metric", "threshold", "token_budget",
+    effect_columns = ["seed", "level", "token_multiplier", "base_optimizer", "metric", "threshold", "token_budget",
                       "paired_effect", "effect_definition"]
     edf = pd.DataFrame(effects, columns=effect_columns)
     edf.to_csv(out / "paired_effects_by_seed.csv", index=False)
     _paired_inference(edf, mode).to_csv(out / "paired_effect_estimates.csv", index=False)
-    pd.DataFrame(missing, columns=["seed", "base_optimizer", "threshold", "baseline_status",
+    pd.DataFrame(missing, columns=["seed", "level", "token_multiplier", "base_optimizer", "threshold", "baseline_status",
         "wwpgd_status", "missingness_pattern", "complete_pair"]).to_csv(out / "missing_pair_audit.csv", index=False)
     warning = {
         "warning_code": "FIVE_PAIR_EXACT_SIGN_FLIP_LIMIT",
@@ -432,13 +472,13 @@ def _plots(pairs: list[dict[str, Any]], results: pd.DataFrame, out: Path) -> Non
             if p.get(arm) is None:
                 continue
             d = _curve(p[arm]); ax.plot(d.tokens_seen, d.validation_loss, style, alpha=.65,
-                label=f"{p.get('base_optimizer')} {arm} seed {p.get('seed')}")
+                label=f"L{p.get('level')} M{p.get('token_multiplier')} {p.get('base_optimizer')} {arm} seed {p.get('seed')}")
     ax.set(xlabel="Tokens", ylabel="Validation loss");
     if pairs: ax.legend(fontsize=7)
     fig.tight_layout(); fig.savefig(out / "paired_learning_curves.png", dpi=160); plt.close(fig)
     fig, ax = plt.subplots(figsize=(8, 5))
     if not results.empty:
-        labels = [f"{b}/s{s}/L{t:g}" for b, s, t in zip(results.base_optimizer, results.seed, results.threshold)]
+        labels = [f"L{level}/M{mult}/{base}/s{seed}/T{threshold:g}" for level, mult, base, seed, threshold in zip(results.level, results.token_multiplier, results.base_optimizer, results.seed, results.threshold)]
         ax.bar(labels, results.tokens_saved.fillna(0)); ax.tick_params(axis="x", rotation=70)
     ax.axhline(0, color="black", linewidth=.8); ax.set(ylabel="Tokens saved (positive = WW-PGD faster)")
     fig.tight_layout(); fig.savefig(out / "tokens_saved_by_seed.png", dpi=160); plt.close(fig)
@@ -449,10 +489,10 @@ def analyze_acceleration_results(results_root: str | Path, output_dir: str | Pat
     from wwgpt.analysis import discover_canonical_runs, load_csv_file
     runs = discover_canonical_runs(Path(results_root), include_legacy=True); grouped = {}
     for r in runs:
-        grouped.setdefault((r.get("seed"), r.get("base_optimizer")), {})[r.get("extension")] = r
+        grouped.setdefault((r.get("level"), r.get("token_multiplier"), r.get("seed"), r.get("base_optimizer")), {})[r.get("extension")] = r
     pairs = []
-    for (seed, base), arms in grouped.items():
-        pairs.append({"seed": seed, "base_optimizer": base,
+    for (level, multiplier, seed, base), arms in grouped.items():
+        pairs.append({"seed": seed, "level": level, "token_multiplier": multiplier, "base_optimizer": base,
             "baseline": load_csv_file(Path(arms["none"]["run_dir"]) / "metrics.csv") if "none" in arms else None,
             "wwpgd": load_csv_file(Path(arms["wwpgd"]["run_dir"]) / "metrics.csv") if "wwpgd" in arms else None})
     analyze_acceleration_pairs(pairs, output_dir, plan_path)
@@ -515,7 +555,7 @@ def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str 
     """Relate paired seed trajectories in alpha distance to validation acceleration."""
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     summary_path = out / "alpha_summary_by_step.csv"
-    columns = ["seed", "base_optimizer", "optimizer_step", "validation_step",
+    columns = ["pair_id", "level", "token_multiplier", "seed", "base_optimizer", "optimizer_step", "validation_step",
                "alpha_distance_baseline", "alpha_distance_wwpgd", "delta_alpha_distance",
                "validation_loss_baseline", "validation_loss_wwpgd", "delta_validation_loss",
                "temporal_relationship"]
@@ -527,23 +567,29 @@ def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str 
         fig.savefig(out / "paired_alpha_and_validation_plot.png", dpi=160); plt.close(fig)
         return
     alpha = pd.read_csv(summary_path)
-    grouped: dict[tuple[Any, Any], dict[str, dict[str, Any]]] = {}
+    grouped: dict[tuple[Any, Any, Any, Any, Any], dict[str, dict[str, Any]]] = {}
     for run in runs:
         ext = run.get("extension"); base = run.get("base_optimizer")
         if ext in {"none", "wwpgd"}:
-            grouped.setdefault((run.get("seed"), base), {})[ext] = run
+            grouped.setdefault((run.get("pair_id"), run.get("level"), run.get("token_multiplier"), run.get("seed"), base), {})[ext] = run
     trajectories, events, seed_rows = [], [], []
     acceleration = pd.read_csv(out / "acceleration_by_seed.csv") if (out / "acceleration_by_seed.csv").exists() else pd.DataFrame()
-    for (seed, base), arms in grouped.items():
+    for (pair_id, level, multiplier, seed, base), arms in grouped.items():
         if not {"none", "wwpgd"} <= set(arms): continue
         joined = {}
         for ext, suffix in (("none", "baseline"), ("wwpgd", "wwpgd")):
             run = arms[ext]; path = Path(run["run_dir"]); arm_name = run.get("arm_name") or run.get("optimizer_raw")
             aa = alpha[(alpha.seed == seed) & (alpha.arm_name.astype(str) == str(arm_name))]
+            if "pair_id" in aa:
+                aa = aa[aa.pair_id.astype(str) == str(pair_id)]
+            if "level" in aa:
+                aa = aa[pd.to_numeric(aa.level, errors="coerce") == level]
+            if "token_multiplier" in aa:
+                aa = aa[pd.to_numeric(aa.token_multiplier, errors="coerce") == multiplier]
             joined[suffix] = _backward_validation_join(aa, pd.read_csv(path / "metrics.csv"))
         p = joined["wwpgd"].merge(joined["baseline"], on="optimizer_step", suffixes=("_wwpgd", "_baseline"))
         if p.empty: continue
-        p["seed"] = seed; p["base_optimizer"] = base
+        p["pair_id"] = pair_id; p["level"] = level; p["token_multiplier"] = multiplier; p["seed"] = seed; p["base_optimizer"] = base
         p["alpha_distance_wwpgd"] = p["median_absolute_alpha_error_wwpgd"]
         p["alpha_distance_baseline"] = p["median_absolute_alpha_error_baseline"]
         p["delta_alpha_distance"] = p.alpha_distance_wwpgd - p.alpha_distance_baseline
@@ -571,13 +617,13 @@ def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str 
                 for offset, label in [(-1, "one evaluation before activation"), (0, "activation"), (1, "one evaluation after activation"), (2, "two evaluations after activation"), (3, "three evaluations after activation")]:
                     if 0 <= origin + offset < len(ordered):
                         row = ordered.iloc[origin + offset]
-                        events.append({"seed": seed, "base_optimizer": base, "event_time": offset,
+                        events.append({"pair_id": pair_id, "level": level, "token_multiplier": multiplier, "seed": seed, "base_optimizer": base, "event_time": offset,
                                        "event_label": label, "first_active_endpoint_step": active_step,
                                        "evaluation_step": row.validation_step, "delta_alpha_distance": row.delta_alpha_distance,
                                        "delta_validation_loss": row.delta_validation_loss,
                                        "observed": True, "interpretation": relation + "; associated with, not causal evidence"})
                     else:
-                        events.append({"seed": seed, "base_optimizer": base, "event_time": offset,
+                        events.append({"pair_id": pair_id, "level": level, "token_multiplier": multiplier, "seed": seed, "base_optimizer": base, "event_time": offset,
                                        "event_label": label, "first_active_endpoint_step": active_step,
                                        "evaluation_step": np.nan, "delta_alpha_distance": np.nan,
                                        "delta_validation_loss": np.nan, "observed": False,
@@ -591,7 +637,11 @@ def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str 
         first, last = ordered_p.iloc[0], ordered_p.iloc[-1]
         entering = max(0.0, float(last.fraction_inside_configured_target_deadband_wwpgd - first.fraction_inside_configured_target_deadband_wwpgd))
         ar = acceleration[(acceleration.seed == seed) & (acceleration.base_optimizer == base)] if not acceleration.empty else pd.DataFrame()
-        seed_rows.append({"seed": seed, "base_optimizer": base,
+        if len(ar) and "level" in ar:
+            ar = ar[pd.to_numeric(ar.level, errors="coerce") == level]
+        if len(ar) and "token_multiplier" in ar:
+            ar = ar[pd.to_numeric(ar.token_multiplier, errors="coerce") == multiplier]
+        seed_rows.append({"pair_id": pair_id, "level": level, "token_multiplier": multiplier, "seed": seed, "base_optimizer": base,
                           "tokens_saved": pd.to_numeric(ar.get("tokens_saved"), errors="coerce").median() if len(ar) else np.nan,
                           "median_alpha_error_reduction": float(first.alpha_distance_wwpgd - last.alpha_distance_wwpgd),
                           "fraction_layers_entering_target_band": entering,
@@ -601,8 +651,8 @@ def analyze_paired_alpha_validation(runs: list[dict[str, Any]], output_dir: str 
     pd.DataFrame(events).to_csv(out / "endpoint_event_study.csv", index=False)
     _correlations(pd.DataFrame(seed_rows)).to_csv(out / "acceleration_alpha_association.csv", index=False)
     fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
-    for (seed, base), d in aligned.groupby(["seed", "base_optimizer"]):
-        label=f"{base}, seed {seed}"; axes[0].plot(d.optimizer_step, d.delta_alpha_distance, marker="o", label=label)
+    for (level, multiplier, seed, base), d in aligned.groupby(["level", "token_multiplier", "seed", "base_optimizer"]):
+        label=f"L{level} M{multiplier} {base}, seed {seed}"; axes[0].plot(d.optimizer_step, d.delta_alpha_distance, marker="o", label=label)
         axes[1].plot(d.optimizer_step, d.delta_validation_loss, marker="o", label=label)
     axes[0].axhline(0, color="black", lw=.8); axes[1].axhline(0, color="black", lw=.8)
     axes[0].set_ylabel("Delta alpha distance"); axes[1].set(ylabel="Delta validation loss", xlabel="Optimizer step")

@@ -15,12 +15,20 @@ VALID_BASE_OPTIMIZERS = {"adamw", "muon", "stableadamw"}
 VALID_EXTENSIONS = {"none", "wwpgd", "measurement_only", "norm_matched_sham", "delayed_onset"}
 VALID_LR_SCALE_RULES = {"fixed", "linear_batch", "sqrt_batch"}
 VALID_WWPGD_CANDIDATE_DEVICES = {"auto", "live", "cpu"}
+VALID_ACTIVATIONS = {"gelu", "relu"}
+VALID_INIT_MODES = {"nanogpt_normal_0p02", "pytorch_default"}
+VALID_TRAINING_SAMPLING = {"random_window", "non_repeating"}
+VALID_EVALUATION_SAMPLING = {"random_per_eval", "fixed_probe"}
+VALID_DATA_MODES = {
+    "fineweb_custom_bpe_scaling",
+    "tiny_shakespeare_char_reproduction",
+    "fineweb_gpt2_reproduction",
+}
 VALID_MATRIX_LR_ROLES = {
     "token_embedding", "position_embedding", "attention_key", "attention_query",
     "attention_value", "attention_projection", "mlp_input", "mlp_output",
     "block_layernorm", "final_layernorm", "lm_head", "other", "block_other",
 }
-
 
 
 @dataclass(frozen=True)
@@ -152,7 +160,7 @@ class ExperimentConfig:
     dataset_config: str = "sample-10BT"
     dataset_subset: str | None = None
     dataset_split: str = "train"
-    dataset_revision: str = "main"
+    dataset_revision: str = "593b3a867298afb8ce42625a270ef20ddcad28f9"
     data_mode: str = "fineweb_custom_bpe_scaling"
     tokenizer: str | None = None
     tokenizer_revision: str | None = None
@@ -190,6 +198,10 @@ def validate_model_config(cfg: ModelConfig) -> None:
         raise ValueError("model.vocab_size must be >= 1")
     if cfg.mlp_mult < 1:
         raise ValueError("model.mlp_mult must be >= 1")
+    if cfg.activation not in VALID_ACTIVATIONS:
+        raise ValueError(f"unknown model.activation {cfg.activation}")
+    if cfg.init_mode not in VALID_INIT_MODES:
+        raise ValueError(f"unknown model.init_mode {cfg.init_mode}")
     if not 0.0 <= cfg.dropout <= 1.0:
         raise ValueError("model.dropout must satisfy 0.0 <= dropout <= 1.0")
     if cfg.n_embd % cfg.n_head != 0:
@@ -205,12 +217,30 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError("train.gradient_accumulation must be >= 1")
     if cfg.learning_rate <= 0.0:
         raise ValueError("train.learning_rate must be > 0")
+    if cfg.epsilon <= 0.0:
+        raise ValueError("train.epsilon must be > 0")
+    if len(cfg.betas) != 2 or any(not 0.0 <= float(beta) < 1.0 for beta in cfg.betas):
+        raise ValueError("train.betas must contain two values in [0,1)")
     if cfg.weight_decay < 0.0:
         raise ValueError("train.weight_decay must be >= 0")
+    if cfg.grad_clip < 0.0:
+        raise ValueError("train.grad_clip must be >= 0")
+    for name, value in (
+        ("eval_interval", cfg.eval_interval),
+        ("checkpoint_interval", cfg.checkpoint_interval),
+        ("spectral_interval", cfg.spectral_interval),
+        ("eval_batches", cfg.eval_batches),
+    ):
+        if value < 1:
+            raise ValueError(f"train.{name} must be >= 1")
     if cfg.max_steps is not None and cfg.max_steps < 1:
         raise ValueError("train.max_steps must be a positive integer or null")
     if cfg.wwpgd_interval is not None and cfg.wwpgd_interval < 1:
         raise ValueError("train.wwpgd_interval must be >= 1 when supplied")
+    if cfg.training_sampling not in VALID_TRAINING_SAMPLING:
+        raise ValueError(f"unknown train.training_sampling {cfg.training_sampling}")
+    if cfg.evaluation_sampling not in VALID_EVALUATION_SAMPLING:
+        raise ValueError(f"unknown train.evaluation_sampling {cfg.evaluation_sampling}")
     if cfg.lr_schedule not in {"constant", "warmup_cosine", "warmup_linear"}:  # stlr is intentionally retired.
         raise ValueError(f"unknown lr_schedule {cfg.lr_schedule}")
     if cfg.layer_lr not in {"flat", "llrd", "manual"}:
@@ -219,6 +249,10 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError(f"unknown lr_scale_rule {cfg.lr_scale_rule}")
     if cfg.lr_reference_tokens_per_step < 1:
         raise ValueError("train.lr_reference_tokens_per_step must be positive")
+    if cfg.llrd_gamma is not None and not 0.0 < cfg.llrd_gamma <= 1.0:
+        raise ValueError("train.llrd_gamma must be in (0,1] when supplied")
+    if not 0.0 < cfg.llrd_min_multiplier <= 1.0:
+        raise ValueError("train.llrd_min_multiplier must be in (0,1]")
     unknown_roles = sorted(set(cfg.matrix_lr_multipliers) - VALID_MATRIX_LR_ROLES)
     if unknown_roles:
         raise ValueError(f"unknown train.matrix_lr_multipliers roles: {unknown_roles}")
@@ -234,6 +268,22 @@ def validate_train_config(cfg: TrainConfig) -> None:
         raise ValueError("warmup_steps must be >= 0 when supplied")
     if cfg.lr_decay_steps is not None and cfg.lr_decay_steps < 1:
         raise ValueError("lr_decay_steps must be >= 1 when supplied")
+    if cfg.max_train_tokens is not None and cfg.max_train_tokens < 1:
+        raise ValueError("train.max_train_tokens must be >= 1 when supplied")
+    if cfg.muon_learning_rate <= 0.0:
+        raise ValueError("train.muon_learning_rate must be > 0")
+    if not 0.0 <= cfg.muon_momentum < 1.0:
+        raise ValueError("train.muon_momentum must be in [0,1)")
+    if cfg.newton_schulz_steps < 1:
+        raise ValueError("train.newton_schulz_steps must be >= 1")
+    if cfg.stable_learning_rate <= 0.0:
+        raise ValueError("train.stable_learning_rate must be > 0")
+    if cfg.stable_epsilon <= 0.0:
+        raise ValueError("train.stable_epsilon must be > 0")
+    if len(cfg.stable_betas) != 2 or any(
+        not 0.0 <= float(beta) < 1.0 for beta in cfg.stable_betas
+    ):
+        raise ValueError("train.stable_betas must contain two values in [0,1)")
     if cfg.lr_schedule == "warmup_cosine" and cfg.warmup_steps is not None and cfg.lr_decay_steps is not None and cfg.lr_decay_steps <= cfg.warmup_steps:
         raise ValueError("train.lr_decay_steps must be greater than train.warmup_steps when warmup_cosine is enabled")
 
@@ -241,6 +291,8 @@ def validate_train_config(cfg: TrainConfig) -> None:
 def validate_wwpgd_config(cfg: WWPGDConfig) -> None:
     if not 0.0 <= cfg.blend_eta <= 1.0:
         raise ValueError("wwpgd.blend_eta must satisfy 0.0 <= blend_eta <= 1.0")
+    if cfg.cayley_eta < 0.0:
+        raise ValueError("wwpgd.cayley_eta must be >= 0")
     if cfg.warmup_events < 0:
         raise ValueError("wwpgd.warmup_events must be >= 0")
     if cfg.ramp_events < 0:
@@ -268,11 +320,19 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("measurement.alpha_randomize must be false for scientific alpha trajectories")
     if len(cfg.seeds) < 1:
         raise ValueError("seeds must contain at least one seed")
+    if len(set(cfg.seeds)) != len(cfg.seeds):
+        raise ValueError("seeds must not contain duplicates")
+    if not cfg.token_multipliers or any(value < 1 for value in cfg.token_multipliers):
+        raise ValueError("token_multipliers must contain positive integers")
+    if len(set(cfg.token_multipliers)) != len(cfg.token_multipliers):
+        raise ValueError("token_multipliers must not contain duplicates")
     if cfg.base_optimizer not in VALID_BASE_OPTIMIZERS:
         raise ValueError(f"unknown base_optimizer {cfg.base_optimizer}")
     invalid_extensions = [ext for ext in cfg.extensions if ext not in VALID_EXTENSIONS]
     if invalid_extensions:
         raise ValueError(f"unknown extension(s): {', '.join(invalid_extensions)}")
+    if not cfg.extensions or len(set(cfg.extensions)) != len(cfg.extensions):
+        raise ValueError("extensions must be nonempty and must not contain duplicates")
     # ``run-multiseed`` selects arms from ExperimentConfig.extensions and only
     # replaces wwpgd.extension immediately before launching each arm.  Validate
     # the predeclared onset here as well as in validate_wwpgd_config(), otherwise
@@ -289,6 +349,16 @@ def validate_experiment_config(cfg: ExperimentConfig) -> None:
         raise ValueError("dataset_revision must be configured; refusing unpinned dataset revision")
     if not cfg.dataset_split:
         raise ValueError("dataset_split must be configured")
+    if cfg.data_mode not in VALID_DATA_MODES:
+        raise ValueError(f"unknown data_mode {cfg.data_mode}")
+    if cfg.scientific_schema_version != SCIENTIFIC_SCHEMA_VERSION:
+        raise ValueError(
+            f"scientific_schema_version must be {SCIENTIFIC_SCHEMA_VERSION}"
+        )
+    if cfg.model_architecture_version != cfg.model.model_architecture_version:
+        raise ValueError(
+            "experiment and model architecture versions must match"
+        )
     from wwgpt.scaling import PARAMETER_COUNT_CONVENTIONS
     if cfg.parameter_count_convention not in PARAMETER_COUNT_CONVENTIONS:
         raise ValueError(f"unknown parameter_count_convention {cfg.parameter_count_convention}")
