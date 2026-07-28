@@ -178,3 +178,16 @@ def test_macbook_preflight_uses_active_python_and_text_dry_runs() -> None:
     assert 'PYTHON_BIN="${PYTHON_BIN:-python3}"' in source
     assert "macbook-preflight-level${level}-${mode}.txt" in source
     assert "macbook-preflight-level${level}-${mode}.json" not in source
+
+
+def test_bounded_level012_runner_uses_one_clean_postprocessing_process() -> None:
+    source = Path("scripts/run_bounded_level012_acceptance.sh").read_text()
+    assert "set -euo pipefail" in source
+    assert 'export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"' in source
+    assert 'export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"' in source
+    assert 'python - "$RESULTS_ROOT" "$PLAN"' in source
+    assert "from wwgpt.analysis import analyze_results" in source
+    assert "from wwgpt.reproducibility import write_reproducibility_report" in source
+    assert "repeated_report = write_reproducibility_report" in source
+    assert "LEVEL_0_1_2_RELEASE_ACCEPTANCE_PASS" in source
+    assert "wwgpt generate-reproducibility-report" not in source
