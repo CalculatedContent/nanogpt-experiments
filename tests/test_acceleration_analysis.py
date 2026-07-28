@@ -61,6 +61,49 @@ def test_exploratory_analysis_accepts_production_metric_schema(tmp_path):
     assert (tmp_path / "out/acceleration_by_seed.csv").is_file()
 
 
+def production_curve(tokens, losses):
+    return pd.DataFrame(
+        {
+            "step": range(1, len(tokens) + 1),
+            "tokens_processed": tokens,
+            "validation_loss": losses,
+            "val_loss": losses,
+            "elapsed_time": [float(value) / 10.0 for value in tokens],
+            "total_elapsed_seconds": [float(value) / 10.0 for value in tokens],
+        }
+    )
+
+
+def test_curve_coalesces_production_canonical_and_legacy_columns():
+    normalized = _curve(
+        production_curve([100, 200, 300], [3.0, 2.0, 1.0])
+    )
+    assert normalized.columns.tolist().count("validation_loss") == 1
+    assert normalized.validation_loss.tolist() == [3.0, 2.0, 1.0]
+    assert normalized.tokens_seen.tolist() == [100, 200, 300]
+    assert "val_loss" not in normalized
+
+
+def test_exploratory_analysis_accepts_production_metric_schema(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: exploratory\nprimary_outcomes: []\n")
+    pairs = [
+        {
+            "seed": 1337,
+            "base_optimizer": "adamw",
+            "baseline": production_curve(
+                [100, 200, 300], [3.0, 2.0, 1.0]
+            ),
+            "wwpgd": production_curve(
+                [100, 200, 300], [3.0, 1.9, 0.9]
+            ),
+        }
+    ]
+    analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+    assert (tmp_path / "out/analysis_plan_manifest.json").is_file()
+    assert (tmp_path / "out/acceleration_by_seed.csv").is_file()
+
+
 def test_known_two_x_speedup_and_artifacts(tmp_path):
     plan = tmp_path / "plan.yaml"
     plan.write_text("mode: confirmatory\nthresholds: [2.0]\nprimary_outcomes: [tokens_saved]\nfixed_token_budgets: [75]\n")
