@@ -158,41 +158,6 @@ def _coalesce_aliases(
     return result
 
 
-def _column_series(frame: pd.DataFrame, name: str) -> pd.Series | None:
-    """Return one coalesced Series even when a label occurs more than once."""
-    positions = [
-        index for index, column in enumerate(frame.columns) if column == name
-    ]
-    if not positions:
-        return None
-    selected = frame.iloc[:, positions]
-    result = selected.iloc[:, 0]
-    for index in range(1, selected.shape[1]):
-        result = result.combine_first(selected.iloc[:, index])
-    return result
-
-
-def _coalesce_aliases(
-    frame: pd.DataFrame, aliases: dict[str, tuple[str, ...]]
-) -> pd.DataFrame:
-    """Canonicalize aliases without creating duplicate column labels."""
-    result = frame.copy()
-    for canonical, fallback_names in aliases.items():
-        merged: pd.Series | None = None
-        present: list[str] = []
-        for name in (canonical, *fallback_names):
-            values = _column_series(result, name)
-            if values is None:
-                continue
-            present.append(name)
-            merged = values if merged is None else merged.combine_first(values)
-        if merged is None:
-            continue
-        result = result.drop(columns=list(dict.fromkeys(present)))
-        result[canonical] = merged
-    return result
-
-
 def _curve(frame: pd.DataFrame) -> pd.DataFrame:
     d = _coalesce_aliases(
         frame,
