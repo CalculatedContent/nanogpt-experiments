@@ -1,0 +1,36 @@
+name: Export overtraining audit snapshot
+
+on:
+  push:
+    branches:
+      - agent/add-overtraining-mode
+
+permissions:
+  contents: read
+
+jobs:
+  export-source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build exact source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > AUDIT_COMMIT.txt
+          tar \
+            --exclude=.git \
+            --exclude=.github/workflows/export-overtraining-audit-snapshot.yml \
+            --exclude=overtraining-audit-snapshot.tar.gz \
+            -czf overtraining-audit-snapshot.tar.gz .
+      - name: Upload exact source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: overtraining-audit-snapshot
+          path: |
+            overtraining-audit-snapshot.tar.gz
+            AUDIT_COMMIT.txt
+          if-no-files-found: error
+          retention-days: 1
