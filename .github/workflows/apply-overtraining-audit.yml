@@ -1,0 +1,61 @@
+name: Apply validated fixed-corpus overtraining implementation
+
+on:
+  push:
+    branches:
+      - agent/add-overtraining-mode
+
+permissions:
+  contents: write
+
+jobs:
+  apply-overtraining:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/add-overtraining-mode
+          fetch-depth: 0
+      - name: Apply exact locally validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'ef6a161b35ee2309964b5f52c8076f144a616e7cc8c898b56a3fac2421626947  .overtraining-audit/implementation.patch.gz' \
+            | sha256sum --check --strict
+          gzip -dc .overtraining-audit/implementation.patch.gz > /tmp/overtraining.patch
+          git apply --index --binary --whitespace=error-all /tmp/overtraining.patch
+          chmod +x scripts/run_level0_overtraining_pilot.sh
+          rm -rf .overtraining-audit
+          rm -f .github/workflows/apply-overtraining-audit.yml
+          git add -A
+          git diff --cached --check
+          python -m compileall -q src tests
+          bash -n scripts/*.sh
+      - name: Install package and focused tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e . pytest ruff
+      - name: Validate overtraining and existing Level 0-2 paths
+        env:
+          MPLBACKEND: Agg
+        run: |
+          ruff check src tests
+          pytest -q \
+            tests/test_optimizer_step_resolution.py \
+            tests/test_config_validation_pass1.py \
+            tests/test_cli_execution_interface.py \
+            tests/test_overtraining_mode.py \
+            tests/test_critical_fixes.py \
+            tests/test_level012_cached_end_to_end.py \
+            tests/test_level012_full_pipeline.py \
+            tests/test_run_health_and_reuse.py \
+            tests/test_source_structure.py
+      - name: Commit validated implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Add explicit fixed-corpus overtraining mode'
+          git push origin HEAD:agent/add-overtraining-mode
