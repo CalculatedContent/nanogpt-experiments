@@ -21,7 +21,7 @@ jobs:
         with:
           ref: agent/add-overtraining-mode
           fetch-depth: 0
-      - name: Reconstruct and apply the exact locally validated patch
+      - name: Reconstruct and apply the exact locally validated source patch
         shell: bash
         run: |
           set -euo pipefail
@@ -32,10 +32,11 @@ jobs:
             | sha256sum --check --strict
           gzip -t /tmp/overtraining.patch.gz
           gzip -dc /tmp/overtraining.patch.gz > /tmp/overtraining.patch
-          git apply --index --binary --whitespace=error-all /tmp/overtraining.patch
+          git apply --index --binary --whitespace=error-all \
+            --exclude=.github/workflows/ci.yml \
+            /tmp/overtraining.patch
           chmod +x scripts/run_level0_overtraining_pilot.sh
           rm -rf .overtraining-audit
-          rm -f .github/workflows/apply-overtraining-audit.yml
           git add -A
           git diff --cached --check
           python -m compileall -q src tests
@@ -59,7 +60,7 @@ jobs:
             tests/test_level012_full_pipeline.py \
             tests/test_run_health_and_reuse.py \
             tests/test_source_structure.py
-      - name: Commit validated implementation
+      - name: Commit validated source implementation
         shell: bash
         run: |
           set -euo pipefail
