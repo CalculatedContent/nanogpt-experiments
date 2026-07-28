@@ -1,0 +1,121 @@
+name: Apply generalization NumPy integration fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/release-readiness-audit
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e . pytest
+      - name: Patch generalization integration compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          source = Path('src/wwgpt/generalization_analysis.py')
+          text = source.read_text()
+          marker = 'def _auc(frame: pd.DataFrame, metric: str) -> float:\n'
+          helper = '''def _trapezoidal_integral(y: Any, x: Any) -> float:
+              """Integrate across NumPy releases, including builds without alias APIs."""
+              integration = getattr(np, "trapezoid", None)
+              if integration is None:
+                  integration = getattr(np, "trapz", None)
+              if integration is not None:
+                  return float(integration(y, x))
+              x_values = np.asarray(x, dtype=float)
+              y_values = np.asarray(y, dtype=float)
+              if len(x_values) < 2:
+                  return 0.0
+              return float(
+                  np.sum(np.diff(x_values) * (y_values[:-1] + y_values[1:]) * 0.5)
+              )
+
+
+          '''
+          if 'def _trapezoidal_integral(y: Any, x: Any)' not in text:
+              if marker not in text:
+                  raise SystemExit('generalization _auc marker not found')
+              text = text.replace(marker, helper + marker, 1)
+          old = '    return float(np.trapz(ordered.y, ordered.x) / span) if span > 0 else math.nan\n'
+          new = '    return _trapezoidal_integral(ordered.y, ordered.x) / span if span > 0 else math.nan\n'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('generalization np.trapz call not found')
+          source.write_text(text)
+
+          tests = Path('tests/test_release_readiness_audit.py')
+          test_text = tests.read_text()
+          if 'import numpy as np\n' not in test_text:
+              test_text = test_text.replace('from pathlib import Path\n\nimport pytest\n', 'from pathlib import Path\n\nimport numpy as np\nimport pandas as pd\nimport pytest\n', 1)
+          if 'from wwgpt.generalization_analysis import _auc\n' not in test_text:
+              test_text = test_text.replace('import wwgpt.reproducibility as reproducibility\n', 'import wwgpt.reproducibility as reproducibility\nfrom wwgpt.generalization_analysis import _auc\n', 1)
+          addition = '''
+
+          def test_generalization_auc_supports_numpy_without_integration_aliases(monkeypatch) -> None:
+              monkeypatch.delattr(np, "trapezoid", raising=False)
+              monkeypatch.delattr(np, "trapz", raising=False)
+              frame = pd.DataFrame(
+                  {
+                      "tokens_seen": [0.0, 50.0, 100.0],
+                      "validation_loss": [3.0, 2.0, 1.0],
+                  }
+              )
+              assert _auc(frame, "validation_loss") == pytest.approx(2.0)
+          '''
+          if 'test_generalization_auc_supports_numpy_without_integration_aliases' not in test_text:
+              test_text += addition
+          tests.write_text(test_text)
+          PY
+          rm -f .github/workflows/apply-generalization-numpy-fix.yml
+          rm -f .github/workflows/capture-linux-analysis-traceback.yml
+      - name: Validate exact Linux release path
+        env:
+          MPLBACKEND: Agg
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests scripts
+          bash -n scripts/*.sh
+          pytest -q \
+            tests/test_release_readiness_audit.py \
+            tests/test_acceleration_analysis.py \
+            tests/test_level012_full_pipeline.py \
+            tests/test_local_level_scripts.py
+          timeout 300 ./scripts/run_bounded_level012_acceptance.sh /tmp/generalization-numpy-release
+      - name: Commit validated compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/wwgpt/generalization_analysis.py \
+            tests/test_release_readiness_audit.py \
+            .github/workflows/apply-generalization-numpy-fix.yml \
+            .github/workflows/capture-linux-analysis-traceback.yml
+          git diff --cached --check
+          git commit -m 'Support NumPy integration APIs in generalization analysis'
+          git push origin HEAD:agent/release-readiness-audit
