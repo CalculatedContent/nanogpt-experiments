@@ -1,0 +1,281 @@
+name: Apply deterministic postprocessing CLI exit fix
+
+on:
+  push:
+    branches:
+      - agent/release-readiness-audit
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/release-readiness-audit
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install package and test tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e . pytest
+      - name: Apply deterministic CLI and wrapper fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          cli = Path('src/wwgpt/cli.py')
+          text = cli.read_text()
+          seed_marker = '''def _seeds(s: str | None) -> list[int] | None:
+              return None if not s else [int(x) for x in s.split(',') if x]
+
+
+          '''
+          seed_replacement = '''def _seeds(s: str | None) -> list[int] | None:
+              return None if not s else [int(x) for x in s.split(',') if x]
+
+
+          def _exit_after_flush(status: int = 0) -> None:
+              """Exit a completed CLI command without waiting on library worker threads."""
+              sys.stderr.flush()
+              sys.stdout.flush()
+              os._exit(status)
+
+
+          '''
+          if 'def _exit_after_flush(status: int = 0)' not in text:
+              if seed_marker not in text:
+                  raise SystemExit('CLI seed helper marker not found')
+              text = text.replace(seed_marker, seed_replacement, 1)
+          old_analyze = '    elif args.cmd=="analyze-results": print(analyze_results(args.results_root, args.analysis_plan))\n'
+          new_analyze = '''    elif args.cmd=="analyze-results":
+              print(analyze_results(args.results_root, args.analysis_plan), flush=True)
+              _exit_after_flush(0)
+          '''
+          if old_analyze in text:
+              text = text.replace(old_analyze, new_analyze, 1)
+          elif new_analyze.strip() not in text:
+              raise SystemExit('analyze-results CLI branch not found')
+          old_prepare = '''        sys.stderr.flush()
+              sys.stdout.flush()
+              # Some streaming dataset backends can leave non-daemon workers alive after all artifacts
+              # have been written. Exit the CLI process deterministically so shell wrappers can finish.
+              os._exit(0)
+          '''
+          new_prepare = '''        # Some data and analysis backends can leave non-daemon workers alive after all
+              # artifacts have been written. Exit deterministically so shell wrappers finish.
+              _exit_after_flush(0)
+          '''
+          if old_prepare in text:
+              text = text.replace(old_prepare, new_prepare, 1)
+          old_report = '''    elif args.cmd=="generate-reproducibility-report":
+              print(
+                  write_reproducibility_report(
+                      args.experiment_root,
+                      strict=args.strict,
+                      analysis_plan=args.analysis_plan,
+                  )
+              )
+          '''
+          new_report = '''    elif args.cmd=="generate-reproducibility-report":
+              print(
+                  write_reproducibility_report(
+                      args.experiment_root,
+                      strict=args.strict,
+                      analysis_plan=args.analysis_plan,
+                  ),
+                  flush=True,
+              )
+              _exit_after_flush(0)
+          '''
+          if old_report in text:
+              text = text.replace(old_report, new_report, 1)
+          elif new_report.strip() not in text:
+              raise SystemExit('reproducibility CLI branch not found')
+          cli.write_text(text)
+
+          release_test = Path('tests/test_release_readiness_audit.py')
+          tests = release_test.read_text()
+          test_block = '''
+
+          def test_postprocessing_cli_exits_after_flushing_completed_artifacts() -> None:
+              source = Path("src/wwgpt/cli.py").read_text()
+              assert "def _exit_after_flush(status: int = 0)" in source
+              assert 'elif args.cmd=="analyze-results":\\n        print(' in source
+              assert 'elif args.cmd=="generate-reproducibility-report":' in source
+              assert source.count("_exit_after_flush(0)") >= 3
+          '''
+          if 'test_postprocessing_cli_exits_after_flushing_completed_artifacts' not in tests:
+              release_test.write_text(tests + test_block)
+
+          local_test = Path('tests/test_local_level_scripts.py')
+          tests = local_test.read_text()
+          local_block = '''
+
+          def test_bounded_level012_runner_normalizes_report_output_and_emits_diagnostics() -> None:
+              source = Path("scripts/run_bounded_level012_acceptance.sh").read_text()
+              assert "set -Eeuo pipefail" in source
+              assert "trap on_error ERR" in source
+              assert "extract_report_path" in source
+              assert "release_reproducibility_first.log" in source
+              assert "release_reproducibility_second.log" in source
+              assert 'FIRST_REPORT="$(extract_report_path "$FIRST_LOG")"' in source
+              assert 'SECOND_REPORT="$(extract_report_path "$SECOND_LOG")"' in source
+              assert 'FIRST_REPORT="$(wwgpt generate-reproducibility-report' not in source
+          '''
+          if 'test_bounded_level012_runner_normalizes_report_output_and_emits_diagnostics' not in tests:
+              local_test.write_text(tests + local_block)
+          PY
+          cat > scripts/run_bounded_level012_acceptance.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          if [ "$#" -ne 1 ]; then
+            echo "usage: $0 RESULTS_ROOT" >&2
+            exit 2
+          fi
+
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+          cd "$REPO_ROOT"
+
+          RESULTS_ROOT="$(python - "$1" <<'PY'
+          from pathlib import Path
+          import sys
+          print(Path(sys.argv[1]).expanduser().resolve())
+          PY
+          )"
+          PLAN="$RESULTS_ROOT/release_acceptance_plan.yaml"
+
+          on_error() {
+            local status=$?
+            local line=${BASH_LINENO[0]:-unknown}
+            local command=${BASH_COMMAND:-unknown}
+            echo "[release-acceptance] failure status=$status line=$line command=$command" >&2
+            for log in \
+              "$RESULTS_ROOT/release_health.log" \
+              "$RESULTS_ROOT/release_analysis.log" \
+              "$RESULTS_ROOT/release_audit.log" \
+              "$RESULTS_ROOT/release_reproducibility_first.log" \
+              "$RESULTS_ROOT/release_reproducibility_second.log"; do
+              if [ -f "$log" ]; then
+                echo "[release-acceptance] tail $log" >&2
+                tail -n 40 "$log" >&2 || true
+              fi
+            done
+            exit "$status"
+          }
+          trap on_error ERR
+
+          extract_report_path() {
+            python - "$1" <<'PY'
+          from pathlib import Path
+          import sys
+
+          log = Path(sys.argv[1])
+          lines = [line.strip() for line in log.read_text().splitlines() if line.strip()]
+          candidates = [line for line in lines if line.endswith(".pdf")]
+          if not candidates:
+              raise SystemExit(f"no PDF report path found in {log}")
+          report = Path(candidates[-1]).expanduser()
+          if not report.is_absolute():
+              report = (Path.cwd() / report).resolve()
+          else:
+              report = report.resolve()
+          if not report.is_file():
+              raise SystemExit(f"reported PDF does not exist: {report}")
+          print(report)
+          PY
+          }
+
+          python scripts/run_bounded_level012_acceptance.py --results-root "$RESULTS_ROOT"
+          wwgpt check-health --experiment-root "$RESULTS_ROOT" >"$RESULTS_ROOT/release_health.log"
+          wwgpt analyze-results "$RESULTS_ROOT" --analysis-plan "$PLAN" >"$RESULTS_ROOT/release_analysis.log"
+          wwgpt audit-experiment --experiment-root "$RESULTS_ROOT" >"$RESULTS_ROOT/release_audit.log"
+
+          FIRST_LOG="$RESULTS_ROOT/release_reproducibility_first.log"
+          SECOND_LOG="$RESULTS_ROOT/release_reproducibility_second.log"
+          wwgpt generate-reproducibility-report \
+            --experiment-root "$RESULTS_ROOT" \
+            --analysis-plan "$PLAN" \
+            --strict >"$FIRST_LOG"
+          wwgpt generate-reproducibility-report \
+            --experiment-root "$RESULTS_ROOT" \
+            --analysis-plan "$PLAN" \
+            --strict >"$SECOND_LOG"
+          FIRST_REPORT="$(extract_report_path "$FIRST_LOG")"
+          SECOND_REPORT="$(extract_report_path "$SECOND_LOG")"
+          if [ "$FIRST_REPORT" != "$SECOND_REPORT" ]; then
+            echo "reproducibility report path changed across identical reruns" >&2
+            echo "first:  $FIRST_REPORT" >&2
+            echo "second: $SECOND_REPORT" >&2
+            exit 1
+          fi
+
+          python - "$RESULTS_ROOT" <<'PY'
+          from pathlib import Path
+          import json
+          import sys
+          import pandas as pd
+
+          root = Path(sys.argv[1]).resolve()
+          analysis = root / "analysis"
+          complete = sorted(root.rglob("run_complete.json"))
+          if len(complete) != 6:
+              raise SystemExit(f"expected six complete runs, found {len(complete)}")
+          inventory = pd.read_csv(analysis / "runs_manifest.csv")
+          if len(inventory) != 6:
+              raise SystemExit(f"expected six analyzed arms, found {len(inventory)}")
+          if set(pd.to_numeric(inventory["level"], errors="raise").astype(int)) != {0, 1, 2}:
+              raise SystemExit("analysis did not preserve Levels 0, 1, and 2")
+          required = [
+              analysis / "analysis_eligibility.json",
+              analysis / "acceleration_by_seed.csv",
+              analysis / "integrity_summary.json",
+              analysis / "reproducibility_report.json",
+              analysis / "reproducibility_report.pdf",
+              analysis / "cross_level_run_inventory.csv",
+          ]
+          missing = [str(path) for path in required if not path.is_file()]
+          if missing:
+              raise SystemExit(f"missing release artifacts: {missing}")
+          eligibility = json.loads((analysis / "analysis_eligibility.json").read_text())
+          if not eligibility.get("eligible"):
+              raise SystemExit(f"analysis ineligible: {eligibility}")
+          print("LEVEL_0_1_2_RELEASE_ACCEPTANCE_PASS")
+          PY
+          EOF
+          chmod +x scripts/run_bounded_level012_acceptance.sh
+          rm -f .github/workflows/apply-linux-cli-exit-fix.yml
+      - name: Validate focused and clean-process paths
+        env:
+          MPLBACKEND: Agg
+        run: |
+          set -euo pipefail
+          python -m compileall -q src tests scripts
+          bash -n scripts/*.sh
+          pytest -q \
+            tests/test_release_readiness_audit.py \
+            tests/test_local_level_scripts.py \
+            tests/test_acceleration_analysis.py \
+            tests/test_level012_full_pipeline.py
+          timeout 300 ./scripts/run_bounded_level012_acceptance.sh /tmp/linux-cli-exit-acceptance
+      - name: Commit validated fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/wwgpt/cli.py scripts/run_bounded_level012_acceptance.sh \
+            tests/test_release_readiness_audit.py tests/test_local_level_scripts.py \
+            .github/workflows/apply-linux-cli-exit-fix.yml
+          git diff --cached --check
+          git commit -m 'Exit completed postprocessing commands deterministically'
+          git push origin HEAD:agent/release-readiness-audit
