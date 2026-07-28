@@ -57,3 +57,11 @@ def test_reproducibility_cli_forwards_strict_and_analysis_plan() -> None:
     source = Path("src/wwgpt/cli.py").read_text()
     assert "strict=args.strict" in source
     assert "analysis_plan=args.analysis_plan" in source
+
+
+def test_postprocessing_cli_exits_after_flushing_completed_artifacts() -> None:
+    source = Path("src/wwgpt/cli.py").read_text()
+    assert "def _exit_after_flush(status: int = 0)" in source
+    assert 'elif args.cmd=="analyze-results":\n        print(' in source
+    assert 'elif args.cmd=="generate-reproducibility-report":' in source
+    assert source.count("_exit_after_flush(0)") >= 3

@@ -337,6 +337,13 @@ def _seeds(s: str | None) -> list[int] | None:
     return None if not s else [int(x) for x in s.split(',') if x]
 
 
+def _exit_after_flush(status: int = 0) -> None:
+    """Exit a completed CLI command without waiting on library worker threads."""
+    sys.stderr.flush()
+    sys.stdout.flush()
+    os._exit(status)
+
+
 def main() -> None:
     p=argparse.ArgumentParser(prog="wwgpt", epilog="Supported experiment profiles: reproduction_tiny, reproduction_fineweb, scaling. target_alpha is the only public spectral target."); sub=p.add_subparsers(dest="cmd", required=True)
     s=sub.add_parser("smoke-test"); s.add_argument("root", type=Path); s.add_argument("--steps", type=int, default=3)
@@ -396,7 +403,9 @@ def main() -> None:
     pl=sub.add_parser("plan-scaling"); pl.add_argument("--params", type=int); pl.add_argument("--level", type=int); pl.add_argument("--token-multiplier", type=int, required=True); pl.add_argument("--available-tokens", type=int, required=True); pl.add_argument("--batch-size", type=int, default=8); pl.add_argument("--block-size", type=int, default=256); pl.add_argument("--grad-accum", type=int, default=1)
     args=p.parse_args()
     if args.cmd=="smoke-test": print(smoke(args.root, args.steps))
-    elif args.cmd=="analyze-results": print(analyze_results(args.results_root, args.analysis_plan))
+    elif args.cmd=="analyze-results":
+        print(analyze_results(args.results_root, args.analysis_plan), flush=True)
+        _exit_after_flush(0)
     elif args.cmd=="prepare-data":
         docs = args.docs_file.read_text().splitlines() if args.docs_file else None
         cfg = _resolved_config(args)
@@ -405,11 +414,9 @@ def main() -> None:
         if args.dry_run:
             return
         print(ensure_prepared_data(args.data_root, args.level, args.token_multiplier, _resolve_config_path(args), docs=docs, min_validation_tokens=1 if docs is not None else 100_000, force_reprepare=args.force_reprepare).root, flush=True)
-        sys.stderr.flush()
-        sys.stdout.flush()
-        # Some streaming dataset backends can leave non-daemon workers alive after all artifacts
-        # have been written. Exit the CLI process deterministically so shell wrappers can finish.
-        os._exit(0)
+        # Some data and analysis backends can leave non-daemon workers alive after all
+        # artifacts have been written. Exit deterministically so shell wrappers finish.
+        _exit_after_flush(0)
     elif args.cmd=="run-multiseed":
         # CLI overrides are accepted by the schema-v3 interface.
         exts = [args.extension] if args.extension else [x for x in args.extensions.split(",") if x]
@@ -468,8 +475,10 @@ def main() -> None:
                 args.experiment_root,
                 strict=args.strict,
                 analysis_plan=args.analysis_plan,
-            )
+            ),
+            flush=True,
         )
+        _exit_after_flush(0)
     elif args.cmd=="run-notebooks":
         from wwgpt.notebook_runner import run_notebooks
         for path in run_notebooks(args.results_root, args.output_root, analysis_plan=args.analysis_plan, profile=args.profile, level=args.level, token_multiplier=args.token_multiplier, base_optimizer=args.base_optimizer, notebooks=args.notebooks, strict=args.strict, run_analysis=args.run_analysis, reuse_existing_analysis=args.reuse_existing_analysis): print(path)
