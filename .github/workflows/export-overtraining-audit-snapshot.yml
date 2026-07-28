@@ -4,12 +4,16 @@ on:
   push:
     branches:
       - agent/add-overtraining-mode
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
   export-source:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'agent/add-overtraining-mode'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
