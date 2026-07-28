@@ -1,0 +1,51 @@
+name: Export release audit wheelhouse
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export-wheelhouse:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download binary audit dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip wheel
+          mkdir -p wheelhouse
+          python -m pip download \
+            --dest wheelhouse \
+            --only-binary=:all: \
+            datasets \
+            tokenizers \
+            'weightwatcher>=0.7.7,<0.8' \
+            tiktoken
+          python -m pip download --dest wheelhouse --no-deps torch-optimi
+          python -m pip wheel \
+            --wheel-dir wheelhouse \
+            --no-deps \
+            'ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git'
+          rm -f wheelhouse/torch-*.whl
+          python - <<'PY'
+          from pathlib import Path
+          files = sorted(path.name for path in Path('wheelhouse').iterdir())
+          Path('WHEELHOUSE_INVENTORY.txt').write_text('\n'.join(files) + '\n')
+          print('\n'.join(files))
+          PY
+      - name: Upload offline wheelhouse
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-audit-wheelhouse-py313
+          path: |
+            wheelhouse/**
+            WHEELHOUSE_INVENTORY.txt
+          if-no-files-found: error
+          retention-days: 1
