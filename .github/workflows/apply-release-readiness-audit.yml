@@ -1,0 +1,47 @@
+name: Apply release-readiness audit patch
+
+on:
+  push:
+    branches:
+      - agent/release-readiness-audit
+
+permissions:
+  contents: write
+
+jobs:
+  apply-audit:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/release-readiness-audit
+          fetch-depth: 0
+      - name: Apply exact validated patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .release-audit/patch.part* \
+            | base64 --decode \
+            | gzip --decompress \
+            > /tmp/release-audit.patch
+          echo 'fbc0bdcf8f8df12b68009cd14c496aa0c272f8d0457e4b2eaf599bc450fa8f0d  /tmp/release-audit.patch' \
+            | sha256sum --check --strict
+          git apply --index --whitespace=error-all /tmp/release-audit.patch
+          rm -rf .release-audit
+          rm -f .github/workflows/apply-release-readiness-audit.yml
+          rm -f .github/workflows/export-release-audit-wheelhouse.yml
+          rm -f .github/workflows/export-release-audit-snapshot.yml
+          git add -A
+          git diff --cached --check
+          python -m compileall -q src tests scripts
+          bash -n scripts/*.sh
+          git diff --cached --stat
+      - name: Commit validated release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Complete Level 0-2 local experiment release audit'
+          git push origin HEAD:agent/release-readiness-audit
