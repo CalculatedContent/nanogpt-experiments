@@ -35,7 +35,14 @@ RESUME="${WWGPT_RESUME:-1}"
 RUN_NOTEBOOKS="${WWGPT_RUN_NOTEBOOKS:-0}"
 ANALYSIS_PLAN="${WWGPT_ANALYSIS_PLAN:-configs/analysis_plan_exploratory.yaml}"
 
-mkdir -p "$RESULTS_ROOT"
+CACHE_ROOT="${WWGPT_CACHE_ROOT:-$(dirname "$DATA_ROOT")/cache}"
+export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HUB_CACHE}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+mkdir -p "$RESULTS_ROOT" "$HF_DATASETS_CACHE" "$HF_HUB_CACHE"
 wwgpt local-readiness \
   --device "$DEVICE" --levels "$LEVELS" --optimizers "$OPTIMIZERS" \
   --output "$RESULTS_ROOT/local-readiness"
@@ -94,9 +101,25 @@ for MODE in "${MODE_ARRAY[@]}"; do
         COMMON+=(--resume)
       fi
       wwgpt run-multiseed "${COMMON[@]}"
+      LEVEL_LAYOUT="$VARIANT_ROOT/experiments/level_$(printf '%02d' "$LEVEL")/multiplier_$TOKEN_MULTIPLIER"
+      wwgpt check-health --experiment-root "$LEVEL_LAYOUT"
+      wwgpt analyze-results "$LEVEL_LAYOUT" --analysis-plan "$ANALYSIS_PLAN"
+      wwgpt audit-experiment --experiment-root "$LEVEL_LAYOUT"
+      wwgpt generate-reproducibility-report \
+        --experiment-root "$LEVEL_LAYOUT" \
+        --analysis-plan "$ANALYSIS_PLAN" \
+        --strict
     done
+    # Validate the combined Level 0--2 root as one experiment as well. This
+    # catches cross-level discovery, deduplication, and post-processing defects
+    # that cannot be exposed by validating each level in isolation.
     wwgpt check-health --experiment-root "$VARIANT_ROOT"
     wwgpt analyze-results "$VARIANT_ROOT" --analysis-plan "$ANALYSIS_PLAN"
+    wwgpt audit-experiment --experiment-root "$VARIANT_ROOT"
+    wwgpt generate-reproducibility-report \
+      --experiment-root "$VARIANT_ROOT" \
+      --analysis-plan "$ANALYSIS_PLAN" \
+      --strict
     python -m wwgpt.cross_level_analysis \
       --results-root "$VARIANT_ROOT" \
       --output-dir "$VARIANT_ROOT/cross_level_analysis" \

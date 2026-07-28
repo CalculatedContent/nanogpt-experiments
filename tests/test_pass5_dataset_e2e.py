@@ -110,9 +110,29 @@ train:
 def _fixture_data() -> TokenData:
     train = list(range(16)) * 32
     val = list(reversed(range(16))) * 16
-    manifest = {"realized_tokens": 8, "data_mode": "offline_token_fixture", "dataset_name": "offline_token_fixture", "dataset_config": "fixture", "dataset_revision": "fixture", "validation_document_count": 1}
+    test = list(range(8, 16)) * 32
+    manifest = {
+        "realized_tokens": 8,
+        "validation_tokens": len(val),
+        "test_tokens": len(test),
+        "data_mode": "offline_token_fixture",
+        "dataset_name": "offline_token_fixture",
+        "dataset_config": "fixture",
+        "dataset_revision": "fixture",
+        "validation_document_count": 1,
+        "test_document_count": 1,
+    }
     tok = {"tokenizer_hash": sha256_bytes(b"offline-token-fixture"), "tokenizer_type": "offline", "vocab_size": 16}
-    return TokenData(train, val, 16, sha256_bytes(bytes(train + val)), None, manifest, tok)
+    return TokenData(
+        train,
+        val,
+        16,
+        sha256_bytes(bytes(train + val + test)),
+        None,
+        manifest,
+        tok,
+        test,
+    )
 
 
 def _spectral_kqv(model, **kwargs):

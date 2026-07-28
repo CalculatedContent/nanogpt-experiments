@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -139,6 +140,38 @@ def test_noisy_dip_is_not_sustained_and_not_reached_is_none():
     noisy = curve([0, 10, 20, 30], [3, 1.9, 2.2, 1.8])
     assert sustained_tokens_to_threshold(noisy, 2.0) is None
     assert sustained_tokens_to_threshold(curve([0, 10], [3, 2.5]), 2.0) is None
+
+
+def test_paired_auc_supports_numpy_one_without_trapezoid(monkeypatch):
+    monkeypatch.delattr(np, "trapezoid", raising=False)
+    result = paired_auc(curve([0, 50, 100], [3, 2, 1]), curve([0, 50, 100], [3, 2, 1]))
+    assert result["paired_auc_difference"] == 0
+
+
+def test_exploratory_thresholds_ignore_incomplete_pairs(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: exploratory\nprimary_outcomes: []\n")
+    pairs = [
+        {
+            "seed": 1,
+            "level": 0,
+            "token_multiplier": 20,
+            "base_optimizer": "adamw",
+            "baseline": curve([0, 10], [3.0, 2.0]),
+            "wwpgd": curve([0, 10], [3.0, 1.9]),
+        },
+        {
+            "seed": 2,
+            "level": 0,
+            "token_multiplier": 20,
+            "base_optimizer": "adamw",
+            "baseline": curve([0, 10], [3.0, 2.5]),
+            "wwpgd": None,
+        },
+    ]
+    analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+    audit = pd.read_csv(tmp_path / "out/missing_pair_audit.csv")
+    assert "wwpgd_arm_missing" in set(audit.missingness_pattern)
 
 
 def test_auc_never_extrapolates_beyond_common_support():

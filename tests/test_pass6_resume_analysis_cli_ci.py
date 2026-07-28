@@ -10,8 +10,27 @@ import pandas as pd
 from wwgpt.analysis import discover_canonical_runs, paired_extension_effects
 
 
-def _run(root: Path, pair: str, arm: str, base: str, ext: str, seed: int, profile: str = "reproduction_fineweb"):
-    d = root / "experiments" / "level_00" / "multiplier_20" / pair / arm / "run_001"
+def _run(
+    root: Path,
+    pair: str,
+    arm: str,
+    base: str,
+    ext: str,
+    seed: int,
+    profile: str = "reproduction_fineweb",
+    *,
+    level: int = 0,
+    token_multiplier: int = 20,
+):
+    d = (
+        root
+        / "experiments"
+        / f"level_{level:02d}"
+        / f"multiplier_{token_multiplier}"
+        / pair
+        / arm
+        / "run_001"
+    )
     d.mkdir(parents=True)
     man = {
         "scientific_schema_version": 3,
@@ -28,8 +47,8 @@ def _run(root: Path, pair: str, arm: str, base: str, ext: str, seed: int, profil
         "validation_probe_hash": "v",
         "training_probe_hash": "t",
         "realized_tokens": 100,
-        "level": 0,
-        "token_multiplier": 20,
+        "level": level,
+        "token_multiplier": token_multiplier,
         "experiment_profile": profile,
     }
     (d / "manifest.json").write_text(json.dumps(man))
@@ -53,6 +72,54 @@ def test_all_six_arm_discovery(tmp_path: Path):
     assert {r["optimizer_family"] for r in found} == {a for a, _, _ in arms}
 
 
+def test_nested_level_and_multiplier_discovery_is_not_level0_specific(tmp_path: Path):
+    _run(
+        tmp_path,
+        "pair_9",
+        "adamw",
+        "adamw",
+        "none",
+        9,
+        level=2,
+        token_multiplier=7,
+    )
+    _run(
+        tmp_path,
+        "pair_9",
+        "adamw_wwpgd",
+        "adamw",
+        "wwpgd",
+        9,
+        level=2,
+        token_multiplier=7,
+    )
+    found = discover_canonical_runs(tmp_path)
+    assert {(row["level"], row["token_multiplier"]) for row in found} == {(2, 7)}
+    assert {row["extension"] for row in found} == {"none", "wwpgd"}
+
+
+def test_multiple_levels_with_same_seed_remain_distinct_design_cells(tmp_path: Path):
+    for level in (0, 1, 2):
+        pair = f"pair_level_{level}"
+        _run(tmp_path, pair, "adamw", "adamw", "none", 1337, level=level)
+        _run(
+            tmp_path,
+            pair,
+            "adamw_wwpgd",
+            "adamw",
+            "wwpgd",
+            1337,
+            level=level,
+        )
+    found = discover_canonical_runs(tmp_path)
+    assert len(found) == 6
+    assert {(row["level"], row["extension"]) for row in found} == {
+        (level, extension)
+        for level in (0, 1, 2)
+        for extension in ("none", "wwpgd")
+    }
+
+
 def test_paired_effects_never_cross_base_optimizer():
     df = pd.DataFrame([
         {"scientific_schema_version": 3, "level": 0, "token_multiplier": 20, "base_optimizer": "adamw", "extension": "none", "seed": 1, "loss": 10.0},
@@ -66,9 +133,21 @@ def test_paired_effects_never_cross_base_optimizer():
 
 
 def test_profile_isolation_and_no_composite_pooling_by_default(tmp_path: Path):
-    _run(tmp_path / "repro", "pair_1", "adamw", "adamw", "none", 1, "reproduction_fineweb")
-    _run(tmp_path / "scale", "pair_1", "adamw", "adamw", "none", 1, "scaling")
-    assert len(discover_canonical_runs(tmp_path / "repro")) == 0
+    for profile_root, profile in (
+        (tmp_path / "repro", "reproduction_fineweb"),
+        (tmp_path / "scale", "scaling"),
+    ):
+        _run(profile_root, "pair_1", "adamw", "adamw", "none", 1, profile)
+        _run(
+            profile_root,
+            "pair_1",
+            "adamw_wwpgd",
+            "adamw",
+            "wwpgd",
+            1,
+            profile,
+        )
+        assert len(discover_canonical_runs(profile_root)) == 2
     assert discover_canonical_runs(tmp_path) == []
 
 

@@ -244,3 +244,65 @@ def test_level_cached_endpoint_run_completes_end_to_end(level, monkeypatch, tmp_
     assert (run / "selected_checkpoint_metrics.json").is_file()
     assert (run / "checkpoints" / "checkpoint_step_000006.pt").is_file()
     assert json.loads((run / "events.jsonl").read_text()) == {"event": "complete"}
+
+
+def test_health_failure_leaves_run_incomplete_and_resumable(monkeypatch, tmp_path: Path):
+    base = load_config(Path("configs/level0_adaptive_alpha.yaml"), 0)
+    cfg = replace(
+        base,
+        model=replace(base.model, block_size=8, vocab_size=64),
+        train=replace(
+            base.train,
+            batch_size=1,
+            gradient_accumulation=1,
+            max_steps=1,
+            eval_interval=1,
+            checkpoint_interval=1,
+            spectral_interval=99,
+            eval_batches=1,
+            training_sampling="random_window",
+            evaluation_sampling="fixed_probe",
+        ),
+        measurement=replace(base.measurement, alpha_interval=99),
+        wwpgd=replace(base.wwpgd, enabled=False, extension="none"),
+        seeds=[1337],
+        token_multipliers=[1],
+    )
+    monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
+
+    def fail_health(_run_dir):
+        raise RuntimeError("forced final health failure")
+
+    monkeypatch.setattr("wwgpt.run_health.generate_run_health", fail_health)
+    torch.manual_seed(9)
+    model = GPT(cfg.model)
+    init_state = {
+        name: value.detach().clone() for name, value in model.state_dict().items()
+    }
+    init_hash = sha256_bytes(
+        b"".join(
+            init_state[name].cpu().numpy().tobytes() for name in sorted(init_state)
+        )
+    )
+    data = _tiny_scientific_data(cfg.model.vocab_size, 8)
+    pair_root = tmp_path / "pair"
+
+    with pytest.raises(RuntimeError, match="forced final health failure"):
+        run_scientific_single(
+            pair_root,
+            "adamw",
+            1337,
+            cfg,
+            data,
+            "pair-health-failure",
+            init_state,
+            init_hash,
+            0,
+            1,
+            device="cpu",
+        )
+
+    run = next((pair_root / "adamw").glob("run_*"))
+    assert (run / "checkpoints" / "latest.json").is_file()
+    assert not (run / "run_complete.json").exists()
+    assert not (run / "events.jsonl").exists()

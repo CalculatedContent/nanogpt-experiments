@@ -81,7 +81,12 @@ def collect_selected_checkpoint_runs(results_root: Path) -> pd.DataFrame:
             continue
         row: dict[str, Any] = {
             "run_dir": str(run_dir),
-            "pair_id": manifest.get("pair_id"),
+            "run_mtime": max(
+                manifest_path.stat().st_mtime,
+                selected_path.stat().st_mtime,
+                (run_dir / "run_complete.json").stat().st_mtime,
+            ),
+            "pair_id": manifest.get("pair_id") or run_dir.parents[1].name,
             "seed": manifest.get("seed"),
             "level": manifest.get("level"),
             "token_multiplier": manifest.get("token_multiplier"),
@@ -115,18 +120,50 @@ def pair_selected_checkpoint_metrics(runs: pd.DataFrame) -> pd.DataFrame:
     ]
     if runs.empty:
         return pd.DataFrame(columns=columns)
-    keys = ["level", "token_multiplier", "base_optimizer", "seed"]
-    output: list[dict[str, Any]] = []
-    for identity, group in runs.groupby(keys, dropna=False):
-        by_extension = {
-            str(row.extension): row
-            for row in group.itertuples(index=False)
-            if str(row.extension) in {"none", "wwpgd"}
-        }
-        if set(by_extension) != {"none", "wwpgd"}:
+
+    # Form candidates within one pair directory first. Repeated local runs may
+    # contain several complete pairs for the same seed; selecting arms before
+    # pair isolation can silently combine a baseline from one run with WWPGD
+    # from another. Choose the newest complete pair per scientific identity.
+    pair_keys = ["level", "token_multiplier", "base_optimizer", "seed", "pair_id"]
+    candidates: list[dict[str, Any]] = []
+    for identity, group in runs.groupby(pair_keys, dropna=False):
+        arms: dict[str, Any] = {}
+        for extension, extension_rows in group.groupby("extension", dropna=False):
+            name = str(extension)
+            if name not in {"none", "wwpgd"}:
+                continue
+            arms[name] = next(
+                extension_rows.sort_values("run_mtime", ascending=False).itertuples(
+                    index=False
+                )
+            )
+        if set(arms) != {"none", "wwpgd"}:
             continue
-        baseline = by_extension["none"]
-        wwpgd = by_extension["wwpgd"]
+        candidates.append(
+            {
+                "identity": identity[:-1],
+                "pair_id": identity[-1],
+                "pair_mtime": max(
+                    float(getattr(arms["none"], "run_mtime")),
+                    float(getattr(arms["wwpgd"], "run_mtime")),
+                ),
+                "baseline": arms["none"],
+                "wwpgd": arms["wwpgd"],
+            }
+        )
+
+    selected: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for candidate in candidates:
+        key = tuple(candidate["identity"])
+        previous = selected.get(key)
+        if previous is None or candidate["pair_mtime"] > previous["pair_mtime"]:
+            selected[key] = candidate
+
+    output: list[dict[str, Any]] = []
+    for identity, candidate in sorted(selected.items(), key=lambda item: str(item[0])):
+        baseline = candidate["baseline"]
+        wwpgd = candidate["wwpgd"]
         for metric, direction in METRICS.items():
             baseline_value = _finite_float(getattr(baseline, metric))
             wwpgd_value = _finite_float(getattr(wwpgd, metric))
@@ -135,9 +172,7 @@ def pair_selected_checkpoint_metrics(runs: pd.DataFrame) -> pd.DataFrame:
             effect = wwpgd_value - baseline_value
             output.append(
                 {
-                    "pair_id": getattr(
-                        wwpgd, "pair_id", getattr(baseline, "pair_id", None)
-                    ),
+                    "pair_id": candidate["pair_id"],
                     "seed": identity[3],
                     "level": identity[0],
                     "token_multiplier": identity[1],
@@ -150,7 +185,9 @@ def pair_selected_checkpoint_metrics(runs: pd.DataFrame) -> pd.DataFrame:
                     "baseline_value": baseline_value,
                     "wwpgd_value": wwpgd_value,
                     "paired_effect": effect,
-                    "wwpgd_better": effect < 0 if direction == "lower" else effect > 0,
+                    "wwpgd_better": (
+                        effect < 0 if direction == "lower" else effect > 0
+                    ),
                 }
             )
     return pd.DataFrame(output, columns=columns)

@@ -102,6 +102,8 @@ def test_test_evaluation_runs_once_on_final_selected_checkpoint(tmp_path, monkey
         "dataset_config": "unit",
         "dataset_revision": "unit",
         "realized_tokens": 16,
+        "validation_tokens": 64,
+        "test_tokens": 64,
         "validation_document_count": 1,
     }
     data = TokenData(

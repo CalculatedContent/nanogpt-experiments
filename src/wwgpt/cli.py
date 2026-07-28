@@ -19,19 +19,35 @@ from wwgpt.reproducibility import write_reproducibility_report
 
 
 PROFILE_CONFIGS = {
-    "scaling": Path("configs/default.yaml"),
     "reproduction_tiny": Path("configs/reproduction_tiny.yaml"),
     "reproduction_fineweb": Path("configs/reproduction_fineweb.yaml"),
 }
 
 
+def _scaling_config_path(level: int) -> Path:
+    candidate = Path(f"configs/level{level}_adaptive_alpha.yaml")
+    return candidate if candidate.is_file() else Path("configs/default.yaml")
+
+
 def _resolve_config_path(args) -> Path | None:
     profile = getattr(args, "profile", None)
     config = getattr(args, "config", None)
+    level = int(getattr(args, "level", 0))
     if profile:
-        profile_path = PROFILE_CONFIGS[profile]
-        if config is not None and Path(config) != Path("configs/default.yaml") and Path(config) != profile_path:
-            raise SystemExit(f"--profile {profile} conflicts with explicit --config {config}; use one configuration source")
+        profile_path = (
+            _scaling_config_path(level)
+            if profile == "scaling"
+            else PROFILE_CONFIGS[profile]
+        )
+        implicit_default = Path("configs/default.yaml")
+        if (
+            config is not None
+            and Path(config) not in {implicit_default, profile_path}
+        ):
+            raise SystemExit(
+                f"--profile {profile} conflicts with explicit --config {config}; "
+                "use one configuration source"
+            )
         return profile_path
     return config
 
@@ -78,7 +94,6 @@ def _budget_summary(cfg, token_multiplier: int) -> dict[str, int]:
         "realized_tokens_per_selected_parameter": float(budget.tokens_per_selected_parameter),
         "parameter_report": report.__dict__,
     }
-
 
 
 def _level_multiplier_table(cfg, requested_level: int, requested_multiplier: int) -> list[dict[str, object]]:
@@ -189,7 +204,6 @@ def _print_resolved_execution(args, *, arms: list[str], seeds: list[int], trials
     }
     print("Resolved execution configuration:")
     print(json.dumps(payload, indent=2, sort_keys=True, default=str))
-
 
 
 def _resolve_ww_interval_aliases(args) -> int | None:
@@ -374,7 +388,10 @@ def main() -> None:
     ch=sub.add_parser("check-health", help="generate run-health artifacts and fail when any run has an ERROR")
     ch.add_argument("--experiment-root", type=Path, required=True)
     ch.add_argument("--allow-warnings", action=argparse.BooleanOptionalAction, default=True)
-    gr=sub.add_parser("generate-reproducibility-report"); gr.add_argument("--experiment-root", type=Path, required=True); gr.add_argument("--strict", action="store_true")
+    gr=sub.add_parser("generate-reproducibility-report")
+    gr.add_argument("--experiment-root", type=Path, required=True)
+    gr.add_argument("--analysis-plan", type=Path)
+    gr.add_argument("--strict", action="store_true")
     rn=sub.add_parser("run-notebooks"); rn.add_argument("--results-root", type=Path, required=True); rn.add_argument("--output-root", type=Path, required=True); rn.add_argument("--analysis-plan", type=Path); rn.add_argument("--profile", default=""); rn.add_argument("--level", type=int); rn.add_argument("--token-multiplier", type=int); rn.add_argument("--base-optimizer", default="adamw"); rn.add_argument("--notebooks", default="all"); rn.add_argument("--strict", action="store_true"); rn.add_argument("--run-analysis", action="store_true"); rn.add_argument("--reuse-existing-analysis", action=argparse.BooleanOptionalAction, default=True)
     pl=sub.add_parser("plan-scaling"); pl.add_argument("--params", type=int); pl.add_argument("--level", type=int); pl.add_argument("--token-multiplier", type=int, required=True); pl.add_argument("--available-tokens", type=int, required=True); pl.add_argument("--batch-size", type=int, default=8); pl.add_argument("--block-size", type=int, default=256); pl.add_argument("--grad-accum", type=int, default=1)
     args=p.parse_args()
@@ -431,7 +448,12 @@ def main() -> None:
         report=run_local_readiness(args.output,args.device,levels,optimizers,not args.skip_package_smoke)
         print(json.dumps(report,indent=2,sort_keys=True,default=str))
         raise SystemExit(0 if report.get("ready") else 1)
-    elif args.cmd=="audit-experiment": print(audit_experiment(args.experiment_root))
+    elif args.cmd=="audit-experiment":
+        import json
+        output = audit_experiment(args.experiment_root)
+        print(output)
+        summary = json.loads(Path(output).read_text())
+        raise SystemExit(0 if summary.get("valid_for_publication") else 1)
     elif args.cmd=="check-health":
         import json
         from wwgpt.run_health import generate_experiment_health
@@ -440,7 +462,14 @@ def main() -> None:
         warning_count=sum(r["counts"]["WARNING"] for r in report["reports"])
         failed=not report["ready_for_analysis"] or (not args.allow_warnings and warning_count>0)
         raise SystemExit(1 if failed else 0)
-    elif args.cmd=="generate-reproducibility-report": print(write_reproducibility_report(args.experiment_root))
+    elif args.cmd=="generate-reproducibility-report":
+        print(
+            write_reproducibility_report(
+                args.experiment_root,
+                strict=args.strict,
+                analysis_plan=args.analysis_plan,
+            )
+        )
     elif args.cmd=="run-notebooks":
         from wwgpt.notebook_runner import run_notebooks
         for path in run_notebooks(args.results_root, args.output_root, analysis_plan=args.analysis_plan, profile=args.profile, level=args.level, token_multiplier=args.token_multiplier, base_optimizer=args.base_optimizer, notebooks=args.notebooks, strict=args.strict, run_analysis=args.run_analysis, reuse_existing_analysis=args.reuse_existing_analysis): print(path)

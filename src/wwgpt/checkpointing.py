@@ -16,8 +16,16 @@ def stable_hash(obj: Any) -> str:
 def rng_state() -> dict[str, Any]:
     out={"python_random_state": random.getstate(), "numpy_random_state": np.random.get_state(), "torch_cpu_rng_state": torch.get_rng_state()}
     cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+    mps_state = None
+    try:
+        if torch.backends.mps.is_available():
+            mps_state = torch.mps.get_rng_state()
+    except (AttributeError, RuntimeError):
+        # Older PyTorch releases may expose MPS execution without RNG-state APIs.
+        mps_state = None
     out["torch_cuda_rng_states"] = cuda_states
-    out["accelerator_rng_states"] = {"cuda": cuda_states}
+    out["torch_mps_rng_state"] = mps_state
+    out["accelerator_rng_states"] = {"cuda": cuda_states, "mps": mps_state}
     return out
 
 def restore_rng_state(state: dict[str, Any]) -> None:
@@ -26,6 +34,15 @@ def restore_rng_state(state: dict[str, Any]) -> None:
     if "torch_cpu_rng_state" in state: torch.set_rng_state(state["torch_cpu_rng_state"])
     if torch.cuda.is_available() and state.get("torch_cuda_rng_states"):
         torch.cuda.set_rng_state_all(state["torch_cuda_rng_states"])
+    mps_state = state.get("torch_mps_rng_state")
+    if mps_state is None:
+        mps_state = (state.get("accelerator_rng_states") or {}).get("mps")
+    if mps_state is not None:
+        try:
+            if torch.backends.mps.is_available():
+                torch.mps.set_rng_state(mps_state)
+        except (AttributeError, RuntimeError):
+            pass
 
 REQUIRED_CHECKPOINT_KEYS = (
     "model_state_dict","optimizer_state_dict","base_optimizer_state_dict","scheduler_state_dict","gradient_scaler_state_dict",

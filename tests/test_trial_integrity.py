@@ -103,3 +103,16 @@ def test_incomplete_trial_is_not_publication_eligible(tmp_path):
     summary_path = audit_experiment(tmp_path)
     summary = json.loads(summary_path.read_text())
     assert summary["publication_eligible_trials"] == 0
+
+
+def test_resolved_external_q_is_provenance_not_user_configuration(tmp_path):
+    run = _write_run(tmp_path / "trial", "adamw_wwpgd")
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scientific_schema_version"] = 3
+    manifest["target_alpha"] = 2.0
+    manifest["resolved_external_wwpgd_config"] = {"q": 1.0}
+    manifest["extension_hyperparameters"] = {"target_alpha": 2.0}
+    manifest_path.write_text(json.dumps(manifest))
+    result = audit_arm(run, "adamw_wwpgd")
+    assert "user_configured_q_exposed" not in result["reasons"]

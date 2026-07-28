@@ -48,6 +48,9 @@ class PairCandidate:
     pair_id: str
     pair_dir: Path
     seed: int | None
+    level: int | None
+    token_multiplier: int | None
+    base_optimizers: tuple[str, ...]
     runs: dict[str, RunRecord]
     valid: bool
     exclusion_reason: str
@@ -58,16 +61,56 @@ def read_json_file(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text()) if path and path.exists() else {}
 
 def load_csv_file(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path) if path and path.exists() else pd.DataFrame()
+    if not path or not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
 
 def resolve_experiment_root(path: str | Path) -> Path:
+    """Return the sole experiment layout root when exactly one is present.
+
+    This compatibility helper historically guessed only
+    ``experiments/level_00/multiplier_20``.  That made a valid Level 1 or Level 2
+    result root appear empty and silently hid all but Level 0 from a shared
+    Level 0--2 root.  Discovery now uses :func:`experiment_layout_roots`; this
+    helper retains its old single-root return contract for notebook callers.
+    """
     root = Path(path).expanduser().resolve()
-    if any(root.glob("pair_*")) or any(root.glob("trial_*")):
-        return root
-    conventional = root / "experiments" / "level_00" / "multiplier_20"
-    if conventional.exists() and (any(conventional.glob("pair_*")) or any(conventional.glob("trial_*"))):
-        return conventional.resolve()
+    roots = experiment_layout_roots(root)
+    if len(roots) == 1:
+        return roots[0]
     return root
+
+
+def experiment_layout_roots(path: str | Path) -> list[Path]:
+    """Discover documented level/multiplier layouts below one profile root.
+
+    Discovery is deliberately not an arbitrary recursive search. A parent that
+    contains multiple independent experiment profiles must not be pooled merely
+    because pair directories exist somewhere below it.
+    """
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        return []
+    if (root / "pair_manifest.json").is_file() or (
+        root / "trial_manifest.json"
+    ).is_file():
+        return [root.parent.resolve()]
+    candidates = [root]
+    candidates.extend(root.glob("experiments/level_*/multiplier_*"))
+    candidates.extend(root.glob("level_*/multiplier_*"))
+    candidates.extend(root.glob("multiplier_*"))
+    return sorted(
+        {
+            candidate.resolve()
+            for candidate in candidates
+            if candidate.is_dir()
+            and (any(candidate.glob("pair_*")) or any(candidate.glob("trial_*")))
+        },
+        key=str,
+    )
 
 def _manifest_value(man: dict[str, Any], key: str) -> Any:
     if key in man:
@@ -169,15 +212,15 @@ def _latest_completed_run_for_compat(optimizer_dir: Path) -> Path | None:
     return complete[0] if complete else (runs[0] if runs else None)
 
 def discover_trial_manifests(results_root: Path) -> list[dict[str, Any]]:
-    root = resolve_experiment_root(results_root)
     out = []
-    for trial in sorted([p for p in root.glob("trial_*") if p.is_dir()] if root.exists() else []):
-        man = read_json_file(trial / "trial_manifest.json")
-        if not man:
-            continue
-        arms = [a.get("arm_name") for a in man.get("arms", [])]
-        valid = tuple(arms) == TRIAL_CANONICAL_ARMS and man.get("pairs") == [{"baseline": b, "wwpgd": w} for b, w in TRIAL_CANONICAL_PAIRS.items()]
-        out.append({"trial_id": man.get("trial_id", trial.name), "trial_dir": trial, "manifest": man, "valid": valid, "exclusion_reason": "" if valid else "incomplete canonical trial manifest"})
+    for root in experiment_layout_roots(results_root):
+        for trial in sorted(p for p in root.glob("trial_*") if p.is_dir()):
+            man = read_json_file(trial / "trial_manifest.json")
+            if not man:
+                continue
+            arms = [a.get("arm_name") for a in man.get("arms", [])]
+            valid = tuple(arms) == TRIAL_CANONICAL_ARMS and man.get("pairs") == [{"baseline": b, "wwpgd": w} for b, w in TRIAL_CANONICAL_PAIRS.items()]
+            out.append({"trial_id": man.get("trial_id", trial.name), "trial_dir": trial, "manifest": man, "valid": valid, "exclusion_reason": "" if valid else "incomplete canonical trial manifest", "newest_mtime": _run_mtime(trial)})
     return out
 
 def _validate_pair_records(records: dict[str, RunRecord], bases: Iterable[str]) -> tuple[bool, str]:
@@ -202,72 +245,134 @@ def _validate_pair_records(records: dict[str, RunRecord], bases: Iterable[str]) 
     return not reasons, "; ".join(dict.fromkeys(reasons))
 
 def discover_pair_candidates(results_root: Path, include_legacy: bool = False) -> list[PairCandidate]:
-    root = resolve_experiment_root(results_root); out = []
-    if not root.exists(): return out
-    for pair in sorted([p for p in root.glob("pair_*") if p.is_dir()]):
-        records: dict[str, RunRecord] = {}
-        for arm in list(SCHEMA_V3_ARMS) + ["stable_adamw", "stable_adamw_wwpgd", "adamw_wwpgd_reference"] + (["adamw_wwpgd"] if include_legacy else []):
-            rd = _latest_completed_run_for_compat(pair / arm)
-            if not rd: continue
-            man = read_json_file(rd / "manifest.json")
-            raw = str(man.get("optimizer") or man.get("arm_name") or arm).lower()
-            schema = int(man.get("scientific_schema_version") or 0)
-            norm = normalize_optimizer(raw, include_legacy)
-            valid = bool(man.get("valid_for_science", True) is True and ((schema >= 3 and norm["optimizer_family"] in set(SCHEMA_V3_ARMS) | {"stable_adamw", "stable_adamw_wwpgd"}) or (schema >= 2 and norm["optimizer_family"] in {"adamw", "wwpgd"})))
-            rec = _build_record(pair.name, pair, rd, raw, man, valid)
-            records[rec.optimizer_family] = rec
-        bases = [b for b in ("adamw", "muon", "stableadamw", "stable_adamw") if records.get(b) or records.get(BASE_PAIRS[b])]
-        if not bases and (records.get("adamw") or records.get("wwpgd")): bases = ["adamw"]
-        valid, reason = _validate_pair_records(records, bases) if bases else (False, "no complete within-optimizer canonical arm pair")
-        mt = max([_run_mtime(r.run_dir) for r in records.values()] or [pair.stat().st_mtime])
-        seed = next((r.seed for r in records.values() if r.seed is not None), None)
-        out.append(PairCandidate(pair.name, pair, seed, records, valid, reason, mt))
+    out = []
+    for root in experiment_layout_roots(results_root):
+        for pair in sorted(p for p in root.glob("pair_*") if p.is_dir()):
+            records: dict[str, RunRecord] = {}
+            for arm in list(SCHEMA_V3_ARMS) + [
+                "stable_adamw",
+                "stable_adamw_wwpgd",
+                "adamw_wwpgd_reference",
+            ] + (["adamw_wwpgd"] if include_legacy else []):
+                rd = _latest_completed_run_for_compat(pair / arm)
+                if not rd:
+                    continue
+                man = read_json_file(rd / "manifest.json")
+                raw = str(man.get("optimizer") or man.get("arm_name") or arm).lower()
+                schema = int(man.get("scientific_schema_version") or 0)
+                norm = normalize_optimizer(raw, include_legacy)
+                valid = bool(
+                    man.get("valid_for_science", True) is True
+                    and (
+                        (
+                            schema >= 3
+                            and norm["optimizer_family"]
+                            in set(SCHEMA_V3_ARMS)
+                            | {"stable_adamw", "stable_adamw_wwpgd"}
+                        )
+                        or (
+                            schema >= 2
+                            and norm["optimizer_family"] in {"adamw", "wwpgd"}
+                        )
+                    )
+                )
+                rec = _build_record(pair.name, pair, rd, raw, man, valid)
+                records[rec.optimizer_family] = rec
+            bases = [
+                base
+                for base in ("adamw", "muon", "stableadamw", "stable_adamw")
+                if records.get(base) or records.get(BASE_PAIRS[base])
+            ]
+            if not bases and (records.get("adamw") or records.get("wwpgd")):
+                bases = ["adamw"]
+            valid, reason = (
+                _validate_pair_records(records, bases)
+                if bases
+                else (False, "no complete within-optimizer canonical arm pair")
+            )
+            mt = max(
+                [_run_mtime(record.run_dir) for record in records.values()]
+                or [pair.stat().st_mtime]
+            )
+            seed = next(
+                (record.seed for record in records.values() if record.seed is not None),
+                None,
+            )
+            pair_manifest = read_json_file(pair / "pair_manifest.json")
+            exemplar = next(iter(records.values()), None)
+            level = pair_manifest.get("level") if pair_manifest else None
+            multiplier = pair_manifest.get("token_multiplier") if pair_manifest else None
+            if exemplar is not None:
+                level = exemplar.manifest.get("level", level)
+                multiplier = exemplar.manifest.get("token_multiplier", multiplier)
+            out.append(
+                PairCandidate(
+                    pair.name,
+                    pair,
+                    seed,
+                    None if level is None else int(level),
+                    None if multiplier is None else int(multiplier),
+                    tuple(sorted(bases)),
+                    records,
+                    valid,
+                    reason,
+                    mt,
+                )
+            )
     return out
 
 def select_canonical_pairs(candidates: list[PairCandidate]) -> tuple[list[PairCandidate], pd.DataFrame]:
-    selected, rows, by_seed = [], [], {}
+    selected, rows, by_identity = [], [], {}
     for c in candidates:
-        by_seed.setdefault(c.seed, []).append(c)
-    for seed, cs in by_seed.items():
+        identity = (c.level, c.token_multiplier, c.seed, c.base_optimizers)
+        by_identity.setdefault(identity, []).append(c)
+    for identity, cs in by_identity.items():
         val = sorted([c for c in cs if c.valid], key=lambda c: (c.newest_mtime, c.pair_id), reverse=True)
         chosen = val[0] if val else None
         if chosen: selected.append(chosen)
         for c in cs:
-            rows.append({"pair_id": c.pair_id, "pair_dir": str(c.pair_dir), "seed": c.seed, "status": "selected" if c is chosen else "excluded", "exclusion_reason": "" if c is chosen else (c.exclusion_reason or "duplicate older complete pair"), "valid_complete_pair": c.valid, "newest_mtime": c.newest_mtime})
-    return sorted(selected, key=lambda c: (c.seed or -1)), pd.DataFrame(rows)
+            rows.append({"pair_id": c.pair_id, "pair_dir": str(c.pair_dir), "seed": c.seed, "level": c.level, "token_multiplier": c.token_multiplier, "base_optimizers": ",".join(c.base_optimizers), "status": "selected" if c is chosen else "excluded", "exclusion_reason": "" if c is chosen else (c.exclusion_reason or "duplicate older complete pair"), "valid_complete_pair": c.valid, "newest_mtime": c.newest_mtime})
+    return sorted(selected, key=lambda c: ((c.level if c.level is not None else -1), (c.token_multiplier if c.token_multiplier is not None else -1), (c.seed if c.seed is not None else -1), c.base_optimizers)), pd.DataFrame(rows)
 
 def _row_from_record(r: RunRecord) -> dict[str, Any]:
-    return {"pair_id": r.pair_id, "pair_dir": r.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": _arm_base_ext(r.optimizer_family, r.manifest)[0], "extension": _arm_base_ext(r.optimizer_family, r.manifest)[1], "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science}
+    return {"pair_id": r.pair_id, "pair_dir": r.pair_dir, "run_dir": r.run_dir, "seed": r.seed, "level": r.manifest.get("level"), "token_multiplier": r.manifest.get("token_multiplier"), "optimizer_raw": r.optimizer_raw, "optimizer_family": r.optimizer_family, "optimizer_label": r.optimizer_label, "base_optimizer": _arm_base_ext(r.optimizer_family, r.manifest)[0], "extension": _arm_base_ext(r.optimizer_family, r.manifest)[1], "manifest": r.manifest, "complete": r.complete, "valid_for_science": r.valid_for_science}
 
 def discover_canonical_runs(results_root: Path, include_legacy: bool = False) -> list[dict[str, Any]]:
     trials = discover_trial_manifests(results_root)
-    if trials:
-        rows = []
-        for t in trials:
-            if not t["valid"]: continue
-            man, shared = t["manifest"], t["manifest"].get("shared", {})
-            for arm in man.get("arms", []):
-                arm_name = arm["arm_name"]
-                rd = _latest_completed_run_for_compat(t["trial_dir"] / arm_name) or (t["trial_dir"] / arm_name)
-                # The arm manifest is the frozen record of what training actually
-                # used.  Trial entries are orchestration metadata and must never
-                # shadow run-level analysis-plan or configuration fields.
-                run_manifest = read_json_file(rd / "manifest.json")
-                authoritative = dict(run_manifest)
-                authoritative["trial_manifest"] = man
-                valid = bool(t["valid"] and run_manifest and run_manifest.get("valid_for_science", True) is True)
-                rows.append(_row_from_record(_build_record(
-                    man["trial_id"], t["trial_dir"], rd, arm_name,
-                    authoritative, valid,
-                )))
-        return rows
-    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
     rows = []
+    selected_trial_identities: set[tuple[Any, Any, Any]] = set()
+    grouped_trials: dict[tuple[Any, Any, Any], list[dict[str, Any]]] = {}
+    for trial in trials:
+        man = trial["manifest"]
+        shared = man.get("shared", {})
+        identity = (shared.get("level", man.get("level")), shared.get("token_multiplier", man.get("token_multiplier")), shared.get("seed", man.get("seed")))
+        grouped_trials.setdefault(identity, []).append(trial)
+    for identity, candidates in grouped_trials.items():
+        valid_trials = sorted((trial for trial in candidates if trial["valid"]), key=lambda trial: (trial.get("newest_mtime", 0.0), trial["trial_id"]), reverse=True)
+        if not valid_trials:
+            continue
+        t = valid_trials[0]
+        selected_trial_identities.add(identity)
+        man, shared = t["manifest"], t["manifest"].get("shared", {})
+        for arm in man.get("arms", []):
+            arm_name = arm["arm_name"]
+            rd = _latest_completed_run_for_compat(t["trial_dir"] / arm_name) or (t["trial_dir"] / arm_name)
+            run_manifest = read_json_file(rd / "manifest.json")
+            authoritative = dict(run_manifest)
+            authoritative["trial_manifest"] = man
+            valid = bool(t["valid"] and run_manifest and run_manifest.get("valid_for_science", True) is True)
+            rows.append(_row_from_record(_build_record(
+                man["trial_id"], t["trial_dir"], rd, arm_name,
+                authoritative, valid,
+            )))
+    pairs, _ = select_canonical_pairs(discover_pair_candidates(results_root, include_legacy))
     for c in pairs:
+        if (c.level, c.token_multiplier, c.seed) in selected_trial_identities:
+            continue
         for arm in ("adamw", "wwpgd", "adamw_wwpgd", "muon", "muon_wwpgd", "stableadamw", "stableadamw_wwpgd", "stable_adamw", "stable_adamw_wwpgd"):
             if arm in c.runs:
                 rows.append(_row_from_record(c.runs[arm]))
-    return rows
+    return sorted(rows, key=lambda row: ((row.get("level") if row.get("level") is not None else -1), (row.get("token_multiplier") if row.get("token_multiplier") is not None else -1), (row.get("seed") if row.get("seed") is not None else -1), str(row.get("base_optimizer")), str(row.get("extension"))))
 
 # aggregation / paired statistics
 def student_t_summary(values: Iterable[float], confidence: float = .95) -> dict[str, float | int]:
@@ -288,19 +393,33 @@ def terminal_results(runs: list[dict[str, Any]], metric: str = "validation_loss"
         if selected and metric in selected:
             value = pd.to_numeric(pd.Series([selected[metric]]), errors="coerce").dropna()
             if not value.empty:
-                rows.append({"pair_id": r.get("pair_id"), "seed": r.get("seed"), "optimizer_family": r.get("optimizer_family") or normalize_optimizer(r.get("optimizer_raw") or r.get("optimizer", ""), True)["optimizer_family"], "final": float(value.iloc[0]), "minimum": float(value.iloc[0])})
+                rows.append({"pair_id": r.get("pair_id"), "level": r.get("level"), "token_multiplier": r.get("token_multiplier"), "seed": r.get("seed"), "optimizer_family": r.get("optimizer_family") or normalize_optimizer(r.get("optimizer_raw") or r.get("optimizer", ""), True)["optimizer_family"], "final": float(value.iloc[0]), "minimum": float(value.iloc[0])})
                 continue
         m = artifacts.get("metrics")
         if metric not in m: continue
         vals = pd.to_numeric(m.sort_values("tokens_seen" if "tokens_seen" in m else "step")[metric], errors="coerce").dropna()
         if vals.empty: continue
-        rows.append({"pair_id": r.get("pair_id"), "seed": r.get("seed"), "optimizer_family": r.get("optimizer_family") or normalize_optimizer(r.get("optimizer_raw") or r.get("optimizer", ""), True)["optimizer_family"], "final": float(vals.iloc[-1]), "minimum": float(vals.min())})
+        rows.append({"pair_id": r.get("pair_id"), "level": r.get("level"), "token_multiplier": r.get("token_multiplier"), "seed": r.get("seed"), "optimizer_family": r.get("optimizer_family") or normalize_optimizer(r.get("optimizer_raw") or r.get("optimizer", ""), True)["optimizer_family"], "final": float(vals.iloc[-1]), "minimum": float(vals.min())})
     d = pd.DataFrame(rows)
     if d.empty: return d
-    p = d.pivot_table(index=["pair_id", "seed"], columns="optimizer_family", values=["final", "minimum"], aggfunc="first"); p.columns = [f"{fam}_{met}_{metric}" for met, fam in p.columns]; p = p.reset_index()
+    index_columns = ["pair_id", "seed"]
+    for optional in ("level", "token_multiplier"):
+        if optional in d and d[optional].notna().any():
+            index_columns.append(optional)
+    p = d.pivot_table(
+        index=index_columns,
+        columns="optimizer_family",
+        values=["final", "minimum"],
+        aggfunc="first",
+    )
+    p.columns = [
+        f"{family}_{statistic}_{metric}" for statistic, family in p.columns
+    ]
+    p = p.reset_index()
     for base, ww in [("adamw", "wwpgd"), ("adamw", "adamw_wwpgd"), ("muon", "muon_wwpgd"), ("stableadamw", "stableadamw_wwpgd"), ("stable_adamw", "stable_adamw_wwpgd")]:
         a, w = f"{base}_final_{metric}", f"{ww}_final_{metric}"
-        if {a, w}.issubset(p.columns): p[f"{ww}_minus_{base}_{metric}"] = p[w] - p[a]
+        if {a, w}.issubset(p.columns):
+            p[f"{ww}_minus_{base}_{metric}"] = p[w] - p[a]
     if metric == "validation_loss":
         if f"wwpgd_minus_adamw_{metric}" in p.columns:
             p["wwpgd_minus_adamw_final_validation_loss"] = p[f"wwpgd_minus_adamw_{metric}"]
@@ -355,41 +474,97 @@ def build_run_inventory(runs: list[dict[str, Any]]) -> pd.DataFrame:
         art = load_run_artifacts(Path(r["run_dir"])); m = art["metrics"]; man = r.get("manifest") or art["manifest"]
         selected = art.get("selected_checkpoint_metrics", {})
         final = m.sort_values("tokens_seen" if "tokens_seen" in m.columns else "step").tail(1) if not m.empty else pd.DataFrame()
-        rows.append({"seed": r.get("seed"), "pair_id": r.get("pair_id"), "optimizer_raw": r.get("optimizer_raw"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension"), "run_dir": str(r.get("run_dir")), "final_validation_loss": selected.get("validation_loss", final["validation_loss"].iloc[0] if len(final) and "validation_loss" in final else np.nan), "minimum_validation_loss": pd.to_numeric(m.get("validation_loss"), errors="coerce").min() if "validation_loss" in m else np.nan, "final_test_loss": selected.get("test_loss", np.nan), "realized_tokens": _manifest_value(man, "realized_tokens"), "scientific_schema_version": man.get("scientific_schema_version")})
+        rows.append({"seed": r.get("seed"), "level": r.get("level", man.get("level")), "token_multiplier": r.get("token_multiplier", man.get("token_multiplier")), "pair_id": r.get("pair_id"), "optimizer_raw": r.get("optimizer_raw"), "optimizer_family": r.get("optimizer_family"), "base_optimizer": r.get("base_optimizer"), "extension": r.get("extension"), "run_dir": str(r.get("run_dir")), "final_validation_loss": selected.get("validation_loss", final["validation_loss"].iloc[0] if len(final) and "validation_loss" in final else np.nan), "minimum_validation_loss": pd.to_numeric(m.get("validation_loss"), errors="coerce").min() if "validation_loss" in m else np.nan, "final_test_loss": selected.get("test_loss", np.nan), "realized_tokens": _manifest_value(man, "realized_tokens"), "scientific_schema_version": man.get("scientific_schema_version")})
     return pd.DataFrame(rows)
 
 def build_pair_audit(candidates: list[PairCandidate]) -> pd.DataFrame:
     return select_canonical_pairs(candidates)[1]
 
 def analyze_results(results_root: Path, analysis_plan: Path | None = None) -> Path:
-    out = Path(results_root) / "analysis"; out.mkdir(parents=True, exist_ok=True)
-    runs = discover_canonical_runs(results_root, include_legacy=True)
-    inv = build_run_inventory(runs) if runs else pd.DataFrame(); inv.to_csv(out / "runs_manifest.csv", index=False)
-    terminal_results(runs, "validation_loss").to_csv(out / "paired_validation_metric_differences.csv", index=False)
-    terminal_results(runs, "test_loss").to_csv(out / "paired_test_metric_differences.csv", index=False)
-    if not inv.empty and "final_validation_loss" in inv:
-        paired = paired_extension_effects(inv.rename(columns={"final_validation_loss": "loss"}).dropna(subset=["loss"]), "loss")
-        paired.to_csv(out / "paired_validation_effects_by_seed.csv", index=False)
-        paired_effect_estimates(paired, "loss").to_csv(out / "paired_validation_effect_estimates.csv", index=False)
-    pd.DataFrame([{"status": "not_fit", "note": "no significance claim; no hypothesis test implemented"}]).to_csv(out / "scaling_fit_results.csv", index=False)
-    (out / "analysis_manifest.json").write_text(json.dumps({"source": str(results_root), "completed_runs": len(runs)}))
-    from wwgpt.alpha_analysis import analyze_alpha_trajectories
-    analyze_alpha_trajectories(runs, out)
-    from wwgpt.cross_level_analysis import analyze_cross_level_effects
-    analyze_cross_level_effects(results_root, out, figures_dir=out / "figures")
-    from wwgpt.seed_analysis import analyze_seed_results
-    from wwgpt.generalization_analysis import analyze_generalization_results
-    from wwgpt.weightwatcher_analysis import analyze_weightwatcher_results
-    from wwgpt.wwpgd_diagnostics_analysis import analyze_wwpgd_diagnostics
-    analyze_seed_results(results_root, out, figures_dir=out / "figures")
-    analyze_generalization_results(results_root, out, figures_dir=out / "figures")
-    analyze_weightwatcher_results(results_root, out, figures_dir=out / "figures")
-    analyze_wwpgd_diagnostics(results_root, out, figures_dir=out / "figures")
-    if analysis_plan is not None:
-        from wwgpt.acceleration_analysis import analyze_acceleration_results, verify_analysis_eligibility
-        verify_analysis_eligibility(runs, out, analysis_plan)
-        analyze_acceleration_results(results_root, out, analysis_plan)
-    return out
+    """Run every analysis stage and publish the completion manifest last.
+
+    Analysis output is intentionally restartable. Individual CSVs and figures may
+    be overwritten on a retry, but ``analysis_manifest.json`` is the transaction
+    marker: its presence with ``status=complete`` means every configured stage
+    finished successfully. A failed analysis must never leave a stale success
+    marker that causes reproducibility reporting to reuse partial output.
+    """
+    out = Path(results_root) / "analysis"
+    out.mkdir(parents=True, exist_ok=True)
+    manifest_path = out / "analysis_manifest.json"
+    manifest_path.unlink(missing_ok=True)
+    try:
+        runs = discover_canonical_runs(results_root, include_legacy=True)
+        inv = build_run_inventory(runs) if runs else pd.DataFrame()
+        inv.to_csv(out / "runs_manifest.csv", index=False)
+        terminal_results(runs, "validation_loss").to_csv(
+            out / "paired_validation_metric_differences.csv", index=False
+        )
+        terminal_results(runs, "test_loss").to_csv(
+            out / "paired_test_metric_differences.csv", index=False
+        )
+        if not inv.empty and "final_validation_loss" in inv:
+            paired = paired_extension_effects(
+                inv.rename(columns={"final_validation_loss": "loss"}).dropna(
+                    subset=["loss"]
+                ),
+                "loss",
+            )
+            paired.to_csv(out / "paired_validation_effects_by_seed.csv", index=False)
+            paired_effect_estimates(paired, "loss").to_csv(
+                out / "paired_validation_effect_estimates.csv", index=False
+            )
+        pd.DataFrame(
+            [
+                {
+                    "status": "not_fit",
+                    "note": "no significance claim; no hypothesis test implemented",
+                }
+            ]
+        ).to_csv(out / "scaling_fit_results.csv", index=False)
+
+        from wwgpt.alpha_analysis import analyze_alpha_trajectories
+
+        analyze_alpha_trajectories(runs, out)
+        from wwgpt.cross_level_analysis import analyze_cross_level_effects
+
+        analyze_cross_level_effects(results_root, out, figures_dir=out / "figures")
+        from wwgpt.generalization_analysis import analyze_generalization_results
+        from wwgpt.seed_analysis import analyze_seed_results
+        from wwgpt.weightwatcher_analysis import analyze_weightwatcher_results
+        from wwgpt.wwpgd_diagnostics_analysis import analyze_wwpgd_diagnostics
+
+        analyze_seed_results(results_root, out, figures_dir=out / "figures")
+        analyze_generalization_results(results_root, out, figures_dir=out / "figures")
+        analyze_weightwatcher_results(results_root, out, figures_dir=out / "figures")
+        analyze_wwpgd_diagnostics(results_root, out, figures_dir=out / "figures")
+        if analysis_plan is not None:
+            from wwgpt.acceleration_analysis import (
+                analyze_acceleration_results,
+                verify_analysis_eligibility,
+            )
+
+            verify_analysis_eligibility(runs, out, analysis_plan)
+            analyze_acceleration_results(results_root, out, analysis_plan)
+
+        temporary = manifest_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "source": str(results_root),
+                    "completed_runs": len(runs),
+                    "status": "complete",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        temporary.replace(manifest_path)
+        return out
+    except BaseException:
+        manifest_path.unlink(missing_ok=True)
+        raise
 
 
 def audit_spectral_validity(spectral: pd.DataFrame) -> pd.DataFrame:

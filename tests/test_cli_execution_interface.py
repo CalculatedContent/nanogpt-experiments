@@ -66,6 +66,24 @@ def test_run_multiseed_dry_run_is_adamw_two_arm(tmp_path):
     assert payload["resolved_config"]["train"]["max_steps"] == 7
 
 
+def test_scaling_profile_resolves_level_specific_configuration(tmp_path):
+    cp = _run_cli(
+        "prepare-data",
+        "--profile",
+        "scaling",
+        "--level",
+        "2",
+        "--data-root",
+        str(tmp_path / "data"),
+        "--token-multiplier",
+        "20",
+        "--dry-run",
+    )
+    payload = _json_payload(cp.stdout)
+    assert payload["config_path"] == "configs/level2_adaptive_alpha.yaml"
+    assert payload["resolved_config"]["model"]["n_layer"] == 4
+
+
 def test_run_multiseed_accepts_optimizer_subset_options(tmp_path):
     cp = subprocess.run(
         [
