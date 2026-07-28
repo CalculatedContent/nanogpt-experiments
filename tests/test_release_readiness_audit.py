@@ -80,3 +80,11 @@ def test_generalization_auc_supports_numpy_without_integration_aliases(monkeypat
         }
     )
     assert _auc(frame, "validation_loss") == pytest.approx(2.0)
+
+
+def test_analysis_sources_do_not_call_removed_numpy_trapz_directly() -> None:
+    for path in (
+        Path("src/wwgpt/acceleration_analysis.py"),
+        Path("src/wwgpt/generalization_analysis.py"),
+    ):
+        assert "np.trapz(" not in path.read_text(), path
