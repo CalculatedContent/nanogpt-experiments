@@ -1,16 +1,20 @@
 name: Apply release-readiness audit patch
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/release-readiness-audit
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
 
 jobs:
   apply-audit:
-    if: github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
