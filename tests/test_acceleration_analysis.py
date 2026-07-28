@@ -5,6 +5,7 @@ import pytest
 
 from wwgpt.acceleration_analysis import (
     _backward_validation_join,
+    _curve,
     analyze_acceleration_pairs,
     analyze_paired_alpha_validation,
     paired_auc,
@@ -15,6 +16,49 @@ from wwgpt.acceleration_analysis import (
 def curve(tokens, losses):
     return pd.DataFrame({"tokens_seen": tokens, "validation_loss": losses,
                          "step": range(len(tokens)), "elapsed_seconds": tokens})
+
+
+def production_curve(tokens, losses):
+    return pd.DataFrame(
+        {
+            "step": range(1, len(tokens) + 1),
+            "tokens_processed": tokens,
+            "validation_loss": losses,
+            "val_loss": losses,
+            "elapsed_time": [float(value) / 10.0 for value in tokens],
+            "total_elapsed_seconds": [float(value) / 10.0 for value in tokens],
+        }
+    )
+
+
+def test_curve_coalesces_production_canonical_and_legacy_columns():
+    normalized = _curve(
+        production_curve([100, 200, 300], [3.0, 2.0, 1.0])
+    )
+    assert normalized.columns.tolist().count("validation_loss") == 1
+    assert normalized.validation_loss.tolist() == [3.0, 2.0, 1.0]
+    assert normalized.tokens_seen.tolist() == [100, 200, 300]
+    assert "val_loss" not in normalized
+
+
+def test_exploratory_analysis_accepts_production_metric_schema(tmp_path):
+    plan = tmp_path / "plan.yaml"
+    plan.write_text("mode: exploratory\nprimary_outcomes: []\n")
+    pairs = [
+        {
+            "seed": 1337,
+            "base_optimizer": "adamw",
+            "baseline": production_curve(
+                [100, 200, 300], [3.0, 2.0, 1.0]
+            ),
+            "wwpgd": production_curve(
+                [100, 200, 300], [3.0, 1.9, 0.9]
+            ),
+        }
+    ]
+    analyze_acceleration_pairs(pairs, tmp_path / "out", plan)
+    assert (tmp_path / "out/analysis_plan_manifest.json").is_file()
+    assert (tmp_path / "out/acceleration_by_seed.csv").is_file()
 
 
 def test_known_two_x_speedup_and_artifacts(tmp_path):
@@ -105,7 +149,7 @@ def test_auc_never_extrapolates_beyond_common_support():
 
 def test_alpha_alignment_uses_same_or_immediately_preceding_validation_event():
     alpha = pd.DataFrame({"optimizer_step": [10, 15, 20], "median_absolute_alpha_error": [.4, .3, .2]})
-    metrics = pd.DataFrame({"step": [10, 20], "validation_loss": [3.0, 2.0]})
+    metrics = pd.DataFrame({"step": [10, 20], "validation_loss": [3.0, 2.0], "val_loss": [3.0, 2.0]})
     joined = _backward_validation_join(alpha, metrics)
     assert joined.validation_step.tolist() == [10, 10, 20]
     assert joined.validation_loss.tolist() == [3.0, 3.0, 2.0]
