@@ -1,0 +1,120 @@
+scientific_schema_version: 3
+measurement:
+  alpha_interval: 25
+  trap_diagnostic_interval: 50
+  alpha_randomize: false
+  trap_randomize: true
+model_architecture_version: nanogpt_separate_qkv_tied_head_v2
+parameter_count_convention: transformer_body
+base_optimizer: adamw
+extensions:
+- none
+- wwpgd
+seeds:
+- 1337
+- 2027
+- 4099
+token_multipliers:
+- 20
+dataset_name: HuggingFaceFW/fineweb-edu
+dataset_config: sample-10BT
+dataset_subset: sample-10BT
+dataset_split: train
+dataset_revision: 593b3a867298afb8ce42625a270ef20ddcad28f9
+data_mode: fineweb_custom_bpe_scaling
+tokenizer: null
+tokenizer_revision: null
+composite_spectral_analysis_enabled: false
+model:
+  n_layer: 1
+  n_head: 1
+  n_embd: 64
+  block_size: 256
+  vocab_size: 8192
+  dropout: 0.0
+  bias: false
+  tie_weights: true
+  linear_bias: false
+  layernorm_bias: true
+  init_mode: nanogpt_normal_0p02
+  profile_name: scaling_level0_adaptive_alpha
+  mlp_mult: 4
+train:
+  batch_size: 16
+  gradient_accumulation: 1
+  learning_rate: 0.0006
+  betas:
+  - 0.9
+  - 0.95
+  epsilon: 1.0e-08
+  weight_decay: 0.1
+  grad_clip: 1.0
+  eval_interval: 25
+  spectral_interval: 50
+  checkpoint_interval: 50
+  eval_batches: 20
+  training_sampling: random_window
+  evaluation_sampling: fixed_probe
+  lr_schedule: warmup_cosine
+  warmup_ratio: 0.01
+  min_lr_ratio: 0.1
+  layer_lr: flat
+  llrd_min_multiplier: 0.5
+  lr_scale_rule: fixed
+  lr_reference_tokens_per_step: 4096
+  wwpgd_interval: 25
+  max_steps: 1000
+  allow_overtraining: true
+  test_evaluation_mode: final_checkpoint
+wwpgd:
+  enabled: true
+  extension: wwpgd
+  target_alpha: 2.0
+  blend_eta: 0.5
+  cayley_eta: 0.25
+  min_tail: 5
+  use_detx: true
+  candidate_device: auto
+  warmup_events: 0
+  ramp_events: 0
+  adaptive:
+    mode: alpha_distance
+    direction: below_target
+    apply_mode: cached_endpoint_relaxation
+    start_step: 400
+    min_observations: 2
+    alpha_ema_beta: 0.8
+    max_D: 0.15
+    cooldown_events: 0
+    apply_interval: 1
+    max_per_step_gain: 0.005
+    dose_schedule: bounded_refresh_fraction
+    max_endpoint_fraction_per_refresh: 0.4
+    max_cumulative_relative_frobenius_change_per_refresh: 0.005
+    max_relative_frobenius_change_per_step: 0.00025
+    endpoint_stop_relative_distance: 0.0001
+    max_endpoint_age_steps: 50
+    stale_distance_multiplier: 2.0
+    skip_fast_apply_on_measurement_step: true
+    cache_endpoint_on_cpu: false
+    refresh_at_final_step: true
+    log_every_fast_step: true
+    above_target:
+      enabled: true
+      deadband: 0.4
+      full_strength_distance: 2.0
+      max_hardness: 1.0
+      response_curve: smoothstep
+    below_target:
+      enabled: true
+      deadband: 0.2
+      full_strength_distance: 1.0
+      max_hardness: 1.0
+      response_curve: smoothstep
+    matrix_type_overrides:
+      W_V:
+        above_target:
+          full_strength_distance: 1.8
+      W_MLP_OUT:
+        above_target:
+          deadband: 0.6
