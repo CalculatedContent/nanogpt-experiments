@@ -24,7 +24,8 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD > AUDIT_COMMIT.txt
           find . -path './.git' -prune -o -type f -print | sort > AUDIT_FILE_INVENTORY.txt
-          tar --exclude=.git --exclude=release-audit-snapshot.tar.gz -czf release-audit-snapshot.tar.gz .
+          tar --exclude=.git -czf /tmp/release-audit-snapshot.tar.gz .
+          mv /tmp/release-audit-snapshot.tar.gz .
       - name: Upload exact source snapshot
         uses: actions/upload-artifact@v4
         with:
