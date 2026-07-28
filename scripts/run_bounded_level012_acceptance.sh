@@ -13,25 +13,59 @@ cd "$REPO_ROOT"
 RESULTS_ROOT="$1"
 PLAN="$RESULTS_ROOT/release_acceptance_plan.yaml"
 
-python scripts/run_bounded_level012_acceptance.py --results-root "$RESULTS_ROOT"
-wwgpt check-health --experiment-root "$RESULTS_ROOT" >"$RESULTS_ROOT/release_health.log"
-wwgpt analyze-results "$RESULTS_ROOT" --analysis-plan "$PLAN" >"$RESULTS_ROOT/release_analysis.log"
-wwgpt audit-experiment --experiment-root "$RESULTS_ROOT" >"$RESULTS_ROOT/release_audit.log"
-FIRST_REPORT="$(wwgpt generate-reproducibility-report --experiment-root "$RESULTS_ROOT" --analysis-plan "$PLAN" --strict)"
-SECOND_REPORT="$(wwgpt generate-reproducibility-report --experiment-root "$RESULTS_ROOT" --analysis-plan "$PLAN" --strict)"
-if [ "$FIRST_REPORT" != "$SECOND_REPORT" ]; then
-  echo "reproducibility report path changed across identical reruns" >&2
-  exit 1
-fi
+# Keep numerical libraries deterministic and prevent excessive thread creation on
+# small CI runners and local laptops. Callers may override any value explicitly.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
+export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-1}"
+export VECLIB_MAXIMUM_THREADS="${VECLIB_MAXIMUM_THREADS:-1}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/wwgpt-matplotlib}"
+mkdir -p "$MPLCONFIGDIR"
 
-python - "$RESULTS_ROOT" <<'PY'
+python scripts/run_bounded_level012_acceptance.py --results-root "$RESULTS_ROOT"
+
+# Run all post-processing in one clean Python process. This still exercises the
+# installed package from a shell entry point, while avoiding repeated imports of
+# Torch, WeightWatcher, pandas, and Matplotlib across five short-lived processes.
+python - "$RESULTS_ROOT" "$PLAN" <<'PY'
 from pathlib import Path
 import json
 import sys
+
 import pandas as pd
 
-root = Path(sys.argv[1])
+from wwgpt.analysis import analyze_results
+from wwgpt.integrity import audit_experiment
+from wwgpt.reproducibility import write_reproducibility_report
+from wwgpt.run_health import generate_experiment_health
+
+root = Path(sys.argv[1]).expanduser().resolve()
+plan = Path(sys.argv[2]).expanduser().resolve()
 analysis = root / "analysis"
+
+health = generate_experiment_health(root)
+(root / "release_health.log").write_text(
+    json.dumps(health, indent=2, sort_keys=True, default=str) + "\n"
+)
+if not health.get("ready_for_analysis"):
+    raise SystemExit("release health check failed")
+
+analysis_dir = analyze_results(root, plan)
+(root / "release_analysis.log").write_text(str(analysis_dir) + "\n")
+
+audit_path = audit_experiment(root)
+audit = json.loads(Path(audit_path).read_text())
+(root / "release_audit.log").write_text(str(audit_path) + "\n")
+if not audit.get("valid_for_publication"):
+    raise SystemExit(f"release integrity audit failed: {audit.get('failures', [])}")
+
+report = write_reproducibility_report(root, strict=True, analysis_plan=plan)
+repeated_report = write_reproducibility_report(root, strict=True, analysis_plan=plan)
+(root / "release_reproducibility.log").write_text(str(report) + "\n")
+if report != repeated_report or not report.is_file():
+    raise SystemExit("reproducibility report is not stable across identical reruns")
+
 complete = sorted(root.rglob("run_complete.json"))
 if len(complete) != 6:
     raise SystemExit(f"expected six complete runs, found {len(complete)}")
