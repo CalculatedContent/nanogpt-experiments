@@ -1,2 +1,3 @@
-"""Self-contained Level 0 nanoGPT baseline."""
-__version__ = "0.1.0"
+"""Self-contained realistic FineWeb-Edu nanoGPT Level 0 baseline."""
+
+__version__ = "0.2.0"
