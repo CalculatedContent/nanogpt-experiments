@@ -41,6 +41,17 @@ This prepares fixed 50 MB training, 2 MB validation, and 2 MB test byte-token sp
 level0-prepare-data --dataset fineweb-edu
 ```
 
+To monitor the streamed download and preparation, enable heartbeat logging:
+
+```bash
+level0-prepare-data \
+  --dataset fineweb-edu \
+  --verbose \
+  --log-interval-seconds 10
+```
+
+Verbose output reports documents processed, bytes collected, completion percentage, elapsed time, average throughput, estimated time remaining, and how long the stream has produced no new bytes. The heartbeat continues while the streaming iterator is blocked, making a network or dataset stall visible.
+
 ## Run one seed
 
 ```bash
