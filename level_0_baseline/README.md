@@ -6,13 +6,13 @@ This subtree provides a clean, self-contained AdamW/Muon baseline without import
 
 - pinned FineWeb-Edu `sample-10BT` stream
 - GPT-2 BPE tokenizer (`50,257` tokens), not raw bytes
-- fixed 10M-token training, 1M-token validation, and 1M-token test splits
+- fixed 10M-token training, 1M-token validation, and 1M-token test splits, with document-disjoint split boundaries
 - 4 transformer blocks, 4 heads, width 128, context 256
 - tied token embedding/output head
 - AdamW peak learning rate `6e-4`, betas `(0.9, 0.95)`, epsilon `1e-8`
 - matrix-only weight decay `0.1`; no decay on one-dimensional parameters
 - micro-batch 4 with eight-step gradient accumulation (effective batch 32 sequences)
-- 100-step linear warmup followed by cosine decay to `6e-5`
+- 20-step linear warmup (1% of the run) followed by cosine decay to `6e-5`
 - gradient clipping at 1.0 and flat learning rate across layers
 - fixed train/validation probes with RNG streams independent of training
 - test evaluation only at the final and validation-selected checkpoints
