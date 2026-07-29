@@ -16,7 +16,7 @@ training:
   checkpoint_interval: 250
   learning_rate: 0.0006
   min_lr: 0.00006
-  warmup_steps: 100
+  warmup_steps: 20
   weight_decay: 0.1
   beta1: 0.9
   beta2: 0.95
