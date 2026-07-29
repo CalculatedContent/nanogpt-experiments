@@ -1,6 +1,10 @@
 import json
+import sys
+from pathlib import Path
 
 import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from level0_baseline.data import _progress_message, write_splits
 from level0_baseline.model import GPT, GPTConfig
