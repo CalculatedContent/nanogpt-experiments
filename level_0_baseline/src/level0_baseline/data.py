@@ -149,7 +149,9 @@ def _load_tokenizer(name: str) -> Tokenizer:
         ) from exc
     tokenizer = tiktoken.get_encoding(name)
     if tokenizer.n_vocab - 1 > UINT16_MAX:
-        raise ValueError(f"tokenizer {name!r} has IDs that do not fit in uint16")
+        raise ValueError(
+            f"tokenizer {name!r} has IDs that do not fit in uint16"
+        )
     return tokenizer
 
 
@@ -312,7 +314,7 @@ def write_token_splits(
                 split_documents[split] += 1
                 used_tokens += take
             if take < int(chunk.size):
-                # Never let one source document cross a scientific split. The
+                # Never let one source document cross a scientific split.  The
                 # unused suffix is deliberately discarded at the boundary.
                 discarded_boundary_tokens += int(chunk.size) - take
             if split_collected[split] == split_sizes[split]:

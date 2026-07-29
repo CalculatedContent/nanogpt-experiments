@@ -71,9 +71,7 @@ class Muon(torch.optim.Optimizer):
                     else momentum_buffer
                 )
                 update = zeropower_via_newtonschulz5(update_input)
-                update.mul_(
-                    max(1.0, parameter.shape[0] / parameter.shape[1]) ** 0.5
-                )
+                update.mul_(max(1.0, parameter.shape[0] / parameter.shape[1]) ** 0.5)
                 if group["weight_decay"]:
                     parameter.mul_(1 - group["lr"] * group["weight_decay"])
                 parameter.add_(update, alpha=-group["lr"])
@@ -154,15 +152,14 @@ def make_optimizers(model, config: dict[str, Any]) -> list[torch.optim.Optimizer
         raise ValueError(f"unsupported optimizer: {optimizer_name}")
 
     muon_grouped: dict[float, list[torch.nn.Parameter]] = defaultdict(list)
-    auxiliary_grouped: dict[
-        tuple[bool, float], list[torch.nn.Parameter]
-    ] = defaultdict(list)
+    auxiliary_grouped: dict[tuple[bool, float], list[torch.nn.Parameter]] = defaultdict(list)
     for record in _parameter_records(model, training):
         name = str(record["name"])
         parameter = record["parameter"]
         multiplier = float(record["lr_multiplier"])
-        use_muon = parameter.ndim == 2 and not name.startswith(
-            ("token_embedding", "position_embedding", "lm_head")
+        use_muon = (
+            parameter.ndim == 2
+            and not name.startswith(("token_embedding", "position_embedding", "lm_head"))
         )
         if use_muon:
             muon_grouped[multiplier].append(parameter)

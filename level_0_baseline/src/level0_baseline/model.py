@@ -35,9 +35,9 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(cfg.dropout)
         self.register_buffer(
             "mask",
-            torch.tril(
-                torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool)
-            ).view(1, 1, cfg.block_size, cfg.block_size),
+            torch.tril(torch.ones(cfg.block_size, cfg.block_size, dtype=torch.bool)).view(
+                1, 1, cfg.block_size, cfg.block_size
+            ),
             persistent=False,
         )
 
