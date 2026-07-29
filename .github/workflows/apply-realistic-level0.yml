@@ -4,13 +4,24 @@ on:
   push:
     branches:
       - agent/correct-realistic-level0-baseline
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
 
 jobs:
   apply-level0:
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'agent/correct-realistic-level0-baseline')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
