@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanogpt-level0-baseline"
+version = "0.1.0"
+description = "Self-contained Level 0 nanoGPT baseline for AdamW and Muon"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2", "numpy>=1.24", "pandas>=2.0", "matplotlib>=3.7", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+data = ["datasets>=2.19"]
+analysis = ["weightwatcher>=0.7.5", "jupyter>=1.0"]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+level0-prepare-data = "level0_baseline.data:main"
+level0-train = "level0_baseline.train:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,33 @@
+model:
+  vocab_size: 256
+  block_size: 256
+  n_layer: 1
+  n_head: 1
+  n_embd: 64
+  dropout: 0.0
+  bias: false
+training:
+  batch_size: 16
+  grad_accum_steps: 1
+  max_steps: 2000
+  eval_interval: 50
+  eval_batches: 20
+  checkpoint_interval: 250
+  learning_rate: 0.0006
+  muon_learning_rate: 0.02
+  muon_aux_adamw_learning_rate: 0.0006
+  min_lr: 0.00006
+  warmup_steps: 100
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  optimizer: adamw
+  muon_momentum: 0.95
+  muon_nesterov: true
+  seed: 1337
+  compile: false
+analysis:
+  weightwatcher: true
+  weightwatcher_interval: 250
+  randomize: true
