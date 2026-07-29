@@ -172,6 +172,7 @@ def write_token_splits(
     final_paths = {name: out / f"{name}.bin" for name in targets}
     handles = {name: path.open("wb") for name, path in partial_paths.items()}
     written = {name: 0 for name in targets}
+    split_document_counts = {name: 0 for name in targets}
     split_names = list(targets)
     split_index = 0
     documents = 0
@@ -180,20 +181,23 @@ def write_token_splits(
 
     try:
         for text in texts:
+            if split_index >= len(split_names):
+                break
             documents += 1
             source_utf8_bytes += len(text.encode("utf-8", errors="replace"))
             encoded = _encode_document(text, encoder)
-            offset = 0
-            while offset < len(encoded) and split_index < len(split_names):
-                split = split_names[split_index]
-                remaining = targets[split] - written[split]
-                take = min(remaining, len(encoded) - offset)
-                encoded[offset : offset + take].tofile(handles[split])
+            split = split_names[split_index]
+            remaining = targets[split] - written[split]
+            take = min(remaining, len(encoded))
+            if take > 0:
+                encoded[:take].tofile(handles[split])
                 written[split] += take
                 total_tokens += take
-                offset += take
-                if written[split] == targets[split]:
-                    split_index += 1
+                split_document_counts[split] += 1
+            # Never carry the remainder of a document into another split.
+            # This keeps train, validation, and test document-disjoint.
+            if written[split] == targets[split]:
+                split_index += 1
             if active_reporter is not None:
                 active_reporter.update(documents, total_tokens)
             if total_tokens >= required_tokens:
@@ -226,6 +230,8 @@ def write_token_splits(
         "eot_token": int(encoder.eot_token),
         "dtype": TOKEN_DTYPE.name,
         "splits": written,
+        "split_document_counts": split_document_counts,
+        "document_disjoint_splits": True,
         "documents_consumed": documents,
         "source_utf8_bytes": source_utf8_bytes,
         "elapsed_seconds": elapsed,
