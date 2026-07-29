@@ -1,0 +1,128 @@
+name: Sandbox Python 3.13 dependency bundle
+
+on:
+  push:
+    branches:
+      - agent/sandbox-main-export-20260728
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: bundle missing test dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install the complete dependency set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            tokenizers \
+            datasets \
+            tiktoken \
+            torch-optimi \
+            'weightwatcher>=0.7.7,<0.8' \
+            papermill \
+            'ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git'
+      - name: Build a portable missing-dependency bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+          import json
+          import shutil
+          from importlib import metadata
+          from pathlib import Path, PurePosixPath
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          roots = {
+              canonicalize_name(name)
+              for name in (
+                  'tokenizers', 'datasets', 'tiktoken', 'torch-optimi',
+                  'weightwatcher', 'papermill', 'ww-pgd'
+              )
+          }
+          # These distributions are already present in the execution sandbox.
+          exclude = {
+              canonicalize_name(name)
+              for name in (
+                  'torch', 'numpy', 'pandas', 'matplotlib', 'scipy',
+                  'scikit-learn', 'pyyaml', 'requests', 'tqdm', 'fsspec',
+                  'huggingface-hub', 'packaging', 'nbformat', 'nbclient',
+                  'jupyter-client', 'ipykernel', 'regex', 'click', 'filelock',
+                  'safetensors', 'psutil', 'aiohttp', 'attrs', 'urllib3',
+                  'certifi', 'joblib', 'tabulate', 'pygments', 'sympy',
+                  'jinja2', 'markupsafe', 'networkx', 'typing-extensions',
+              )
+          }
+          by_name = {
+              canonicalize_name(dist.metadata['Name']): dist
+              for dist in metadata.distributions()
+              if dist.metadata.get('Name')
+          }
+          selected: set[str] = set()
+          pending = list(roots)
+          while pending:
+              name = pending.pop()
+              if name in selected or name in exclude:
+                  continue
+              dist = by_name.get(name)
+              if dist is None:
+                  raise RuntimeError(f'missing installed distribution: {name}')
+              selected.add(name)
+              for raw in dist.requires or ():
+                  req = Requirement(raw)
+                  if req.marker is not None and not req.marker.evaluate():
+                      continue
+                  dep = canonicalize_name(req.name)
+                  if dep not in selected and dep not in exclude:
+                      pending.append(dep)
+
+          out = Path('sandbox-python313-vendor')
+          if out.exists():
+              shutil.rmtree(out)
+          out.mkdir()
+          copied = []
+          for name in sorted(selected):
+              dist = by_name[name]
+              for item in dist.files or ():
+                  rel = PurePosixPath(str(item))
+                  if rel.is_absolute() or '..' in rel.parts:
+                      continue
+                  src = Path(dist.locate_file(item))
+                  if not src.is_file():
+                      continue
+                  dst = out.joinpath(*rel.parts)
+                  dst.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copy2(src, dst)
+              copied.append({'name': dist.metadata['Name'], 'version': dist.version})
+          (out / 'BUNDLE_MANIFEST.json').write_text(
+              json.dumps({'python': '3.13', 'distributions': copied}, indent=2, sort_keys=True)
+          )
+          print(json.dumps(copied, indent=2))
+          PY
+          PYTHONPATH="$PWD/sandbox-python313-vendor" python - <<'PY'
+          import datasets, optimi, papermill, tiktoken, tokenizers, weightwatcher, ww_pgd
+          print('dependency bundle import check passed')
+          PY
+          zip -qr sandbox-python313-vendor.zip sandbox-python313-vendor
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-python313-vendor
+          path: sandbox-python313-vendor.zip
+          if-no-files-found: error
+          retention-days: 1
