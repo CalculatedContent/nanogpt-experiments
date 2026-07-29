@@ -1,0 +1,42 @@
+name: Sandbox main source export
+
+on:
+  push:
+    branches:
+      - agent/sandbox-main-export-20260728
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  export-main-source:
+    name: export exact main source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+      - name: Verify exported commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "4c7c46797164ea0207da3f836fd9018a513e9f74"
+      - name: Create source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive \
+            --format=zip \
+            --prefix=nanogpt-experiments-main/ \
+            --output=nanogpt-experiments-main.zip \
+            HEAD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nanogpt-experiments-main-source
+          path: nanogpt-experiments-main.zip
+          if-no-files-found: error
+          retention-days: 1
