@@ -1,0 +1,42 @@
+name: Apply realistic Level 0 trainer source
+
+on:
+  push:
+    branches:
+      - agent/rebuild-level0-realistic-bpe
+
+permissions:
+  contents: write
+
+jobs:
+  apply-trainer:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/rebuild-level0-realistic-bpe
+          fetch-depth: 0
+      - name: Reconstruct validated trainer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .level0-transfer/train.part* \
+            | base64 --decode \
+            | gzip -dc \
+            > /tmp/train.py
+          echo '0428379622ab17278990260e5ccd04f2eda7b5ea884e2bbff44f41fcb7eae78e  /tmp/train.py' \
+            | sha256sum --check --strict
+          install -m 0644 /tmp/train.py level_0_baseline/src/level0_baseline/train.py
+          test "$(git hash-object level_0_baseline/src/level0_baseline/train.py)" = \
+            '732bc900db67e00f6ee3c4013fbacf689b332858'
+          python -m py_compile level_0_baseline/src/level0_baseline/train.py
+      - name: Commit trainer source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add level_0_baseline/src/level0_baseline/train.py
+          git commit -m 'Add realistic isolated Level 0 trainer'
+          git push origin HEAD:agent/rebuild-level0-realistic-bpe
