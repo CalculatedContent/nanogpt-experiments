@@ -111,7 +111,7 @@ def test_progress_message_reports_eta_and_stall():
 
 def test_verbose_bpe_split_preparation_writes_exact_uint16_files(tmp_path, capsys):
     metadata = write_token_splits(
-        iter(["abcdef", "ghijkl"]),
+        iter(["abcdef", "ghijkl", "mnopqr"]),
         FakeEncoder(),
         tmp_path,
         train_tokens=3,
@@ -131,6 +131,12 @@ def test_verbose_bpe_split_preparation_writes_exact_uint16_files(tmp_path, capsy
     assert disk_metadata["tokenizer"] == "gpt2"
     assert disk_metadata["dtype"] == "uint16"
     assert disk_metadata["splits"] == {"train": 3, "val": 2, "test": 2}
+    assert disk_metadata["split_document_counts"] == {
+        "train": 1,
+        "val": 1,
+        "test": 1,
+    }
+    assert disk_metadata["document_disjoint_splits"] is True
     assert metadata["dataset_name"] == "unit"
 
 
