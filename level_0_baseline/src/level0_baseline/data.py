@@ -121,6 +121,30 @@ class _ProgressReporter:
         return self._snapshot()
 
 
+def _fineweb_texts(load_dataset, verbose: bool):
+    if verbose:
+        print(
+            "[level0-prepare-data] resolving streamed dataset "
+            "HuggingFaceFW/fineweb-edu sample-10BT train",
+            file=sys.stderr,
+            flush=True,
+        )
+    dataset = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name="sample-10BT",
+        split="train",
+        streaming=True,
+    )
+    if verbose:
+        print(
+            "[level0-prepare-data] dataset stream ready; collecting documents",
+            file=sys.stderr,
+            flush=True,
+        )
+    for row in dataset:
+        yield row["text"]
+
+
 def write_splits(
     texts,
     out: Path,
@@ -240,26 +264,7 @@ def main():
             from datasets import load_dataset
         except ImportError as exc:
             raise SystemExit("Install data support: pip install -e '.[data]'") from exc
-        if args.verbose:
-            print(
-                "[level0-prepare-data] resolving streamed dataset "
-                "HuggingFaceFW/fineweb-edu sample-10BT train",
-                file=sys.stderr,
-                flush=True,
-            )
-        dataset = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name="sample-10BT",
-            split="train",
-            streaming=True,
-        )
-        if args.verbose:
-            print(
-                "[level0-prepare-data] dataset stream ready; collecting documents",
-                file=sys.stderr,
-                flush=True,
-            )
-        texts = (row["text"] for row in dataset)
+        texts = _fineweb_texts(load_dataset, args.verbose)
 
     write_splits(
         texts,
