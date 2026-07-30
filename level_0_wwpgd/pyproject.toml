@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanogpt-level0-wwpgd"
+version = "0.1.0"
+description = "Isolated FineWeb-Edu nanoGPT experiment with the WWPGD post-optimizer extension"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0",
+  "weightwatcher>=0.7.5",
+  "ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git",
+]
+
+[project.optional-dependencies]
+data = ["datasets>=2.19", "tiktoken>=0.7"]
+analysis = ["jupyter>=1.0"]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+level0-wwpgd-prepare-data = "level0_wwpgd.data:main"
+level0-wwpgd-train = "level0_wwpgd.train:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

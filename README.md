@@ -182,3 +182,11 @@ Compatibility diagnostics contain observable candidate movement, never invented
 private midpoint/Cayley/TraceLog values. Level 0--2 endpoint dose is normalized by
 the refresh interval and bounded both per step and cumulatively per refresh.
 `target_alpha = 2.0` remains the only public spectral target.
+
+
+## Isolated realistic Level 0 WWPGD experiment
+
+The sibling `level_0_wwpgd/` experiment freezes the corrected FineWeb-Edu BPE
+baseline protocol and adds only the fresh post-AdamW WWPGD event-projection
+extension. It reuses the exact prepared data and provides single-seed, multi-seed,
+and paired baseline-versus-WWPGD notebooks. See `level_0_wwpgd/README.md`.

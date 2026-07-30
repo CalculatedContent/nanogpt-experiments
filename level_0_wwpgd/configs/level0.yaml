@@ -1,0 +1,53 @@
+model:
+  vocab_size: 50257
+  block_size: 256
+  n_layer: 4
+  n_head: 4
+  n_embd: 128
+  dropout: 0.0
+  bias: false
+  tie_weights: true
+
+training:
+  batch_size: 4
+  grad_accum_steps: 8
+  max_steps: 2000
+  eval_interval: 50
+  eval_batches: 20
+  checkpoint_interval: 250
+  learning_rate: 0.0006
+  min_lr: 0.00006
+  warmup_steps: 20
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  epsilon: 1.0e-8
+  grad_clip: 1.0
+  optimizer: adamw
+  muon_learning_rate: 0.02
+  muon_aux_adamw_learning_rate: 0.0006
+  muon_momentum: 0.95
+  muon_nesterov: true
+  seed: 1337
+  compile: false
+
+analysis:
+  weightwatcher: true
+  weightwatcher_interval: 250
+  randomize: false
+  include_embeddings: false
+  include_output_head: false
+
+wwpgd:
+  enabled: true
+  extension: wwpgd
+  apply_mode: event_projection
+  interval: 1
+  target_alpha: 2.0
+  blend_eta: 0.5
+  cayley_eta: 0.25
+  min_tail: 5
+  use_detx: true
+  candidate_device: cpu
+  max_relative_frobenius_change: null
+  log_interval: 10
