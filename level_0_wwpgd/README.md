@@ -1,10 +1,6 @@
 # Isolated Level 0 nanoGPT + WWPGD
 
-This sibling experiment deliberately reuses the exact FineWeb-Edu GPT-2-BPE
-model, AdamW optimizer, minibatch stream, learning-rate schedule, evaluation
-probes, checkpoint policy, and WeightWatcher cadence from `level_0_baseline`.
-The only scientific intervention is a fresh stock WWPGD event projection
-immediately after each scheduled AdamW update.
+This sibling experiment deliberately reuses the exact FineWeb-Edu GPT-2-BPE model, AdamW optimizer, minibatch stream, learning-rate schedule, evaluation probes, checkpoint policy, and WeightWatcher cadence from `level_0_baseline`. The only scientific intervention is a fresh stock WWPGD event projection immediately after each successful AdamW update.
 
 ## Frozen paired protocol
 
@@ -16,12 +12,21 @@ immediately after each scheduled AdamW update.
 - same transformer-only WeightWatcher measurements every 250 steps;
 - WWPGD uses `event_projection`, target alpha 2.0, and interval 1;
 - embeddings, LayerNorms, position embeddings, and the tied LM head are never projected;
-- WWPGD candidates are generated on CPU for MPS safety and copied back only
-  to the 24 transformer block matrices.
+- WWPGD candidates are generated on CPU for MPS safety and copied back only to the 24 transformer block matrices.
 
-At the default interval, 2,000 optimizer steps imply 2,000 fresh WWPGD calls
-and 48,000 matrix projection records. This is intentionally the direct
-optimization-intervention protocol, not cached-endpoint relaxation.
+At the default interval, 2,000 optimizer steps imply 2,000 fresh WWPGD calls and 48,000 matrix projection records per seed. This is the direct optimization-intervention protocol, not cached-endpoint relaxation.
+
+## Shell-safety contract
+
+Run repository scripts with `bash`; do not source them. Each script refuses to run when sourced, and strict shell options stay inside the child script rather than changing the interactive shell.
+
+```bash
+bash scripts/prepare_data.sh
+bash scripts/run_one.sh adamw 1337
+bash scripts/run_multiseed.sh
+```
+
+The scripts are also tracked as executable, but the explicit `bash` form remains portable when a checkout or archive loses executable permission.
 
 ## Install with Conda
 
@@ -31,50 +36,83 @@ cd ~/Desktop/work/nanoGPT/nanogpt-experiments
 python -m pip install -e .
 python -m pip install -e 'level_0_baseline[data,analysis,test]'
 python -m pip install -e 'level_0_wwpgd[data,analysis,test]'
+python -m pip check
 ```
 
-## Reuse the exact baseline data
+## Run the complete paired five-seed experiment
+
+The safe paired runner creates a timestamped `/tmp` result root, verifies that the baseline and WWPGD configurations match outside the intervention, prepares or reuses the exact shared data identity, and runs each phase without modifying the parent shell.
+
+Run the five-seed AdamW baseline first:
 
 ```bash
-export NANOGPT_LEVEL0_ROOT=/tmp/nanogpt-level0-bpe
-export NANOGPT_LEVEL0_DATA_ROOT=$NANOGPT_LEVEL0_ROOT/data
-
-export NANOGPT_LEVEL0_WWPGD_ROOT=/tmp/nanogpt-level0-wwpgd
-export NANOGPT_LEVEL0_WWPGD_DATA_ROOT=$NANOGPT_LEVEL0_DATA_ROOT
-export NANOGPT_LEVEL0_WWPGD_RESULTS_ROOT=$NANOGPT_LEVEL0_WWPGD_ROOT/results
+cd ~/Desktop/work/nanoGPT/nanogpt-experiments
+bash scripts/run_isolated_level0_pair.sh baseline
 ```
 
-If the BPE data has not been prepared, run:
+Then, in the same or a later terminal, run the matching WWPGD seeds using the recorded pair root:
 
 ```bash
-./level_0_wwpgd/scripts/prepare_data.sh
+PAIR_ROOT="$(cat /tmp/nanogpt-level0-current-pair)"
+bash scripts/run_isolated_level0_pair.sh wwpgd "$PAIR_ROOT"
 ```
 
-## Run one seed
+To run both phases sequentially in one child process:
 
 ```bash
-cd level_0_wwpgd
-./scripts/run_one.sh adamw 1337 \
+bash scripts/run_isolated_level0_pair.sh all
+```
+
+To inspect completion without launching training:
+
+```bash
+bash scripts/run_isolated_level0_pair.sh verify
+```
+
+The canonical seeds are:
+
+```text
+1337, 2027, 4099, 7919, 104729
+```
+
+The runner skips a seed only when its `run_complete.json` explicitly says it completed. It refuses to overwrite a partial directory.
+
+## Direct WWPGD commands
+
+Reuse the baseline data directly:
+
+```bash
+env \
+  NANOGPT_LEVEL0_WWPGD_DATA_ROOT=/tmp/nanogpt-level0-bpe/data \
+  NANOGPT_LEVEL0_WWPGD_RESULTS_ROOT=/tmp/nanogpt-level0-wwpgd/results \
+  NANOGPT_LEVEL0_WWPGD_DEVICE=mps \
+  bash level_0_wwpgd/scripts/run_one.sh adamw 1337 \
   2>&1 | tee /tmp/level0-wwpgd-seed1337.log
 ```
 
-## Run five seeds
+For five direct seeds:
 
 ```bash
-export NANOGPT_LEVEL0_WWPGD_SEEDS=1337,2027,4099,7919,104729
-./scripts/run_multiseed.sh \
+env \
+  NANOGPT_LEVEL0_WWPGD_DATA_ROOT=/tmp/nanogpt-level0-bpe/data \
+  NANOGPT_LEVEL0_WWPGD_RESULTS_ROOT=/tmp/nanogpt-level0-wwpgd/results \
+  NANOGPT_LEVEL0_WWPGD_DEVICE=mps \
+  NANOGPT_LEVEL0_WWPGD_SEEDS=1337,2027,4099,7919,104729 \
+  bash level_0_wwpgd/scripts/run_multiseed.sh \
   2>&1 | tee /tmp/level0-wwpgd-5seeds.log
 ```
 
-Each completed run writes `metrics.csv`, `run_complete.json`, final and
-selected checkpoints, periodic WeightWatcher files, and
-`wwpgd_projection.csv` with one row per projected transformer matrix.
+Each completed run writes `metrics.csv`, `run_complete.json`, final and selected checkpoints, periodic WeightWatcher files, and `wwpgd_projection.csv` with one row per projected transformer matrix.
 
-## Notebooks
+## Compare baseline and WWPGD
 
 ```bash
-export NANOGPT_LEVEL0_WWPGD_RESULTS_ROOT=/tmp/nanogpt-level0-wwpgd/results
-jupyter lab notebooks/01_single_seed.ipynb
-jupyter lab notebooks/02_multiseed.ipynb
-jupyter lab notebooks/03_compare_baseline_wwpgd.ipynb
+PAIR_ROOT="$(cat /tmp/nanogpt-level0-current-pair)"
+
+env \
+  NANOGPT_LEVEL0_BASELINE_RESULTS_ROOT="$PAIR_ROOT/baseline/results" \
+  NANOGPT_LEVEL0_WWPGD_RESULTS_ROOT="$PAIR_ROOT/wwpgd/results" \
+  jupyter lab level_0_wwpgd/notebooks/03_compare_baseline_wwpgd.ipynb
 ```
+
+The paired notebook plots mean and standard-deviation bands and computes seed-matched test-loss differences.
