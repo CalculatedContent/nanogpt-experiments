@@ -4,13 +4,23 @@ on:
   push:
     branches:
       - agent/add-isolated-level0-wwpgd
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
 
 jobs:
   build:
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name == 'push' ||
+       github.event.pull_request.head.ref == 'agent/add-isolated-level0-wwpgd')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
