@@ -1,0 +1,115 @@
+name: Patch isolated Level 0 WWPGD selected-matrix holder
+
+on:
+  push:
+    branches:
+      - agent/add-isolated-level0-wwpgd
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/add-isolated-level0-wwpgd
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restrict stock WWPGD analysis to projected matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('level_0_wwpgd/src/level0_wwpgd/wwpgd_extension.py')
+          text = path.read_text(encoding='utf-8')
+
+          text = text.replace('import copy\n', '')
+
+          old_fields = '''    "projection_event",\n    "layer_name",'''
+          new_fields = '''    "projection_event",\n    "candidate_epoch",\n    "candidate_num_epochs",\n    "candidate_analyzed_matrix_count",\n    "layer_name",'''
+          assert old_fields in text
+          text = text.replace(old_fields, new_fields, 1)
+
+          marker = '''\n\n@contextmanager\ndef preserve_global_rng() -> Iterator[None]:'''
+          holder = '''\n\nclass _ProjectedMatrixHolder(nn.Module):\n    """CPU-only model exposing exactly the matrices eligible for WWPGD."""\n\n    def __init__(self, model: GPT):\n        super().__init__()\n        self.safe_to_live: dict[str, str] = {}\n        for live_name, matrix_type, block, live_module in projected_modules(model):\n            safe_name = f"L{block:02d}_{matrix_type}"\n            if safe_name in self.safe_to_live:\n                raise RuntimeError(f"duplicate projected matrix name: {safe_name}")\n            layer = nn.Linear(\n                live_module.weight.shape[1],\n                live_module.weight.shape[0],\n                bias=False,\n            )\n            layer.weight = nn.Parameter(\n                live_module.weight.detach().float().cpu().clone(),\n                requires_grad=False,\n            )\n            self.add_module(safe_name, layer)\n            self.safe_to_live[safe_name] = live_name\n\n\n@contextmanager\ndef preserve_global_rng() -> Iterator[None]:'''
+          assert marker in text
+          text = text.replace(marker, holder, 1)
+
+          old_manifest = '''                "wwpgd_scope": "transformer_block_matrices_only",\n                "wwpgd_candidate_device": "cpu",'''
+          new_manifest = '''                "wwpgd_scope": "transformer_block_matrices_only",\n                "wwpgd_candidate_scope": "selected_transformer_matrix_holder_only",\n                "wwpgd_candidate_device": "cpu",'''
+          assert old_manifest in text
+          text = text.replace(old_manifest, new_manifest, 1)
+
+          old_clone = '''    def _cpu_candidate_model(self) -> GPT:\n        with preserve_global_rng():\n            clone = GPT(copy.deepcopy(self.model.cfg)).to(torch.device("cpu"))\n        clone.load_state_dict(\n            {name: value.detach().cpu() for name, value in self.model.state_dict().items()}\n        )\n        clone.train(self.model.training)\n        return clone\n'''
+          new_clone = '''    def _cpu_candidate_holder(self) -> _ProjectedMatrixHolder:\n        with preserve_global_rng():\n            return _ProjectedMatrixHolder(self.model)\n'''
+          assert old_clone in text
+          text = text.replace(old_clone, new_clone, 1)
+
+          old_setup = '''        resolved = self.resolved_config()\n        candidate_model = self._cpu_candidate_model()\n        selected = projected_modules(candidate_model)\n        selected_names = {name for name, _, _, _ in selected}\n'''
+          new_setup = '''        resolved = self.resolved_config()\n        candidate_holder = self._cpu_candidate_holder()\n        selected_names = set(candidate_holder.safe_to_live)\n'''
+          assert old_setup in text
+          text = text.replace(old_setup, new_setup, 1)
+
+          old_call = '''            result = run_candidate(\n                candidate_model,\n                external_config_object(external_module(), resolved),\n                epoch=self.call_count,\n                num_epochs=max(self.call_count + 1, 1),\n                global_step=optimizer_step,\n                layer_selector=selector,\n            )'''
+          new_call = '''            result = run_candidate(\n                candidate_holder,\n                external_config_object(external_module(), resolved),\n                epoch=max(0, optimizer_step - 1),\n                num_epochs=max(total_optimizer_steps, 1),\n                global_step=optimizer_step,\n                layer_selector=selector,\n            )'''
+          assert old_call in text
+          text = text.replace(old_call, new_call, 1)
+
+          old_candidates = '''        live = {name: module for name, _, _, module in projected_modules(self.model)}\n        candidates = {\n            name: module.weight.detach().cpu().clone()\n            for name, _, _, module in projected_modules(candidate_model)\n        }\n        rows: list[dict[str, Any]] = []'''
+          new_candidates = '''        live = {name: module for name, _, _, module in projected_modules(self.model)}\n        safe_name_by_live = {\n            live_name: safe_name\n            for safe_name, live_name in candidate_holder.safe_to_live.items()\n        }\n        candidates = {\n            live_name: getattr(candidate_holder, safe_name).weight.detach().cpu().clone()\n            for safe_name, live_name in candidate_holder.safe_to_live.items()\n        }\n        rows: list[dict[str, Any]] = []'''
+          assert old_candidates in text
+          text = text.replace(old_candidates, new_candidates, 1)
+
+          old_observed = '''                observed = _match_weightwatcher_row(details, layer_name)\n                rows.append(\n                    {\n                        "optimizer_step": optimizer_step,\n                        "tokens_seen": tokens_seen,\n                        "projection_event": self.call_count,\n                        "layer_name": layer_name,'''
+          new_observed = '''                safe_name = safe_name_by_live[layer_name]\n                observed = _match_weightwatcher_row(details, safe_name)\n                rows.append(\n                    {\n                        "optimizer_step": optimizer_step,\n                        "tokens_seen": tokens_seen,\n                        "projection_event": self.call_count,\n                        "candidate_epoch": max(0, optimizer_step - 1),\n                        "candidate_num_epochs": max(total_optimizer_steps, 1),\n                        "candidate_analyzed_matrix_count": len(details),\n                        "layer_name": layer_name,'''
+          assert old_observed in text
+          text = text.replace(old_observed, new_observed, 1)
+
+          path.write_text(text, encoding='utf-8')
+
+          test_path = Path('level_0_wwpgd/tests/test_wwpgd_experiment.py')
+          tests = test_path.read_text(encoding='utf-8')
+          tests = tests.replace(
+              '''    assert extension.call_count == 1\n    assert torch.equal(model.token_embedding.weight, protected_before["token_embedding"])''',
+              '''    assert extension.call_count == 1\n    assert {row["candidate_epoch"] for row in rows} == {0}\n    assert {row["candidate_num_epochs"] for row in rows} == {2}\n    assert {row["candidate_analyzed_matrix_count"] for row in rows} == {6}\n    assert torch.equal(model.token_embedding.weight, protected_before["token_embedding"])''',
+              1,
+          )
+          parity_test = '''\n\ndef test_same_seed_initialization_matches_baseline():\n    from level0_baseline.model import GPT as BaselineGPT\n    from level0_baseline.model import GPTConfig as BaselineGPTConfig\n\n    kwargs = dict(vocab_size=256, block_size=8, n_layer=2, n_head=1, n_embd=64)\n    torch.manual_seed(12345)\n    baseline = BaselineGPT(BaselineGPTConfig(**kwargs))\n    torch.manual_seed(12345)\n    intervention = GPT(GPTConfig(**kwargs))\n    assert baseline.state_dict().keys() == intervention.state_dict().keys()\n    for name, value in baseline.state_dict().items():\n        assert torch.equal(value, intervention.state_dict()[name]), name\n'''
+          assert 'def test_same_seed_initialization_matches_baseline' not in tests
+          tests += parity_test
+          test_path.write_text(tests, encoding='utf-8')
+          PY
+
+      - name: Validate patch
+        shell: bash
+        env:
+          MPLBACKEND: Agg
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install --no-deps -e level_0_baseline -e level_0_wwpgd
+          python -m pip install pytest ruff
+          python -m compileall -q level_0_wwpgd/src level_0_wwpgd/tests
+          ruff check level_0_wwpgd/src level_0_wwpgd/tests
+          pytest -q level_0_wwpgd/tests
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add level_0_wwpgd/src/level0_wwpgd/wwpgd_extension.py level_0_wwpgd/tests/test_wwpgd_experiment.py
+          git diff --cached --check
+          git commit -m 'Restrict isolated WWPGD candidates to projected matrices'
+          git push origin HEAD:agent/add-isolated-level0-wwpgd
