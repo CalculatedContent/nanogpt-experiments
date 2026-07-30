@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import csv
 import math
 import random
@@ -22,6 +21,9 @@ PROJECTION_FIELDS = [
     "optimizer_step",
     "tokens_seen",
     "projection_event",
+    "candidate_epoch",
+    "candidate_num_epochs",
+    "candidate_analyzed_matrix_count",
     "layer_name",
     "matrix_type",
     "block",
@@ -70,6 +72,29 @@ def _module_by_name(model: nn.Module, name: str) -> nn.Module | None:
         else:
             return None
     return current if hasattr(current, "weight") else None
+
+
+class _ProjectedMatrixHolder(nn.Module):
+    """CPU-only model exposing exactly the matrices eligible for WWPGD."""
+
+    def __init__(self, model: GPT):
+        super().__init__()
+        self.safe_to_live: dict[str, str] = {}
+        for live_name, matrix_type, block, live_module in projected_modules(model):
+            safe_name = f"L{block:02d}_{matrix_type}"
+            if safe_name in self.safe_to_live:
+                raise RuntimeError(f"duplicate projected matrix name: {safe_name}")
+            layer = nn.Linear(
+                live_module.weight.shape[1],
+                live_module.weight.shape[0],
+                bias=False,
+            )
+            layer.weight = nn.Parameter(
+                live_module.weight.detach().float().cpu().clone(),
+                requires_grad=False,
+            )
+            self.add_module(safe_name, layer)
+            self.safe_to_live[safe_name] = live_name
 
 
 @contextmanager
@@ -196,19 +221,15 @@ class WWPGDExtension:
                 "wwpgd_apply_mode": "event_projection",
                 "wwpgd_interval": int(self.config["interval"]),
                 "wwpgd_scope": "transformer_block_matrices_only",
+                "wwpgd_candidate_scope": "selected_transformer_matrix_holder_only",
                 "wwpgd_candidate_device": "cpu",
             }
         )
         return fields
 
-    def _cpu_candidate_model(self) -> GPT:
+    def _cpu_candidate_holder(self) -> _ProjectedMatrixHolder:
         with preserve_global_rng():
-            clone = GPT(copy.deepcopy(self.model.cfg)).to(torch.device("cpu"))
-        clone.load_state_dict(
-            {name: value.detach().cpu() for name, value in self.model.state_dict().items()}
-        )
-        clone.train(self.model.training)
-        return clone
+            return _ProjectedMatrixHolder(self.model)
 
     def after_optimizer_step(
         self,
@@ -229,9 +250,8 @@ class WWPGDExtension:
             run_candidate,
         ) = self._adapter()
         resolved = self.resolved_config()
-        candidate_model = self._cpu_candidate_model()
-        selected = projected_modules(candidate_model)
-        selected_names = {name for name, _, _, _ in selected}
+        candidate_holder = self._cpu_candidate_holder()
+        selected_names = set(candidate_holder.safe_to_live)
 
         def selector(mm: nn.Module, layer_name: str, row: object | None = None):
             del row
@@ -250,10 +270,10 @@ class WWPGDExtension:
         started = time.perf_counter()
         with preserve_global_rng(), torch.no_grad():
             result = run_candidate(
-                candidate_model,
+                candidate_holder,
                 external_config_object(external_module(), resolved),
-                epoch=self.call_count,
-                num_epochs=max(self.call_count + 1, 1),
+                epoch=max(0, optimizer_step - 1),
+                num_epochs=max(total_optimizer_steps, 1),
                 global_step=optimizer_step,
                 layer_selector=selector,
             )
@@ -272,9 +292,13 @@ class WWPGDExtension:
         details = usable_logs[0]
 
         live = {name: module for name, _, _, module in projected_modules(self.model)}
+        safe_name_by_live = {
+            live_name: safe_name
+            for safe_name, live_name in candidate_holder.safe_to_live.items()
+        }
         candidates = {
-            name: module.weight.detach().cpu().clone()
-            for name, _, _, module in projected_modules(candidate_model)
+            live_name: getattr(candidate_holder, safe_name).weight.detach().cpu().clone()
+            for safe_name, live_name in candidate_holder.safe_to_live.items()
         }
         rows: list[dict[str, Any]] = []
         limit = self.config.get("max_relative_frobenius_change")
@@ -303,12 +327,16 @@ class WWPGDExtension:
                     (live_module.weight.detach() - original).float().norm()
                     / denominator
                 )
-                observed = _match_weightwatcher_row(details, layer_name)
+                safe_name = safe_name_by_live[layer_name]
+                observed = _match_weightwatcher_row(details, safe_name)
                 rows.append(
                     {
                         "optimizer_step": optimizer_step,
                         "tokens_seen": tokens_seen,
                         "projection_event": self.call_count,
+                        "candidate_epoch": max(0, optimizer_step - 1),
+                        "candidate_num_epochs": max(total_optimizer_steps, 1),
+                        "candidate_analyzed_matrix_count": len(details),
                         "layer_name": layer_name,
                         "matrix_type": matrix_type,
                         "block": block,

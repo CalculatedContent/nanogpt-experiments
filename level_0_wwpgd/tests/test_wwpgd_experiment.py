@@ -100,7 +100,24 @@ def test_real_stock_wwpgd_one_event_changes_only_block_matrices():
     rows = extension.after_optimizer_step(optimizer_step=1, total_optimizer_steps=2, tokens_seen=512)
     assert len(rows) == 6
     assert extension.call_count == 1
+    assert {row["candidate_epoch"] for row in rows} == {0}
+    assert {row["candidate_num_epochs"] for row in rows} == {2}
+    assert {row["candidate_analyzed_matrix_count"] for row in rows} == {6}
     assert torch.equal(model.token_embedding.weight, protected_before["token_embedding"])
     assert torch.equal(model.position_embedding.weight, protected_before["position_embedding"])
     assert torch.equal(model.ln_f.weight, protected_before["ln_f"])
     assert {row["matrix_type"] for row in rows} == {"W_Q","W_K","W_V","W_O","W_MLP_IN","W_MLP_OUT"}
+
+
+def test_same_seed_initialization_matches_baseline():
+    from level0_baseline.model import GPT as BaselineGPT
+    from level0_baseline.model import GPTConfig as BaselineGPTConfig
+
+    kwargs = dict(vocab_size=256, block_size=8, n_layer=2, n_head=1, n_embd=64)
+    torch.manual_seed(12345)
+    baseline = BaselineGPT(BaselineGPTConfig(**kwargs))
+    torch.manual_seed(12345)
+    intervention = GPT(GPTConfig(**kwargs))
+    assert baseline.state_dict().keys() == intervention.state_dict().keys()
+    for name, value in baseline.state_dict().items():
+        assert torch.equal(value, intervention.state_dict()[name]), name
