@@ -74,21 +74,13 @@ jobs:
 
           tests = Path('level_0_wwpgd/tests/test_wwpgd_experiment.py')
           text = tests.read_text(encoding='utf-8')
-          for line in (
-              'sys.path.insert(0, str(REPO / "src"))\n',
-              'sys.path.insert(0, str(REPO / "level_0_baseline" / "src"))\n',
-              'sys.path.insert(0, str(REPO / "level_0_wwpgd" / "src"))\n',
-              'REPO = Path(__file__).resolve().parents[2]\n\n',
+          for statement in (
+              'from level0_wwpgd.config import load_config',
+              'from level0_wwpgd.model import GPT, GPTConfig',
+              'from level0_wwpgd.train import main as train_main',
+              'from level0_wwpgd.wwpgd_extension import WWPGDExtension, projected_modules',
           ):
-              text = text.replace(line, '')
-          import_marker = (
-              'from level0_wwpgd.wwpgd_extension import '
-              'WWPGDExtension, projected_modules\n'
-          )
-          text = text.replace(
-              import_marker,
-              import_marker + '\nREPO = Path(__file__).resolve().parents[2]\n',
-          )
+              text = text.replace(statement, statement + '  # noqa: E402')
           tests.write_text(text, encoding='utf-8')
           PY
 
@@ -121,7 +113,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f .level0_wwpgd_builder.b64 .github/workflows/build-level0-wwpgd.yml
+          rm -f .level0_wwpgd_builder.b64
+          git checkout origin/main -- .github/workflows/ci.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
