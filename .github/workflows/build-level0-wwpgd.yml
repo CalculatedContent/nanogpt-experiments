@@ -78,8 +78,17 @@ jobs:
               'sys.path.insert(0, str(REPO / "src"))\n',
               'sys.path.insert(0, str(REPO / "level_0_baseline" / "src"))\n',
               'sys.path.insert(0, str(REPO / "level_0_wwpgd" / "src"))\n',
+              'REPO = Path(__file__).resolve().parents[2]\n\n',
           ):
               text = text.replace(line, '')
+          import_marker = (
+              'from level0_wwpgd.wwpgd_extension import '
+              'WWPGDExtension, projected_modules\n'
+          )
+          text = text.replace(
+              import_marker,
+              import_marker + '\nREPO = Path(__file__).resolve().parents[2]\n',
+          )
           tests.write_text(text, encoding='utf-8')
           PY
 
