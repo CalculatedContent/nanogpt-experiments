@@ -1,0 +1,67 @@
+name: Build isolated Level 0 WWPGD experiment
+
+on:
+  push:
+    branches:
+      - agent/add-isolated-level0-wwpgd
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/add-isolated-level0-wwpgd
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate sibling experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .level0_wwpgd_builder.b64 | gzip -dc > /tmp/build_level0_wwpgd.py
+          python /tmp/build_level0_wwpgd.py
+
+      - name: Install and validate generated experiment
+        shell: bash
+        env:
+          MPLBACKEND: Agg
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install --no-deps -e level_0_baseline -e level_0_wwpgd
+          python -m pip install pytest ruff
+          python -m compileall -q level_0_wwpgd/src level_0_wwpgd/tests
+          ruff check level_0_wwpgd/src level_0_wwpgd/tests
+          bash -n level_0_wwpgd/scripts/*.sh
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          notebooks = sorted(Path('level_0_wwpgd/notebooks').glob('*.ipynb'))
+          assert notebooks, 'no notebooks generated'
+          for path in notebooks:
+              json.loads(path.read_text(encoding='utf-8'))
+          print(f'validated {len(notebooks)} notebooks')
+          PY
+          pytest -q level_0_wwpgd/tests
+
+      - name: Commit generated experiment
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .level0_wwpgd_builder.b64 .github/workflows/build-level0-wwpgd.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git diff --cached --check
+          git commit -m 'Add isolated Level 0 WWPGD experiment'
+          git push origin HEAD:agent/add-isolated-level0-wwpgd
