@@ -50,4 +50,5 @@ wwpgd:
   use_detx: true
   candidate_device: cpu
   max_relative_frobenius_change: null
+  max_consecutive_failures: 5
   log_interval: 10
