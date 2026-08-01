@@ -4,10 +4,10 @@ import csv
 import math
 import random
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -21,6 +21,10 @@ PROJECTION_FIELDS = [
     "optimizer_step",
     "tokens_seen",
     "projection_event",
+    "projection_status",
+    "error_type",
+    "error_message",
+    "consecutive_failures",
     "candidate_epoch",
     "candidate_num_epochs",
     "candidate_analyzed_matrix_count",
@@ -45,18 +49,54 @@ PROJECTION_FIELDS = [
     "projection_runtime_seconds",
 ]
 
+_TORCH_LINALG_ERRORS = tuple(
+    error_type
+    for error_type in (getattr(torch._C, "_LinAlgError", None),)
+    if isinstance(error_type, type)
+)
+
 
 def projected_modules(model: GPT) -> list[tuple[str, str, int, nn.Linear]]:
     result: list[tuple[str, str, int, nn.Linear]] = []
     for block_index, block in enumerate(model.blocks):
         result.extend(
             [
-                (f"blocks.{block_index}.attn.q_proj", "W_Q", block_index, block.attn.q_proj),
-                (f"blocks.{block_index}.attn.k_proj", "W_K", block_index, block.attn.k_proj),
-                (f"blocks.{block_index}.attn.v_proj", "W_V", block_index, block.attn.v_proj),
-                (f"blocks.{block_index}.attn.out_proj", "W_O", block_index, block.attn.out_proj),
-                (f"blocks.{block_index}.mlp.fc", "W_MLP_IN", block_index, block.mlp.fc),
-                (f"blocks.{block_index}.mlp.proj", "W_MLP_OUT", block_index, block.mlp.proj),
+                (
+                    f"blocks.{block_index}.attn.q_proj",
+                    "W_Q",
+                    block_index,
+                    block.attn.q_proj,
+                ),
+                (
+                    f"blocks.{block_index}.attn.k_proj",
+                    "W_K",
+                    block_index,
+                    block.attn.k_proj,
+                ),
+                (
+                    f"blocks.{block_index}.attn.v_proj",
+                    "W_V",
+                    block_index,
+                    block.attn.v_proj,
+                ),
+                (
+                    f"blocks.{block_index}.attn.out_proj",
+                    "W_O",
+                    block_index,
+                    block.attn.out_proj,
+                ),
+                (
+                    f"blocks.{block_index}.mlp.fc",
+                    "W_MLP_IN",
+                    block_index,
+                    block.mlp.fc,
+                ),
+                (
+                    f"blocks.{block_index}.mlp.proj",
+                    "W_MLP_OUT",
+                    block_index,
+                    block.mlp.proj,
+                ),
             ]
         )
     return result
@@ -126,10 +166,34 @@ def _match_weightwatcher_row(frame: pd.DataFrame, layer_name: str) -> dict[str, 
     if frame is None or frame.empty:
         return {}
     for _, row in frame.iterrows():
-        text = " ".join(str(row.get(column, "")) for column in ("longname", "name"))
+        text = " ".join(
+            str(row.get(column, "")) for column in ("longname", "name")
+        )
         if layer_name == text or layer_name in text or text.endswith(layer_name):
             return row.to_dict()
     return {}
+
+
+def _is_retryable_projection_error(exc: BaseException) -> bool:
+    """Return true only for numerical linear-algebra projection failures."""
+
+    if isinstance(exc, np.linalg.LinAlgError):
+        return True
+    if _TORCH_LINALG_ERRORS and isinstance(exc, _TORCH_LINALG_ERRORS):
+        return True
+
+    message = f"{type(exc).__name__}: {exc}".lower()
+    numerical_markers = (
+        "linalg",
+        "svd",
+        "singular value",
+        "failed to converge",
+        "ill-conditioned",
+        "ill conditioned",
+    )
+    return isinstance(exc, RuntimeError) and any(
+        marker in message for marker in numerical_markers
+    )
 
 
 def append_projection_rows(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -138,7 +202,11 @@ def append_projection_rows(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     exists = path.exists() and path.stat().st_size > 0
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=PROJECTION_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=PROJECTION_FIELDS,
+            extrasaction="ignore",
+        )
         if not exists:
             writer.writeheader()
         for row in rows:
@@ -152,8 +220,17 @@ class WWPGDExtension:
         self.model = model
         self.config = dict(config)
         self.call_count = 0
+        self.successful_call_count = 0
+        self.failed_call_count = 0
+        self.consecutive_failure_count = 0
+        self.max_observed_consecutive_failures = 0
         self.projected_matrix_count = 0
         self.runtime_seconds = 0.0
+        self.max_consecutive_failures = int(
+            self.config.get("max_consecutive_failures", 5)
+        )
+        if self.max_consecutive_failures < 1:
+            raise ValueError("max_consecutive_failures must be positive")
         self._resolved_config = None
 
     def _adapter(self):
@@ -223,6 +300,8 @@ class WWPGDExtension:
                 "wwpgd_scope": "transformer_block_matrices_only",
                 "wwpgd_candidate_scope": "selected_transformer_matrix_holder_only",
                 "wwpgd_candidate_device": "cpu",
+                "wwpgd_retry_policy": "skip_retryable_event_and_retry_next_step",
+                "wwpgd_max_consecutive_failures": self.max_consecutive_failures,
             }
         )
         return fields
@@ -230,6 +309,48 @@ class WWPGDExtension:
     def _cpu_candidate_holder(self) -> _ProjectedMatrixHolder:
         with preserve_global_rng():
             return _ProjectedMatrixHolder(self.model)
+
+    def _failure_row(
+        self,
+        *,
+        optimizer_step: int,
+        total_optimizer_steps: int,
+        tokens_seen: int,
+        event_index: int,
+        runtime: float,
+        exc: BaseException,
+    ) -> dict[str, Any]:
+        return {
+            "optimizer_step": optimizer_step,
+            "tokens_seen": tokens_seen,
+            "projection_event": event_index,
+            "projection_status": "skipped_retryable_error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc).replace("\n", " "),
+            "consecutive_failures": self.consecutive_failure_count,
+            "candidate_epoch": max(0, optimizer_step - 1),
+            "candidate_num_epochs": max(total_optimizer_steps, 1),
+            "candidate_analyzed_matrix_count": 0,
+            "layer_name": None,
+            "matrix_type": None,
+            "block": None,
+            "alpha_before": None,
+            "D": None,
+            "xmin": None,
+            "num_evals": None,
+            "target_alpha": self.config["target_alpha"],
+            "blend_eta": self.config["blend_eta"],
+            "cayley_eta": self.config["cayley_eta"],
+            "min_tail": self.config["min_tail"],
+            "use_detx": self.config["use_detx"],
+            "candidate_device": "cpu",
+            "candidate_relative_frobenius_change": None,
+            "relative_frobenius_change_requested": None,
+            "relative_frobenius_change_applied": 0.0,
+            "trust_region_scale": None,
+            "changed": False,
+            "projection_runtime_seconds": runtime,
+        }
 
     def after_optimizer_step(
         self,
@@ -267,17 +388,59 @@ class WWPGDExtension:
             )
             return _module_by_name(mm, match) if match is not None else None
 
+        event_index = self.call_count
+        self.call_count += 1
         started = time.perf_counter()
-        with preserve_global_rng(), torch.no_grad():
-            result = run_candidate(
-                candidate_holder,
-                external_config_object(external_module(), resolved),
-                epoch=max(0, optimizer_step - 1),
-                num_epochs=max(total_optimizer_steps, 1),
-                global_step=optimizer_step,
-                layer_selector=selector,
+        try:
+            with preserve_global_rng(), torch.no_grad():
+                result = run_candidate(
+                    candidate_holder,
+                    external_config_object(external_module(), resolved),
+                    epoch=max(0, optimizer_step - 1),
+                    num_epochs=max(total_optimizer_steps, 1),
+                    global_step=optimizer_step,
+                    layer_selector=selector,
+                )
+        except Exception as exc:
+            runtime = time.perf_counter() - started
+            self.runtime_seconds += runtime
+            if not _is_retryable_projection_error(exc):
+                raise
+
+            self.failed_call_count += 1
+            self.consecutive_failure_count += 1
+            self.max_observed_consecutive_failures = max(
+                self.max_observed_consecutive_failures,
+                self.consecutive_failure_count,
             )
+            print(
+                "[level0-wwpgd] "
+                f"step={optimizer_step}/{total_optimizer_steps} "
+                f"event={event_index} projection_skipped=true "
+                f"error_type={type(exc).__name__} "
+                f"consecutive_failures={self.consecutive_failure_count}/"
+                f"{self.max_consecutive_failures}; retrying next scheduled step",
+                flush=True,
+            )
+            if self.consecutive_failure_count >= self.max_consecutive_failures:
+                raise RuntimeError(
+                    "WWPGD stopped after "
+                    f"{self.consecutive_failure_count} consecutive numerical projection "
+                    f"failures; latest failure at optimizer step {optimizer_step}: {exc}"
+                ) from exc
+            return [
+                self._failure_row(
+                    optimizer_step=optimizer_step,
+                    total_optimizer_steps=total_optimizer_steps,
+                    tokens_seen=tokens_seen,
+                    event_index=event_index,
+                    runtime=runtime,
+                    exc=exc,
+                )
+            ]
+
         runtime = time.perf_counter() - started
+        self.runtime_seconds += runtime
         result = result if isinstance(result, dict) else {}
         usable_logs = [
             item
@@ -291,7 +454,10 @@ class WWPGDExtension:
             )
         details = usable_logs[0]
 
-        live = {name: module for name, _, _, module in projected_modules(self.model)}
+        live = {
+            name: module
+            for name, _, _, module in projected_modules(self.model)
+        }
         safe_name_by_live = {
             live_name: safe_name
             for safe_name, live_name in candidate_holder.safe_to_live.items()
@@ -304,10 +470,13 @@ class WWPGDExtension:
         limit = self.config.get("max_relative_frobenius_change")
 
         with torch.no_grad():
-            for layer_name, matrix_type, block, live_module in projected_modules(self.model):
+            for layer_name, matrix_type, block, live_module in projected_modules(
+                self.model
+            ):
                 original = live_module.weight.detach().clone()
                 candidate = candidates[layer_name].to(
-                    original.device, dtype=original.dtype
+                    original.device,
+                    dtype=original.dtype,
                 )
                 requested_delta = candidate - original
                 denominator = max(float(original.float().norm()), 1e-12)
@@ -333,7 +502,11 @@ class WWPGDExtension:
                     {
                         "optimizer_step": optimizer_step,
                         "tokens_seen": tokens_seen,
-                        "projection_event": self.call_count,
+                        "projection_event": event_index,
+                        "projection_status": "projected",
+                        "error_type": None,
+                        "error_message": None,
+                        "consecutive_failures": 0,
                         "candidate_epoch": max(0, optimizer_step - 1),
                         "candidate_num_epochs": max(total_optimizer_steps, 1),
                         "candidate_analyzed_matrix_count": len(details),
@@ -359,21 +532,23 @@ class WWPGDExtension:
                     }
                 )
 
-        self.call_count += 1
+        self.successful_call_count += 1
+        self.consecutive_failure_count = 0
         self.projected_matrix_count += sum(bool(row["changed"]) for row in rows)
-        self.runtime_seconds += runtime
         if (
             self.call_count == 1
             or optimizer_step % int(self.config.get("log_interval", 10)) == 0
             or optimizer_step == total_optimizer_steps
         ):
             mean_change = float(
-                np.mean([row["relative_frobenius_change_applied"] for row in rows])
+                np.mean(
+                    [row["relative_frobenius_change_applied"] for row in rows]
+                )
             )
             print(
                 "[level0-wwpgd] "
                 f"step={optimizer_step}/{total_optimizer_steps} "
-                f"event={self.call_count - 1} matrices={len(rows)} "
+                f"event={event_index} matrices={len(rows)} "
                 f"mean_relative_change={mean_change:.3e} runtime_s={runtime:.2f}",
                 flush=True,
             )

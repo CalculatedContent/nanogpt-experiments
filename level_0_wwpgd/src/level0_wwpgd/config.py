@@ -58,15 +58,40 @@ def load_config(path: str | Path) -> dict[str, Any]:
             "eval_interval",
             int,
         ),
-        "NANOGPT_LEVEL0_WWPGD_WW_INTERVAL": ("analysis", "weightwatcher_interval", int),
-        "NANOGPT_LEVEL0_WWPGD_PROJECTION_INTERVAL": ("wwpgd", "interval", int),
-        "NANOGPT_LEVEL0_WWPGD_TARGET_ALPHA": ("wwpgd", "target_alpha", float),
-        "NANOGPT_LEVEL0_WWPGD_BLEND_ETA": ("wwpgd", "blend_eta", float),
-        "NANOGPT_LEVEL0_WWPGD_CAYLEY_ETA": ("wwpgd", "cayley_eta", float),
+        "NANOGPT_LEVEL0_WWPGD_WW_INTERVAL": (
+            "analysis",
+            "weightwatcher_interval",
+            int,
+        ),
+        "NANOGPT_LEVEL0_WWPGD_PROJECTION_INTERVAL": (
+            "wwpgd",
+            "interval",
+            int,
+        ),
+        "NANOGPT_LEVEL0_WWPGD_TARGET_ALPHA": (
+            "wwpgd",
+            "target_alpha",
+            float,
+        ),
+        "NANOGPT_LEVEL0_WWPGD_BLEND_ETA": (
+            "wwpgd",
+            "blend_eta",
+            float,
+        ),
+        "NANOGPT_LEVEL0_WWPGD_CAYLEY_ETA": (
+            "wwpgd",
+            "cayley_eta",
+            float,
+        ),
         "NANOGPT_LEVEL0_WWPGD_MAX_RELATIVE_CHANGE": (
             "wwpgd",
             "max_relative_frobenius_change",
             float,
+        ),
+        "NANOGPT_LEVEL0_WWPGD_MAX_CONSECUTIVE_FAILURES": (
+            "wwpgd",
+            "max_consecutive_failures",
+            int,
         ),
     }
     for name, (section, key, cast) in env_map.items():
@@ -127,9 +152,13 @@ def validate_config(cfg: dict[str, Any]) -> None:
     if int(wwpgd["min_tail"]) < 1:
         raise ValueError("wwpgd.min_tail must be positive")
     if str(wwpgd["candidate_device"]).lower() != "cpu":
-        raise ValueError("this isolated MPS-safe experiment requires candidate_device=cpu")
+        raise ValueError(
+            "this isolated MPS-safe experiment requires candidate_device=cpu"
+        )
     limit = wwpgd.get("max_relative_frobenius_change")
     if limit is not None and float(limit) <= 0:
         raise ValueError("wwpgd.max_relative_frobenius_change must be positive")
     if int(wwpgd.get("log_interval", 1)) < 1:
         raise ValueError("wwpgd.log_interval must be positive")
+    if int(wwpgd.get("max_consecutive_failures", 5)) < 1:
+        raise ValueError("wwpgd.max_consecutive_failures must be positive")
