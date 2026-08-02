@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanogpt-experiment-2"
+version = "0.1.0"
+description = "Reference-guided, per-layer adaptive WWPGD experiments at two nanoGPT scales"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "matplotlib>=3.7",
+  "pyyaml>=6.0",
+  "weightwatcher>=0.7.5",
+  "ww-pgd @ git+https://github.com/CalculatedContent/WW_PGD.git",
+]
+
+[project.optional-dependencies]
+data = ["datasets>=2.19", "tiktoken>=0.7"]
+analysis = ["jupyter>=1.0", "nbformat>=5.9"]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+experiment2-train = "experiment_2.train:main"
+experiment2-status = "experiment_2.status:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

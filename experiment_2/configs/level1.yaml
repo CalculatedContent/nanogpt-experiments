@@ -1,0 +1,73 @@
+experiment:
+  name: experiment_2
+  scale: level1
+
+model:
+  vocab_size: 50257
+  block_size: 512
+  n_layer: 8
+  n_head: 8
+  n_embd: 512
+  dropout: 0.0
+  bias: false
+  tie_weights: true
+
+training:
+  batch_size: 2
+  grad_accum_steps: 8
+  max_steps: 10000
+  eval_interval: 100
+  eval_batches: 20
+  checkpoint_interval: 500
+  learning_rate: 0.0003
+  min_lr: 0.00003
+  warmup_steps: 200
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  epsilon: 1.0e-8
+  grad_clip: 1.0
+  seed: 1337
+
+analysis:
+  weightwatcher: true
+  weightwatcher_interval: 200
+  randomize: false
+  include_embeddings: false
+  include_output_head: false
+
+wwpgd:
+  enabled: true
+  extension: wwpgd
+  apply_mode: event_projection
+  target_alpha: 2.0
+  blend_eta: 0.5
+  cayley_eta: 0.25
+  min_tail: 5
+  use_detx: true
+  candidate_device: cpu
+  max_relative_frobenius_change: 0.0001
+  max_consecutive_failures: 5
+
+controller:
+  target_alpha: 2.0
+  enter_tolerance: 0.30
+  exit_tolerance: 0.10
+  start_step: 200
+  control_interval: 200
+  projection_interval: 10
+  max_active_layers: 6
+  max_projection_to_adamw_ratio: 0.50
+  min_alignment_cosine: -0.10
+  min_candidate_alpha_improvement: 0.01
+  probe_batches: 1
+  max_probe_loss_increase: 0.002
+  credit_ema_beta: 0.80
+  layer_harm_margin: 0.005
+  layer_harm_patience: 2
+  layer_cooldown_steps: 800
+  global_loss_gap_margin: 0.03
+  global_loss_gap_patience: 2
+  global_pause_steps: 800
+  recovery_gap_margin: 0.01
+  require_baseline_reference: true
