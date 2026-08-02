@@ -25,21 +25,33 @@ case "$ARM" in adamw|adaptive_wwpgd) ;; *) echo "usage: bash run_one.sh {level0|
 CONFIG="$EXPERIMENT_ROOT/configs/${SCALE}.yaml"
 if [[ "$ARM" == "adamw" ]]; then
   RESULTS_ROOT="$PAIR_ROOT/baseline/results"
-  BASELINE_ARGS=()
 else
   RESULTS_ROOT="$PAIR_ROOT/adaptive/results"
   BASELINE_RUN="$PAIR_ROOT/baseline/results/adamw_seed_${SEED}"
   [[ -f "$BASELINE_RUN/run_complete.json" ]] || { echo "matching baseline must complete first: $BASELINE_RUN" >&2; exit 1; }
-  BASELINE_ARGS=(--baseline-run "$BASELINE_RUN")
 fi
 mkdir -p "$RESULTS_ROOT"
 
 export PYTHONPATH="$REPO_ROOT/src:$EXPERIMENT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
-python -m experiment_2.train \
-  --config "$CONFIG" \
-  --arm "$ARM" \
-  --seed "$SEED" \
-  --device "$DEVICE" \
-  --data-root "$DATA_ROOT" \
-  --results-root "$RESULTS_ROOT" \
-  "${BASELINE_ARGS[@]}"
+
+# macOS ships Bash 3.2. Under `set -u`, expanding an initialized-but-empty
+# array can still raise "unbound variable". Keep the baseline and adaptive
+# invocations explicit instead of appending an optional empty array.
+if [[ "$ARM" == "adamw" ]]; then
+  python -m experiment_2.train \
+    --config "$CONFIG" \
+    --arm "$ARM" \
+    --seed "$SEED" \
+    --device "$DEVICE" \
+    --data-root "$DATA_ROOT" \
+    --results-root "$RESULTS_ROOT"
+else
+  python -m experiment_2.train \
+    --config "$CONFIG" \
+    --arm "$ARM" \
+    --seed "$SEED" \
+    --device "$DEVICE" \
+    --data-root "$DATA_ROOT" \
+    --results-root "$RESULTS_ROOT" \
+    --baseline-run "$BASELINE_RUN"
+fi
