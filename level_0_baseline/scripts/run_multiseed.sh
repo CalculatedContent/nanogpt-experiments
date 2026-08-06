@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 
 if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-  printf '%s\n' \
-    "error: execute this script with 'bash ${BASH_SOURCE[0]}'; do not source it" \
-    >&2
+  printf '%s\n' "error: run this script with bash; do not source it" >&2
   return 2
 fi
-
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EXPERIMENT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+ROOT="${NANOGPT_LEVEL0_ROOT:-/tmp/nanogpt-level0-baselines}"
+OPTIMIZER="${1:-adamw}"
 SEEDS="${NANOGPT_LEVEL0_SEEDS:-1337,2027,4099}"
-OPTIMIZERS="${NANOGPT_LEVEL0_OPTIMIZERS:-adamw}"
+PYTHON_BIN="${NANOGPT_LEVEL0_PYTHON:-python}"
 
-IFS=',' read -r -a OPTIMIZER_ARRAY <<< "$OPTIMIZERS"
-IFS=',' read -r -a SEED_ARRAY <<< "$SEEDS"
+export PYTHONPATH="$EXPERIMENT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
-for optimizer in "${OPTIMIZER_ARRAY[@]}"; do
-  for seed in "${SEED_ARRAY[@]}"; do
-    bash "$SCRIPT_DIR/run_one.sh" "$optimizer" "$seed"
-  done
-done
+"$PYTHON_BIN" -m level0_baseline.runner \
+  --config "$EXPERIMENT_ROOT/configs/level0.yaml" \
+  --data-root "${NANOGPT_LEVEL0_DATA_ROOT:-$ROOT/data}" \
+  --results-root "${NANOGPT_LEVEL0_RESULTS_ROOT:-$ROOT/results}" \
+  --optimizers "$OPTIMIZER" \
+  --seeds "$SEEDS" \
+  --device "${NANOGPT_LEVEL0_DEVICE:-auto}"

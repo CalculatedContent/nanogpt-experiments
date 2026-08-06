@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanogpt-level0-baseline"
-version = "0.2.0"
-description = "Self-contained realistic FineWeb-Edu nanoGPT baseline for AdamW and Muon"
+version = "0.3.0"
+description = "Matched FineWeb-Edu nanoGPT baselines for SGD-momentum, AdamW, and Muon"
 requires-python = ">=3.10"
 dependencies = [
   "torch>=2.2",
@@ -17,12 +17,14 @@ dependencies = [
 
 [project.optional-dependencies]
 data = ["datasets>=2.19", "tiktoken>=0.7"]
-analysis = ["weightwatcher>=0.7.5", "jupyter>=1.0"]
-test = ["pytest>=8.0"]
+analysis = ["weightwatcher>=0.7.5", "jupyter>=1.0", "ipykernel>=6.29"]
+test = ["pytest>=8.0", "nbformat>=5.10"]
 
 [project.scripts]
 level0-prepare-data = "level0_baseline.data:main"
 level0-train = "level0_baseline.train:main"
+level0-run = "level0_baseline.runner:main"
+level0-generate = "level0_baseline.generate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

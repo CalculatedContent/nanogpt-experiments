@@ -76,9 +76,7 @@ class CausalSelfAttention(nn.Module):
             ).tril()
             scores = scores.masked_fill(~mask, float("-inf"))
             weights = F.softmax(scores, dim=-1)
-            weights = F.dropout(
-                weights, p=self.dropout, training=self.training
-            )
+            weights = F.dropout(weights, p=self.dropout, training=self.training)
             y = weights @ v
 
         y = y.transpose(1, 2).contiguous().view(
@@ -159,11 +157,40 @@ class GPT(nn.Module):
             )
         return logits, loss
 
+    @torch.inference_mode()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be nonnegative")
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -self.cfg.block_size :]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                k = min(int(top_k), logits.size(-1))
+                threshold = torch.topk(logits, k).values[:, [-1]]
+                logits = logits.masked_fill(logits < threshold, float("-inf"))
+            probabilities = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(
+                probabilities, num_samples=1, generator=generator
+            )
+            idx = torch.cat((idx, next_token), dim=1)
+        return idx
+
 
 def transformer_matrix_items(
     model: GPT,
 ) -> list[tuple[str, str, int, torch.Tensor]]:
-    """Return only block matrices suitable for WeightWatcher/WW-PGD studies."""
+    """Return block matrices used by WeightWatcher and optimizer diagnostics."""
     items: list[tuple[str, str, int, torch.Tensor]] = []
     for block_index, block in enumerate(model.blocks):
         matrices = (

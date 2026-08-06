@@ -1,3 +1,8 @@
+protocol:
+  name: level0_optimizer_baselines
+  version: 1
+  description: Matched nanoGPT optimizer baselines on the pinned FineWeb-Edu Level Zero corpus.
+
 model:
   vocab_size: 50257
   block_size: 256
@@ -7,31 +12,88 @@ model:
   dropout: 0.0
   bias: false
   tie_weights: true
+
 training:
+  seeds: [1337, 2027, 4099]
+  seed: 1337
+  optimizer: adamw
   batch_size: 4
   grad_accum_steps: 8
-  max_steps: 2000
-  eval_interval: 50
-  eval_batches: 20
-  checkpoint_interval: 250
-  learning_rate: 0.0006
-  min_lr: 0.00006
-  warmup_steps: 20
-  weight_decay: 0.1
-  beta1: 0.9
-  beta2: 0.95
-  epsilon: 1.0e-8
+  max_steps: 6104
+  target_train_epochs: 5.0
+  eval_interval: 100
+  eval_batches: 32
+  checkpoint_interval: 500
+  keep_periodic_checkpoints: false
   grad_clip: 1.0
-  optimizer: adamw
-  muon_learning_rate: 0.02
-  muon_aux_adamw_learning_rate: 0.0006
-  muon_momentum: 0.95
-  muon_nesterov: true
-  seed: 1337
   compile: false
+  matmul_precision: high
+  deterministic_algorithms: false
+  evaluate_test_during_training: false
+
+optimizer_profiles:
+  sgd_momentum:
+    display_name: SGD + Nesterov momentum
+    family: sgd
+    learning_rate: 0.05
+    min_lr: 0.005
+    warmup_fraction: 0.10
+    decay: cosine
+    momentum: 0.90
+    dampening: 0.0
+    nesterov: true
+    weight_decay: 0.01
+
+  adamw:
+    display_name: AdamW
+    family: adamw
+    learning_rate: 0.0006
+    min_lr: 0.00006
+    warmup_fraction: 0.01
+    decay: cosine
+    beta1: 0.90
+    beta2: 0.95
+    epsilon: 1.0e-8
+    weight_decay: 0.10
+
+  muon:
+    display_name: Muon + auxiliary AdamW
+    family: muon
+    hidden_learning_rate: 0.02
+    hidden_min_lr: 0.002
+    auxiliary_learning_rate: 0.0003
+    auxiliary_min_lr: 0.00003
+    warmup_fraction: 0.05
+    decay: cosine
+    momentum: 0.95
+    nesterov: true
+    newton_schulz_steps: 5
+    hidden_weight_decay: 0.01
+    auxiliary_weight_decay: 0.01
+    beta1: 0.90
+    beta2: 0.95
+    epsilon: 1.0e-8
+
 analysis:
   weightwatcher: true
-  weightwatcher_interval: 250
+  weightwatcher_interval: 300
+  weightwatcher_strict: true
+  ERG: true
   randomize: false
+  min_evals: 20
   include_embeddings: false
   include_output_head: false
+  bollinger_sigma: 2.0
+  confidence_level: 0.95
+
+runtime:
+  mps_fallback: true
+  empty_mps_cache_after_spectral_analysis: true
+
+sampling:
+  prompt: "The future of artificial intelligence"
+  num_samples: 3
+  max_new_tokens: 160
+  temperature: 0.8
+  top_k: 50
+  seed_offset: 9000

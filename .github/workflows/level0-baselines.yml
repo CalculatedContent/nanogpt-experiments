@@ -1,0 +1,57 @@
+name: Level Zero optimizer baselines
+
+on:
+  push:
+    paths:
+      - 'level_0_baseline/**'
+      - '.github/workflows/level0-baselines.yml'
+  pull_request:
+    paths:
+      - 'level_0_baseline/**'
+      - '.github/workflows/level0-baselines.yml'
+
+jobs:
+  portable-suite:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+          - os: macos-14
+            python: '3.10'
+    env:
+      MPLBACKEND: Agg
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Level Zero baseline package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-cache-dir -e 'level_0_baseline[test]'
+      - name: Compile Python and validate shell syntax
+        shell: bash
+        run: |
+          python -m compileall -q level_0_baseline/src level_0_baseline/tests
+          for script in level_0_baseline/scripts/*.sh; do bash -n "$script"; done
+      - name: Validate notebook code cells
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+          import nbformat
+
+          for path in sorted(Path('level_0_baseline/notebooks').glob('*.ipynb')):
+              notebook = nbformat.read(path, as_version=4)
+              nbformat.validate(notebook)
+              for index, cell in enumerate(notebook.cells):
+                  if cell.cell_type == 'code':
+                      ast.parse(cell.source, filename=f'{path}:cell{index}')
+          PY
+      - name: Run bounded baseline tests
+        run: pytest -q level_0_baseline/tests
