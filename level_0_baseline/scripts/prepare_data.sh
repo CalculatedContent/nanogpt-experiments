@@ -10,7 +10,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ROOT="${NANOGPT_LEVEL0_ROOT:-/tmp/nanogpt-level0-baselines}"
 DATA_ROOT="${NANOGPT_LEVEL0_DATA_ROOT:-$ROOT/data}"
-PYTHON_BIN="${NANOGPT_LEVEL0_PYTHON:-python}"
+DEFAULT_PYTHON="$EXPERIMENT_ROOT/.venv-level0/bin/python"
+if [[ ! -x "$DEFAULT_PYTHON" ]]; then
+  DEFAULT_PYTHON="python3"
+fi
+PYTHON_BIN="${NANOGPT_LEVEL0_PYTHON:-$DEFAULT_PYTHON}"
 
 if [[ -f "$DATA_ROOT/meta.json" && -f "$DATA_ROOT/train.bin" && \
       -f "$DATA_ROOT/val.bin" && -f "$DATA_ROOT/test.bin" ]]; then

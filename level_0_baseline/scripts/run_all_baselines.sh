@@ -9,7 +9,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 EXPERIMENT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ROOT="${NANOGPT_LEVEL0_ROOT:-/tmp/nanogpt-level0-baselines}"
-PYTHON_BIN="${NANOGPT_LEVEL0_PYTHON:-python}"
+DEFAULT_PYTHON="$EXPERIMENT_ROOT/.venv-level0/bin/python"
+if [[ ! -x "$DEFAULT_PYTHON" ]]; then
+  DEFAULT_PYTHON="python3"
+fi
+PYTHON_BIN="${NANOGPT_LEVEL0_PYTHON:-$DEFAULT_PYTHON}"
 
 export PYTHONPATH="$EXPERIMENT_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
