@@ -69,7 +69,7 @@ From the repository root:
 bash level_0_baseline/scripts/setup_mac.sh
 ```
 
-This creates `level_0_baseline/.venv-level0`, installs data/analysis/test dependencies, registers a Jupyter kernel, and reports whether PyTorch can see MPS. The scientific runs remain float32 and leave `torch.compile` disabled by default for MPS reliability.
+This creates `level_0_baseline/.venv-level0`, installs data/analysis/test dependencies, registers a Jupyter kernel, and reports whether PyTorch can see MPS. All Level Zero shell scripts automatically use that environment when it exists, so manual activation is not required; set `NANOGPT_LEVEL0_PYTHON` to override it. The scientific runs remain float32 and leave `torch.compile` disabled by default for MPS reliability.
 
 A Conda specification is also provided:
 

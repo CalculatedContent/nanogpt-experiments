@@ -33,4 +33,4 @@ PY
 
 printf '\nSetup complete. Use:\n'
 printf '  %s/bin/python -m level0_baseline.runner --help\n' "$VENV_ROOT"
-printf '  %s/bin/jupyter lab notebooks/04_compare_baselines.ipynb\n' "$VENV_ROOT"
+printf '  %s/bin/jupyter lab %s/notebooks/04_compare_baselines.ipynb\n' "$VENV_ROOT" "$EXPERIMENT_ROOT"
