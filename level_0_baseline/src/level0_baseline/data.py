@@ -67,7 +67,7 @@ def _progress_message(
 
 
 class _ProgressReporter:
-    """Emit a heartbeat even when the remote streaming iterator is blocked."""
+    """Emit a heartbeat even when a remote streaming iterator is blocked."""
 
     def __init__(self, required_tokens: int, interval_seconds: float):
         self.required_tokens = int(required_tokens)
@@ -186,17 +186,17 @@ def write_token_splits(
             documents += 1
             source_utf8_bytes += len(text.encode("utf-8", errors="replace"))
             encoded = _encode_document(text, encoder)
-            split = split_names[split_index]
-            remaining = targets[split] - written[split]
+            split_name = split_names[split_index]
+            remaining = targets[split_name] - written[split_name]
             take = min(remaining, len(encoded))
             if take > 0:
-                encoded[:take].tofile(handles[split])
-                written[split] += take
+                encoded[:take].tofile(handles[split_name])
+                written[split_name] += take
                 total_tokens += take
-                split_document_counts[split] += 1
-            # Never carry the remainder of a document into another split.
-            # This keeps train, validation, and test document-disjoint.
-            if written[split] == targets[split]:
+                split_document_counts[split_name] += 1
+            # Do not carry a document remainder into the next split. This keeps
+            # train/validation/test document-disjoint.
+            if written[split_name] == targets[split_name]:
                 split_index += 1
             if active_reporter is not None:
                 active_reporter.update(documents, total_tokens)
@@ -261,27 +261,20 @@ def main() -> None:
     parser.add_argument("--val-tokens", type=int, default=1_000_000)
     parser.add_argument("--test-tokens", type=int, default=1_000_000)
     parser.add_argument("--local-text")
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="print token progress, elapsed time, throughput, ETA, and stall heartbeats",
-    )
-    parser.add_argument(
-        "--log-interval-seconds",
-        type=float,
-        default=10.0,
-        help="heartbeat interval used with --verbose (default: 10 seconds)",
-    )
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--log-interval-seconds", type=float, default=10.0)
     args = parser.parse_args()
     if args.log_interval_seconds <= 0:
         parser.error("--log-interval-seconds must be greater than zero")
     if args.dataset != "fineweb-edu" and not args.local_text:
-        parser.error("the isolated baseline currently supports --dataset fineweb-edu")
+        parser.error("the baseline supports --dataset fineweb-edu or --local-text")
 
     try:
         import tiktoken
     except ImportError as exc:
-        raise SystemExit("Install data support: pip install -e '.[data]'") from exc
+        raise SystemExit(
+            "Install data support: pip install -e 'level_0_baseline[data]'"
+        ) from exc
 
     encoder = tiktoken.get_encoding(TOKENIZER_NAME)
     if encoder.n_vocab > np.iinfo(TOKEN_DTYPE).max:
@@ -318,7 +311,7 @@ def main() -> None:
                 from datasets import load_dataset
             except ImportError as exc:
                 raise SystemExit(
-                    "Install data support: pip install -e '.[data]'"
+                    "Install data support: pip install -e 'level_0_baseline[data]'"
                 ) from exc
             if args.verbose:
                 print(
