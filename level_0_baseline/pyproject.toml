@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nanogpt-level0-baseline"
-version = "0.3.0"
+version = "0.4.0"
 description = "Matched FineWeb-Edu nanoGPT baselines for SGD-momentum, AdamW, and Muon"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,6 +25,7 @@ level0-prepare-data = "level0_baseline.data:main"
 level0-train = "level0_baseline.train:main"
 level0-run = "level0_baseline.runner:main"
 level0-generate = "level0_baseline.generate:main"
+level0-export-baselines = "level0_baseline.baseline_store:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

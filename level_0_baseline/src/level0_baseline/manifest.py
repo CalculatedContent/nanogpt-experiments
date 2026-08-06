@@ -32,12 +32,23 @@ def write_manifest(
     val_tokens: int,
     test_tokens: int,
 ) -> Path:
-    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    total_parameters = sum(
+        parameter.numel() for parameter in model.parameters()
+    )
     matrix_parameters = sum(
-        weight.numel() for _, _, _, weight in transformer_matrix_items(model)
+        weight.numel()
+        for _, _, _, weight in transformer_matrix_items(model)
+    )
+    epoch_monitoring = cfg.get("epoch_monitoring", {})
+    epoch_monitoring_enabled = bool(epoch_monitoring.get("enabled", True))
+    test_policy = (
+        "preregistered_integer_epoch_monitoring_plus_final_and_"
+        "validation_selected_checkpoint"
+        if epoch_monitoring_enabled
+        else "final_and_validation_selected_checkpoint_only"
     )
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "protocol_fingerprint": fingerprint,
         "config": cfg,
         "optimizer_name": optimizer_name,
@@ -51,12 +62,16 @@ def write_manifest(
         "data_root": str(data_root.resolve()),
         "data_manifest": data_metadata,
         "tokens_per_optimizer_step": int(tokens_per_step),
-        "effective_batch_sequences": int(batch_size) * int(grad_accum_steps),
+        "effective_batch_sequences": int(batch_size)
+        * int(grad_accum_steps),
         "planned_training_tokens": int(planned_tokens),
         "planned_train_epochs": float(planned_epochs),
         "target_train_epochs": float(target_epochs),
-        "test_evaluation_policy": "final_and_validation_selected_checkpoint_only",
-        "evaluation_sampling": "fixed_probes_with_rng_streams_independent_of_training",
+        "test_evaluation_policy": test_policy,
+        "test_epoch_monitoring_used_for_selection": False,
+        "evaluation_sampling": (
+            "fixed_probes_with_rng_streams_independent_of_training"
+        ),
         "precision_policy": "float32",
         "mps_compile_default": False,
         "split_sizes": {
@@ -66,5 +81,8 @@ def write_manifest(
         },
     }
     path = run_dir / "manifest.json"
-    path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     return path

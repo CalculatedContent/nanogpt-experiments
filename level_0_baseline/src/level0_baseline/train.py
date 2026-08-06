@@ -24,6 +24,10 @@ from .config import (
     roots,
     warmup_steps_for,
 )
+from .epoch_monitor import (
+    epoch_monitor_step_map,
+    save_epoch_model_checkpoint,
+)
 from .manifest import write_manifest
 from .model import GPT, GPTConfig
 from .optim import (
@@ -80,6 +84,13 @@ METRIC_FIELDS = [
     "mps_driver_allocated_mb",
 ]
 
+EPOCH_METRIC_FIELDS = [
+    *METRIC_FIELDS,
+    "nominal_epoch",
+    "checkpoint_path",
+    "test_monitoring_only",
+]
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -113,13 +124,15 @@ def main() -> None:
     completion_path = run_dir / "run_complete.json"
     if completion_path.exists() and not args.overwrite:
         raise FileExistsError(
-            f"completed run already exists: {run_dir}; use runner skip logic or --overwrite"
+            f"completed run already exists: {run_dir}; "
+            "use runner skip logic or --overwrite"
         )
     if run_dir.exists() and args.overwrite:
         shutil.rmtree(run_dir)
     if run_dir.exists() and not args.resume:
         raise FileExistsError(
-            f"incomplete run directory exists: {run_dir}; pass --resume or --overwrite"
+            f"incomplete run directory exists: {run_dir}; "
+            "pass --resume or --overwrite"
         )
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -151,18 +164,54 @@ def main() -> None:
     planned_tokens = tokens_per_step * max_steps
     planned_epochs = planned_tokens / train_tokens
     target_epochs = float(training.get("target_train_epochs", planned_epochs))
-    if abs(planned_epochs - target_epochs) > tokens_per_step / train_tokens + 1e-9:
+    if (
+        abs(planned_epochs - target_epochs)
+        > tokens_per_step / train_tokens + 1e-9
+    ):
         print(
-            "[level0-train] WARNING configured max_steps differs from target epochs: "
-            f"planned={planned_epochs:.6f} target={target_epochs:.6f}",
+            "[level0-train] WARNING configured max_steps differs from "
+            f"target epochs: planned={planned_epochs:.6f} "
+            f"target={target_epochs:.6f}",
             flush=True,
         )
 
     train_probe = fixed_probe(
-        arrays["train"], batch_size, model_cfg.block_size, training["eval_batches"], seed + 1_001
+        arrays["train"],
+        batch_size,
+        model_cfg.block_size,
+        training["eval_batches"],
+        seed + 1_001,
     )
     val_probe = fixed_probe(
-        arrays["val"], batch_size, model_cfg.block_size, training["eval_batches"], seed + 2_001
+        arrays["val"],
+        batch_size,
+        model_cfg.block_size,
+        training["eval_batches"],
+        seed + 2_001,
+    )
+    test_probe = fixed_probe(
+        arrays["test"],
+        batch_size,
+        model_cfg.block_size,
+        training["eval_batches"],
+        seed + 3_001,
+    )
+
+    epoch_monitoring = cfg.get("epoch_monitoring", {})
+    epoch_monitoring_enabled = bool(epoch_monitoring.get("enabled", True))
+    epoch_step_to_nominal = (
+        epoch_monitor_step_map(
+            train_tokens=train_tokens,
+            tokens_per_step=tokens_per_step,
+            max_steps=max_steps,
+            target_epochs=target_epochs,
+            interval_epochs=float(
+                epoch_monitoring.get("interval_epochs", 1.0)
+            ),
+            include_final=True,
+        )
+        if epoch_monitoring_enabled
+        else {}
     )
 
     start_step = 0
@@ -173,9 +222,7 @@ def main() -> None:
     best_checkpoint = run_dir / "checkpoint_best.pt"
     if args.resume:
         if not latest_checkpoint.exists():
-            raise FileNotFoundError(
-                f"cannot resume without {latest_checkpoint}"
-            )
+            raise FileNotFoundError(f"cannot resume without {latest_checkpoint}")
         (
             start_step,
             best_validation_loss,
@@ -189,7 +236,8 @@ def main() -> None:
             train_generator=train_generator,
         )
         print(
-            f"[level0-train] resuming optimizer={optimizer_name} seed={seed} step={start_step}",
+            f"[level0-train] resuming optimizer={optimizer_name} "
+            f"seed={seed} step={start_step}",
             flush=True,
         )
 
@@ -216,9 +264,15 @@ def main() -> None:
     )
 
     metrics_path = run_dir / "metrics.csv"
+    epoch_metrics_path = run_dir / "epoch_metrics.csv"
     prepare_metrics(
         metrics_path,
         fields=METRIC_FIELDS,
+        resume_step=start_step if args.resume else None,
+    )
+    prepare_metrics(
+        epoch_metrics_path,
+        fields=EPOCH_METRIC_FIELDS,
         resume_step=start_step if args.resume else None,
     )
     last_grad_pre = float("nan")
@@ -228,20 +282,34 @@ def main() -> None:
     previous_snapshot = parameter_snapshot(model)
     started_at = time.time()
 
-    with metrics_path.open("a", newline="", encoding="utf-8") as handle:
+    with (
+        metrics_path.open("a", newline="", encoding="utf-8") as handle,
+        epoch_metrics_path.open(
+            "a", newline="", encoding="utf-8"
+        ) as epoch_handle,
+    ):
         writer = csv.DictWriter(handle, fieldnames=METRIC_FIELDS)
+        epoch_writer = csv.DictWriter(
+            epoch_handle, fieldnames=EPOCH_METRIC_FIELDS
+        )
         for completed_steps in range(start_step, max_steps + 1):
+            epoch_monitor_due = completed_steps in epoch_step_to_nominal
             evaluation_due = (
                 completed_steps % int(training["eval_interval"]) == 0
+                or epoch_monitor_due
                 or completed_steps == max_steps
             )
             if evaluation_due:
                 synchronize_device(device)
-                train_metrics = evaluate_probe(forward_model, train_probe, device)
+                train_metrics = evaluate_probe(
+                    forward_model, train_probe, device
+                )
                 val_metrics = evaluate_probe(forward_model, val_probe, device)
                 elapsed = elapsed_offset + (time.time() - started_at)
                 current_snapshot = parameter_snapshot(model)
-                update_norm = update_norm_between(previous_snapshot, current_snapshot)
+                update_norm = update_norm_between(
+                    previous_snapshot, current_snapshot
+                )
                 previous_snapshot = current_snapshot
                 weight_norm = model_weight_norm(model)
                 update_ratio = update_norm / max(weight_norm, 1e-30)
@@ -264,51 +332,84 @@ def main() -> None:
                         elapsed_seconds=elapsed,
                     )
 
-                test_metrics = (float("nan"), float("nan"), float("nan"))
-                if completed_steps == max_steps:
-                    test_probe = fixed_probe(
-                        arrays["test"],
-                        batch_size,
-                        model_cfg.block_size,
-                        training["eval_batches"],
-                        seed + 3_001,
-                    )
-                    test_metrics = evaluate_probe(forward_model, test_probe, device)
+                test_metrics = (
+                    evaluate_probe(forward_model, test_probe, device)
+                    if epoch_monitor_due or completed_steps == max_steps
+                    else (float("nan"), float("nan"), float("nan"))
+                )
 
                 tokens_seen = completed_steps * tokens_per_step
                 epoch = tokens_seen / train_tokens
                 current_mps_mb, driver_mps_mb = mps_memory_megabytes(device)
-                writer.writerow(
-                    {
-                        "step": completed_steps,
-                        "tokens_seen": tokens_seen,
-                        "epoch": epoch,
-                        "elapsed_sec": elapsed,
-                        "tokens_per_sec": tokens_seen / max(elapsed, 1e-9),
-                        "primary_lr": last_lrs.get("primary", float("nan")),
-                        "auxiliary_lr": last_lrs.get("auxiliary", float("nan")),
-                        "train_loss": train_metrics[0],
-                        "train_perplexity": train_metrics[1],
-                        "train_accuracy": train_metrics[2],
-                        "val_loss": val_metrics[0],
-                        "val_perplexity": val_metrics[1],
-                        "val_accuracy": val_metrics[2],
-                        "test_loss": test_metrics[0],
-                        "test_perplexity": test_metrics[1],
-                        "test_accuracy": test_metrics[2],
-                        "val_generalization_gap": val_metrics[0] - train_metrics[0],
-                        "test_generalization_gap": test_metrics[0] - train_metrics[0],
-                        "grad_norm_pre_clip": last_grad_pre,
-                        "grad_norm_post_clip": last_grad_post,
-                        "gradient_clipped": int(last_clipped),
-                        "weight_norm": weight_norm,
-                        "update_norm_since_eval": update_norm,
-                        "update_to_weight_ratio": update_ratio,
-                        "mps_current_allocated_mb": current_mps_mb,
-                        "mps_driver_allocated_mb": driver_mps_mb,
-                    }
-                )
+                metric_row = {
+                    "step": completed_steps,
+                    "tokens_seen": tokens_seen,
+                    "epoch": epoch,
+                    "elapsed_sec": elapsed,
+                    "tokens_per_sec": tokens_seen / max(elapsed, 1e-9),
+                    "primary_lr": last_lrs.get(
+                        "primary", float("nan")
+                    ),
+                    "auxiliary_lr": last_lrs.get(
+                        "auxiliary", float("nan")
+                    ),
+                    "train_loss": train_metrics[0],
+                    "train_perplexity": train_metrics[1],
+                    "train_accuracy": train_metrics[2],
+                    "val_loss": val_metrics[0],
+                    "val_perplexity": val_metrics[1],
+                    "val_accuracy": val_metrics[2],
+                    "test_loss": test_metrics[0],
+                    "test_perplexity": test_metrics[1],
+                    "test_accuracy": test_metrics[2],
+                    "val_generalization_gap": (
+                        val_metrics[0] - train_metrics[0]
+                    ),
+                    "test_generalization_gap": (
+                        test_metrics[0] - train_metrics[0]
+                    ),
+                    "grad_norm_pre_clip": last_grad_pre,
+                    "grad_norm_post_clip": last_grad_post,
+                    "gradient_clipped": int(last_clipped),
+                    "weight_norm": weight_norm,
+                    "update_norm_since_eval": update_norm,
+                    "update_to_weight_ratio": update_ratio,
+                    "mps_current_allocated_mb": current_mps_mb,
+                    "mps_driver_allocated_mb": driver_mps_mb,
+                }
+                writer.writerow(metric_row)
                 handle.flush()
+
+                if epoch_monitor_due:
+                    nominal_epoch = epoch_step_to_nominal[completed_steps]
+                    checkpoint_path = ""
+                    if bool(
+                        epoch_monitoring.get(
+                            "save_model_checkpoints", True
+                        )
+                    ):
+                        checkpoint_path = str(
+                            save_epoch_model_checkpoint(
+                                run_dir,
+                                model=model,
+                                step=completed_steps,
+                                nominal_epoch=nominal_epoch,
+                                actual_epoch=epoch,
+                                cfg=cfg,
+                                optimizer_name=optimizer_name,
+                                seed=seed,
+                                protocol_fingerprint=fingerprint,
+                            )
+                        )
+                    epoch_writer.writerow(
+                        {
+                            **metric_row,
+                            "nominal_epoch": nominal_epoch,
+                            "checkpoint_path": checkpoint_path,
+                            "test_monitoring_only": 1,
+                        }
+                    )
+                    epoch_handle.flush()
 
                 rate = completed_steps / max(elapsed, 1e-9)
                 remaining = max_steps - completed_steps
@@ -316,7 +417,8 @@ def main() -> None:
                 print(
                     "[level0-train] "
                     f"optimizer={optimizer_name} seed={seed} "
-                    f"step={completed_steps}/{max_steps} epoch={epoch:.3f} "
+                    f"step={completed_steps}/{max_steps} "
+                    f"epoch={epoch:.3f} "
                     f"lr={last_lrs.get('primary', 0.0):.3e} "
                     f"train_loss={train_metrics[0]:.4f} "
                     f"val_loss={val_metrics[0]:.4f} "
@@ -330,8 +432,10 @@ def main() -> None:
                 ww_due = (
                     bool(analysis_cfg["weightwatcher"])
                     and (
-                        completed_steps % int(analysis_cfg["weightwatcher_interval"])
+                        completed_steps
+                        % int(analysis_cfg["weightwatcher_interval"])
                         == 0
+                        or epoch_monitor_due
                         or completed_steps == max_steps
                     )
                 )
@@ -353,15 +457,18 @@ def main() -> None:
                     print(
                         "[level0-spectral] "
                         f"step={completed_steps} "
-                        f"alpha_median={summary.get('alpha_median', float('nan')):.4f} "
-                        f"ERG_gap_median={summary.get('ERG_gap_median', float('nan')):.4f}",
+                        "alpha_median="
+                        f"{summary.get('alpha_median', float('nan')):.4f} "
+                        "ERG_gap_median="
+                        f"{summary.get('ERG_gap_median', float('nan')):.4f}",
                         flush=True,
                     )
                     if (
                         device.type == "mps"
                         and bool(
                             cfg["runtime"].get(
-                                "empty_mps_cache_after_spectral_analysis", True
+                                "empty_mps_cache_after_spectral_analysis",
+                                True,
                             )
                         )
                         and hasattr(torch.mps, "empty_cache")
@@ -390,18 +497,22 @@ def main() -> None:
                 _, loss = forward_model(x, y)
                 if loss is None or not torch.isfinite(loss):
                     raise FloatingPointError(
-                        f"nonfinite training loss at step {completed_steps + 1}"
+                        f"nonfinite training loss at "
+                        f"step {completed_steps + 1}"
                     )
                 (loss / grad_accum_steps).backward()
 
             pre_clip = gradient_norm(model.parameters())
             if not torch.isfinite(pre_clip):
                 raise FloatingPointError(
-                    f"nonfinite gradient norm at step {completed_steps + 1}"
+                    f"nonfinite gradient norm at "
+                    f"step {completed_steps + 1}"
                 )
             grad_clip = float(training["grad_clip"])
             if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip
+                )
             post_clip = gradient_norm(model.parameters())
             last_grad_pre = float(pre_clip.detach().cpu())
             last_grad_post = float(post_clip.detach().cpu())
@@ -425,9 +536,12 @@ def main() -> None:
                     elapsed_seconds=elapsed,
                 )
                 save_checkpoint(latest_checkpoint, **checkpoint_kwargs)
-                if bool(training.get("keep_periodic_checkpoints", False)):
+                if bool(
+                    training.get("keep_periodic_checkpoints", False)
+                ):
                     save_checkpoint(
-                        run_dir / f"checkpoint_step_{next_step:07d}.pt",
+                        run_dir
+                        / f"checkpoint_step_{next_step:07d}.pt",
                         **checkpoint_kwargs,
                     )
 
@@ -450,21 +564,24 @@ def main() -> None:
     save_checkpoint(final_checkpoint, **final_kwargs)
     save_checkpoint(latest_checkpoint, **final_kwargs)
 
-    test_probe = fixed_probe(
-        arrays["test"],
-        batch_size,
-        model_cfg.block_size,
-        training["eval_batches"],
-        seed + 3_001,
-    )
     final_test = test_metrics_for_checkpoint(
-        final_checkpoint, model_cfg=model_cfg, test_probe=test_probe, device=device
+        final_checkpoint,
+        model_cfg=model_cfg,
+        test_probe=test_probe,
+        device=device,
     )
     selected_test = test_metrics_for_checkpoint(
-        best_checkpoint, model_cfg=model_cfg, test_probe=test_probe, device=device
+        best_checkpoint,
+        model_cfg=model_cfg,
+        test_probe=test_probe,
+        device=device,
     )
     test_results = {
-        "policy": "test evaluated only at final and validation-selected checkpoints",
+        "policy": (
+            "final and validation-selected summary; preregistered "
+            "integer-epoch monitoring is stored in epoch_metrics.csv "
+            "and is never used for checkpoint selection"
+        ),
         "final": {
             "step": final_test[3],
             "loss": final_test[0],
@@ -480,7 +597,8 @@ def main() -> None:
         },
     }
     (run_dir / "test_results.json").write_text(
-        json.dumps(test_results, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(test_results, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
 
     completion = {
@@ -500,13 +618,18 @@ def main() -> None:
         "selected_checkpoint_test_accuracy": selected_test[2],
         "elapsed_seconds": total_elapsed,
         "protocol_fingerprint": fingerprint,
+        "epoch_metrics_path": str(epoch_metrics_path),
+        "epoch_monitor_steps": sorted(epoch_step_to_nominal),
+        "test_epoch_monitoring_used_for_selection": False,
     }
     completion_path.write_text(
-        json.dumps(completion, indent=2, sort_keys=True), encoding="utf-8"
+        json.dumps(completion, indent=2, sort_keys=True),
+        encoding="utf-8",
     )
     print(
         f"[level0-train] complete run={run_dir} "
-        f"best_step={best_validation_step} best_val_loss={best_validation_loss:.4f} "
+        f"best_step={best_validation_step} "
+        f"best_val_loss={best_validation_loss:.4f} "
         f"final_test_loss={final_test[0]:.4f}",
         flush=True,
     )
