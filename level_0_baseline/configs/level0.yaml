@@ -1,6 +1,6 @@
 protocol:
   name: level0_optimizer_baselines
-  version: 1
+  version: 2
   description: Matched nanoGPT optimizer baselines on the pinned FineWeb-Edu Level Zero corpus.
 
 model:
@@ -29,7 +29,14 @@ training:
   compile: false
   matmul_precision: high
   deterministic_algorithms: false
-  evaluate_test_during_training: false
+  test_evaluation_schedule: preregistered_integer_epochs_only
+
+epoch_monitoring:
+  enabled: true
+  interval_epochs: 1.0
+  save_model_checkpoints: true
+  test_monitoring_only: true
+  use_for_checkpoint_selection: false
 
 optimizer_profiles:
   sgd_momentum:

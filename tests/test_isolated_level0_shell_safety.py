@@ -56,18 +56,32 @@ printf 'parent-shell-alive\n'
         assert "parent-shell-alive" in result.stdout
 
 
-def test_multiseed_runners_do_not_depend_on_nested_execute_bits() -> None:
-    baseline = (REPO_ROOT / "level_0_baseline/scripts/run_multiseed.sh").read_text()
-    wwpgd = (REPO_ROOT / "level_0_wwpgd/scripts/run_multiseed.sh").read_text()
-    assert 'bash "$SCRIPT_DIR/run_one.sh"' in baseline
+def test_multiseed_runners_use_explicit_child_processes() -> None:
+    baseline = (
+        REPO_ROOT / "level_0_baseline/scripts/run_multiseed.sh"
+    ).read_text()
+    wwpgd = (
+        REPO_ROOT / "level_0_wwpgd/scripts/run_multiseed.sh"
+    ).read_text()
+
+    # The baseline suite now dispatches the complete multiseed run through a
+    # Python module child process; the frozen WWPGD runner dispatches one child
+    # Bash process per seed. Neither relies on sourcing or nested execute bits.
+    assert '"$PYTHON_BIN" -m level0_baseline.runner' in baseline
     assert 'bash "$SCRIPT_DIR/run_one.sh"' in wwpgd
 
 
-def test_isolated_readmes_use_child_bash_processes() -> None:
+def test_isolated_readmes_show_child_process_commands() -> None:
     baseline = (REPO_ROOT / "level_0_baseline/README.md").read_text()
     wwpgd = (REPO_ROOT / "level_0_wwpgd/README.md").read_text()
+
     for text in (baseline, wwpgd):
-        assert "do not source" in text.lower()
         assert "set -euo pipefail" not in text
-    assert "bash scripts/run_isolated_level0_pair.sh baseline" in baseline
+
+    assert (
+        "bash level_0_baseline/scripts/run_all_baselines.sh" in baseline
+    )
+    assert (
+        "bash level_0_baseline/scripts/run_multiseed.sh" in baseline
+    )
     assert "bash scripts/run_isolated_level0_pair.sh wwpgd" in wwpgd
