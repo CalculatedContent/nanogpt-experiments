@@ -1714,6 +1714,11 @@ def run_scientific_single(
         "optimizer_implementation_version": bundle.implementation_versions,
     })
     man.update(code_version)
+    if extension_name in INTERVENTION_EXTENSIONS:
+        # Optional env WWPGD_COMMIT_PIN: fail fast if installed ww_pgd commit mismatches.
+        # Default (unset) keeps floating git install behavior unchanged.
+        from wwgpt.pip_wwpgd_adapter import assert_wwpgd_commit_pin
+        assert_wwpgd_commit_pin()
     man.update(external_wwpgd_manifest_fields(extension_name in INTERVENTION_EXTENSIONS, cfg.wwpgd if extension_name in INTERVENTION_EXTENSIONS else None))
     if cached_mode:
         adaptive = cfg.wwpgd.adaptive

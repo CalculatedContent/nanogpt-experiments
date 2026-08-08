@@ -3,9 +3,14 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+
+# Optional pin for joint/repro runs. Empty = floating install (current default).
+# Accepts full or prefix SHA from pip VCS install (direct_url.json commit_id).
+WWPGD_COMMIT_PIN_ENV = "WWPGD_COMMIT_PIN"
 
 REQUIRED_PROJECTOR_PARAMETERS = frozenset(
     {"model", "cfg", "epoch", "num_epochs", "global_step", "ww_logs", "layer_selector"}
@@ -76,20 +81,51 @@ def resolve_pip_wwpgd_provenance() -> dict[str, Any]:
     import weightwatcher
 
     weightwatcher_dist = _distribution("weightwatcher")
+    requested_pin = (os.environ.get(WWPGD_COMMIT_PIN_ENV) or "").strip()
+    resolved_commit = vcs.get("commit_id")
+    pinned = bool(requested_pin)
     return {
         "wwpgd_distribution_name": str(ww_dist_name),
         "wwpgd_installed_version": str(ww_version),
         "wwpgd_module_path": str(Path(ww_pgd.__file__).resolve()),
         "wwpgd_source_url": direct.get("url"),
         "wwpgd_install_mode": mode,
-        "wwpgd_resolved_commit": vcs.get("commit_id"),
+        "wwpgd_resolved_commit": resolved_commit,
+        "wwpgd_commit_pin_env": WWPGD_COMMIT_PIN_ENV,
+        "wwpgd_commit_pin_requested": requested_pin or None,
         "wwpgd_projector_signature": str(api["projector_signature_object"]),
         "wwpgd_config_signature": str(api["config_signature_object"]),
         "wwpgd_native_internal_diagnostics": api["native_internal_diagnostics"],
-        "wwpgd_dependency_pinned": False,
+        # True only when the caller requested a pin via env (default remains floating).
+        "wwpgd_dependency_pinned": pinned,
         "weightwatcher_installed_version": str(weightwatcher_dist.version if weightwatcher_dist else getattr(weightwatcher, "__version__", "unknown")),
         "weightwatcher_module_path": str(Path(weightwatcher.__file__).resolve()),
     }
+
+
+def assert_wwpgd_commit_pin(provenance: dict[str, Any] | None = None) -> dict[str, Any]:
+    """If ``WWPGD_COMMIT_PIN`` is set, require the installed VCS commit to match.
+
+    Default behavior (env unset/empty): no-op, floating ``ww_pgd`` install allowed.
+    Match is prefix-based so a short SHA pin is valid against a full commit id.
+    """
+    info = provenance if provenance is not None else resolve_pip_wwpgd_provenance()
+    pin = str(info.get("wwpgd_commit_pin_requested") or "").strip()
+    if not pin:
+        return info
+    resolved = str(info.get("wwpgd_resolved_commit") or "").strip()
+    if not resolved:
+        raise RuntimeError(
+            f"{WWPGD_COMMIT_PIN_ENV}={pin!r} is set but the installed ww_pgd package "
+            "has no VCS commit in PEP 610 direct_url.json (e.g. pure PyPI install). "
+            "Install from git or clear the pin."
+        )
+    if not (resolved.startswith(pin) or pin.startswith(resolved)):
+        raise RuntimeError(
+            f"ww_pgd commit pin mismatch: {WWPGD_COMMIT_PIN_ENV}={pin!r} "
+            f"but resolved commit is {resolved!r}"
+        )
+    return info
 
 
 def construct_pip_wwpgd_config(spec: object) -> tuple[object, dict[str, Any]]:
