@@ -312,8 +312,30 @@ STANDARD_WWPGD_RAMP_EVENTS = 0
 
 
 def target_alpha_to_external_rank_exponent(target_alpha: float) -> float:
-    """Translate the public spectral target at the private dependency boundary."""
+    """Translate the public spectral target at the private dependency boundary.
+
+    Public knob is density-law ``target_alpha``. The pip ``ww_pgd`` config uses
+    rank-law exponent ``q = 1 / (target_alpha - 1)``. Fixed point: alpha=2 <=> q=1.
+    """
     return 1.0 / (target_alpha - 1.0)
+
+
+def dual_label_fields(target_alpha: float) -> dict[str, object]:
+    """Fields for CSV/manifest dual-labeling of density alpha vs rank exponent q.
+
+    Always emit both the public target and the derived private rank exponent so
+    readers never have to re-derive the map under a wrong convention.
+    """
+    alpha = float(target_alpha)
+    if not math.isfinite(alpha) or alpha <= 1.0:
+        raise ValueError("target_alpha must be finite and greater than 1")
+    q = float(target_alpha_to_external_rank_exponent(alpha))
+    return {
+        "target_alpha": alpha,
+        "derived_external_rank_exponent": q,
+        "external_rank_q": q,
+        "derivation_formula": "1 / (target_alpha - 1)",
+    }
 
 
 def external_wwpgd_config_from_experiment(cfg: object) -> ExternalWWTailConfigSpec:
@@ -354,7 +376,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
     requested = _asdict(requested_cfg) if requested_cfg is not None and hasattr(requested_cfg, "__dataclass_fields__") else (dict(vars(requested_cfg)) if requested_cfg is not None and hasattr(requested_cfg, "__dict__") else {})
     _, mapping = construct_pip_wwpgd_config(cfg)
     resolved = mapping["resolved"]
-    derived = target_alpha_to_external_rank_exponent(cfg.target_alpha)
+    dual = dual_label_fields(float(getattr(requested_cfg, "target_alpha", cfg.target_alpha)))
     return {
         **_WWPGD_PROVENANCE,
         "wwpgd_package": "ww_pgd",
@@ -364,9 +386,7 @@ def external_wwpgd_manifest_fields(enabled: bool = True, requested_cfg: object |
         "wwpgd_implementation": "ww_pgd",
         "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
         "wwpgd_adaptive_implementation": "nanogpt-experiments scales stock WW_PGD candidate displacements per layer",
-        "target_alpha": float(getattr(requested_cfg, "target_alpha", 2.0)),
-        "derived_external_rank_exponent": derived,
-        "derivation_formula": "1 / (target_alpha - 1)",
+        **dual,
         "external_parameter_name": "q",
         "external_rank_exponent_was_configured": False,
         "blend_eta": cfg.blend_eta,
@@ -702,12 +722,13 @@ def apply_external_wwpgd(
             rows.append({"layer_name": name, "matrix_type": matrix_type(name), "block": block_index(name), "projection_event": event_index,
                 "scheduled_token_fraction": scheduled_token_fraction, "actual_step": actual_step, "actual_tokens_seen": actual_tokens_seen,
                 "projection_runtime": candidate.runtime / max(1, len(candidate.original_weights)), "wwpgd_implementation": "ww_pgd", "wwpgd_adapter_mode": WWPGD_ADAPTER_MODE,
-                "wwpgd_package": "ww_pgd", "wwpgd_commit": WWPGD_COMMIT, "target_alpha": cfg.target_alpha, "blend_eta": cfg.blend_eta, "cayley_eta": cfg.cayley_eta, "min_tail": cfg.min_tail,
+                "wwpgd_package": "ww_pgd", "wwpgd_commit": WWPGD_COMMIT, "blend_eta": cfg.blend_eta, "cayley_eta": cfg.cayley_eta, "min_tail": cfg.min_tail,
                 "warmup": 0, "ramp": 0, "use_detx": cfg.use_detx, "stock_candidate_changed": candidate.stock_candidate_changed.get(name, False),
                 "stock_candidate_relative_frobenius_change": candidate.original_to_candidate_relative_change.get(name, 0.0),
                 "combined_hardness_requested": req_h, "combined_hardness_applied": req_h * scale, "trust_region_limit": limit, "trust_region_scale": scale,
                 "relative_frobenius_change_requested": req_rel, "relative_frobenius_change_applied": app_rel, "relative_frobenius_change": app_rel,
                 "relative_frobenius_weight_change": app_rel, "changed": changed, "projection_attempted": req_h > 0.0, "projected": changed})
+            rows[-1].update(dual_label_fields(cfg.target_alpha))
             rows[-1].update({"displacement_kind": displacement_kind,
                              "real_candidate_displacement_cosine": displacement_cosine,
                              "sham_seed": int(sham_seed) if sham_seed is not None else None})
