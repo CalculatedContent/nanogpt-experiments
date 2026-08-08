@@ -708,6 +708,13 @@ def apply_external_wwpgd(
                 "combined_hardness_requested": req_h, "combined_hardness_applied": req_h * scale, "trust_region_limit": limit, "trust_region_scale": scale,
                 "relative_frobenius_change_requested": req_rel, "relative_frobenius_change_applied": app_rel, "relative_frobenius_change": app_rel,
                 "relative_frobenius_weight_change": app_rel, "changed": changed, "projection_attempted": req_h > 0.0, "projected": changed})
+            # Dose identity for cross-run / cross-actuator comparison (logging only).
+            # Definition: Frobenius ||W_after - W_before|| / ||W_before|| of the applied update.
+            rows[-1].update({
+                "dose_definition": "relative_frobenius_change_applied",
+                "dose_relative_frobenius": app_rel,
+                "is_first_projection_event": int(event_index) == 1,
+            })
             rows[-1].update({"displacement_kind": displacement_kind,
                              "real_candidate_displacement_cosine": displacement_cosine,
                              "sham_seed": int(sham_seed) if sham_seed is not None else None})

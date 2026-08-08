@@ -106,6 +106,19 @@ def test_no_strength_multiplier_external_blend_eta(monkeypatch):
     assert all(row["blend_eta"] == 0.5 for row in rows)
 
 
+def test_projection_rows_include_dose_identity_fields(monkeypatch):
+    """Every projection row names the dose metric used for strength comparison."""
+    install_fake_ww_pgd(monkeypatch, [])
+    rows = apply_external_wwpgd(tiny_model(), actual_step=1, event_index=1)
+    assert rows
+    for row in rows:
+        assert row["dose_definition"] == "relative_frobenius_change_applied"
+        assert row["dose_relative_frobenius"] == row["relative_frobenius_change_applied"]
+        assert row["is_first_projection_event"] is True
+    rows2 = apply_external_wwpgd(tiny_model(), actual_step=2, event_index=2)
+    assert all(row["is_first_projection_event"] is False for row in rows2)
+
+
 def test_projection_interval_accepts_positive_integers():
     ext = WWPGDExtension(cfg=WWPGDConfig(), interval=3)
     assert ext.interval == 3
