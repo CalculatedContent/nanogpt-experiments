@@ -13,6 +13,7 @@ WWPGD_PROJECTION_DOSE_DEFINITION = (
     "applied_projection_delta_frobenius_over_preprojection_weight_frobenius"
 )
 WWPGD_PROJECTION_EVENT_INDEX_BASE = 0
+WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION = 1
 
 
 def stable_hash(obj: Any) -> str:
@@ -97,7 +98,11 @@ def _projection_event_index(value: Any) -> int:
     return event
 
 
-def _existing_projection_application_counts(path: Path) -> dict[str, int]:
+def _projection_application_index_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.application_counts.json")
+
+
+def _scan_projection_application_counts(path: Path) -> dict[str, int]:
     import csv
     if not path.exists() or not path.stat().st_size:
         return {}
@@ -121,17 +126,71 @@ def _existing_projection_application_counts(path: Path) -> dict[str, int]:
         return counts
 
 
+def _valid_projection_application_counts(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    counts: dict[str, int] = {}
+    for raw_name, raw_count in value.items():
+        name = str(raw_name).strip()
+        if not name or isinstance(raw_count, bool):
+            return None
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if count < 0 or count != raw_count:
+            return None
+        counts[name] = count
+    return counts
+
+
+def _load_projection_application_counts(path: Path) -> dict[str, int]:
+    if not path.exists() or not path.stat().st_size:
+        return {}
+    stat = path.stat()
+    index_path = _projection_application_index_path(path)
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, TypeError, json.JSONDecodeError):
+        index = None
+    if isinstance(index, dict):
+        counts = _valid_projection_application_counts(index.get("counts"))
+        if (
+            int(index.get("schema_version", -1))
+            == WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION
+            and int(index.get("source_size_bytes", -1)) == stat.st_size
+            and int(index.get("source_mtime_ns", -1)) == stat.st_mtime_ns
+            and counts is not None
+        ):
+            return counts
+    return _scan_projection_application_counts(path)
+
+
+def _store_projection_application_counts(path: Path, counts: dict[str, int]) -> None:
+    stat = path.stat()
+    _atomic_write_json(
+        _projection_application_index_path(path),
+        {
+            "schema_version": WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION,
+            "source_size_bytes": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "counts": dict(sorted(counts.items())),
+        },
+    )
+
+
 def _enrich_wwpgd_projection_rows(
     path: Path,
     rows: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Add exact dose and resume-safe first-application identity to projection rows.
 
     ``projection_event`` is zero-based.  First actual application is tracked per
-    layer from the durable CSV prefix rather than from process-local counters, so
-    the annotation remains correct across checkpoint resume and restart.
+    layer from a self-validating durable-history index.  The index is rebuilt
+    from the reconciled CSV only after a crash, truncation, or metadata mismatch,
+    avoiding an O(n^2) history scan during interval-one experiments.
     """
-    application_counts = _existing_projection_application_counts(path)
+    application_counts = _load_projection_application_counts(path)
     enriched: list[dict[str, Any]] = []
     for source in rows:
         row = dict(source)
@@ -183,7 +242,7 @@ def _enrich_wwpgd_projection_rows(
             }
         )
         enriched.append(row)
-    return enriched
+    return enriched, application_counts
 
 
 def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -192,8 +251,9 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    projection_application_counts = None
     if path.name == "wwpgd_projection.csv":
-        rows = _enrich_wwpgd_projection_rows(path, rows)
+        rows, projection_application_counts = _enrich_wwpgd_projection_rows(path, rows)
     # Cached-endpoint fast-relaxation rows already have the dedicated
     # wwpgd_endpoint_relaxation.csv stream. Do not duplicate them into
     # wwpgd_controller.csv, whose stable schema is the slow measurement record.
@@ -240,6 +300,8 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writeheader()
         writer.writerows(rows)
         f.flush(); os.fsync(f.fileno())
+    if projection_application_counts is not None:
+        _store_projection_application_counts(path, projection_application_counts)
 
 def csv_commit(path: Path) -> dict[str, Any]:
     """Describe the exact durable prefix referenced by a checkpoint."""
