@@ -51,12 +51,34 @@ def init_state(cfg):
     return {k: v.detach().clone() for k, v in m.state_dict().items()}, "init"
 
 
+def _fake_projection_row(*, event_index, actual_step, actual_tokens_seen=None):
+    row = {
+        "projection_event": event_index,
+        "actual_step": actual_step,
+        "layer_name": "fake",
+        "relative_frobenius_change_applied": 0.01,
+        "changed": True,
+    }
+    if actual_tokens_seen is not None:
+        row["actual_tokens_seen"] = actual_tokens_seen
+    return row
+
+
 def test_extension_interval_cadences_and_skips(monkeypatch):
     calls = []
     pre_calls = []
     monkeypatch.setattr("wwgpt.train.weightwatcher_details", lambda model: pre_calls.append("pre") or object())
     monkeypatch.setattr("wwgpt.train.build_stock_wwpgd_candidate", lambda *args, **kwargs: SimpleNamespace(internal_diagnostics=[]))
-    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kw: calls.append(kw) or [{"projection_event": kw["event_index"], "actual_step": kw["actual_step"], "actual_tokens_seen": kw["actual_tokens_seen"], "layer_name": "fake"}])
+    monkeypatch.setattr(
+        "wwgpt.train.apply_external_wwpgd",
+        lambda *args, **kw: calls.append(kw) or [
+            _fake_projection_row(
+                event_index=kw["event_index"],
+                actual_step=kw["actual_step"],
+                actual_tokens_seen=kw["actual_tokens_seen"],
+            )
+        ],
+    )
 
     ext = WWPGDExtension(WWPGDConfig(), interval=2)
     rows_by_step = [ext.after_optimizer_step(model=object(), optimizer_step=s, total_optimizer_steps=6, tokens_seen=s*10, collect_pre_details=True)[1] for s in range(1, 7)]
@@ -82,7 +104,16 @@ def test_extension_rejects_non_positive_interval():
 def test_training_interval_manifest_and_counts(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *a, **k: [])
-    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *a, **kw: calls.append(kw["actual_step"]) or [{"projection_event": kw["event_index"], "actual_step": kw["actual_step"], "actual_tokens_seen": kw["actual_tokens_seen"], "layer_name": "fake"}])
+    monkeypatch.setattr(
+        "wwgpt.train.apply_external_wwpgd",
+        lambda *a, **kw: calls.append(kw["actual_step"]) or [
+            _fake_projection_row(
+                event_index=kw["event_index"],
+                actual_step=kw["actual_step"],
+                actual_tokens_seen=kw["actual_tokens_seen"],
+            )
+        ],
+    )
     cfg = tiny_cfg(steps=6, interval=2)
     state, h = init_state(cfg)
     run = run_scientific_single(tmp_path, "adamw_wwpgd", 3, cfg, tiny_data(), "pair", state, h, 0, 1, device="cpu")
@@ -100,7 +131,15 @@ def test_training_interval_manifest_and_counts(monkeypatch, tmp_path):
 def test_run_function_cli_override_precedes_config(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *a, **k: [])
-    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *a, **kw: calls.append(kw["actual_step"]) or [{"projection_event": kw["event_index"], "actual_step": kw["actual_step"], "layer_name": "fake"}])
+    monkeypatch.setattr(
+        "wwgpt.train.apply_external_wwpgd",
+        lambda *a, **kw: calls.append(kw["actual_step"]) or [
+            _fake_projection_row(
+                event_index=kw["event_index"],
+                actual_step=kw["actual_step"],
+            )
+        ],
+    )
     cfg = tiny_cfg(steps=8, interval=2)
     state, h = init_state(cfg)
     run_scientific_single(tmp_path, "adamw_wwpgd", 3, cfg, tiny_data(), "pair", state, h, 0, 1, device="cpu", ww_interval=4)

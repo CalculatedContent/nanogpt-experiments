@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, os, time, random, hashlib
+import json, os, time, random, hashlib, math
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -8,6 +8,12 @@ import torch
 SCIENTIFIC_CHECKPOINT_SCHEMA_VERSION = 3
 CODE_VERSION_COMPAT = ("git_commit", "git_dirty", "weightwatcher_version", "wwpgd_commit", "torch_version", "optimizer_implementation_version")
 REQUIRED_COMPAT=("configuration_hash","data_hash","tokenizer_hash","initialization_hash","model_configuration_hash","training_configuration_hash","wwpgd_configuration_hash","validation_probe_hash","training_probe_hash","scientific_schema_version","optimizer_fingerprint", *CODE_VERSION_COMPAT)
+
+WWPGD_PROJECTION_DOSE_DEFINITION = (
+    "applied_projection_delta_frobenius_over_preprojection_weight_frobenius"
+)
+WWPGD_PROJECTION_EVENT_INDEX_BASE = 0
+WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION = 1
 
 
 def stable_hash(obj: Any) -> str:
@@ -65,12 +71,195 @@ def _sha256_file(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+
+def _projection_bool(value: Any, *, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    token = str(value).strip().lower()
+    if token in {"true", "1"}:
+        return True
+    if token in {"false", "0", ""}:
+        return False
+    raise ValueError(f"{field} must be boolean-compatible, got {value!r}")
+
+
+def _projection_event_index(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("projection_event must be an integer")
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("projection_event must be an integer") from exc
+    if not math.isfinite(numeric) or not numeric.is_integer():
+        raise ValueError("projection_event must be an integer")
+    event = int(numeric)
+    if event < 0:
+        raise ValueError("projection_event must be non-negative")
+    return event
+
+
+def _projection_application_index_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.application_counts.json")
+
+
+def _scan_projection_application_counts(path: Path) -> dict[str, int]:
+    import csv
+    if not path.exists() or not path.stat().st_size:
+        return {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        required = {"layer_name", "dose_applied", "layer_application_index"}
+        missing = sorted(required - fields)
+        if missing:
+            raise ValueError(
+                "existing WWPGD projection CSV uses an older telemetry schema; "
+                f"missing fields {missing}. Start a fresh run instead of appending."
+            )
+        counts: dict[str, int] = {}
+        for row in reader:
+            layer_name = str(row.get("layer_name") or "").strip()
+            if not layer_name:
+                raise ValueError("existing WWPGD projection row is missing layer_name")
+            if _projection_bool(row.get("dose_applied", False), field="dose_applied"):
+                counts[layer_name] = counts.get(layer_name, 0) + 1
+        return counts
+
+
+def _valid_projection_application_counts(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    counts: dict[str, int] = {}
+    for raw_name, raw_count in value.items():
+        name = str(raw_name).strip()
+        if not name or isinstance(raw_count, bool):
+            return None
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if count < 0 or count != raw_count:
+            return None
+        counts[name] = count
+    return counts
+
+
+def _load_projection_application_counts(path: Path) -> dict[str, int]:
+    if not path.exists() or not path.stat().st_size:
+        return {}
+    stat = path.stat()
+    index_path = _projection_application_index_path(path)
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, UnicodeError, TypeError, json.JSONDecodeError):
+        index = None
+    if isinstance(index, dict):
+        counts = _valid_projection_application_counts(index.get("counts"))
+        try:
+            schema_version = int(index.get("schema_version", -1))
+            source_size_bytes = int(index.get("source_size_bytes", -1))
+            source_mtime_ns = int(index.get("source_mtime_ns", -1))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        else:
+            if (
+                schema_version == WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION
+                and source_size_bytes == stat.st_size
+                and source_mtime_ns == stat.st_mtime_ns
+                and counts is not None
+            ):
+                return counts
+    return _scan_projection_application_counts(path)
+
+
+def _store_projection_application_counts(path: Path, counts: dict[str, int]) -> None:
+    stat = path.stat()
+    _atomic_write_json(
+        _projection_application_index_path(path),
+        {
+            "schema_version": WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION,
+            "source_size_bytes": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "counts": dict(sorted(counts.items())),
+        },
+    )
+
+
+def _enrich_wwpgd_projection_rows(
+    path: Path,
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Add exact dose and resume-safe first-application identity to projection rows.
+
+    ``projection_event`` is zero-based.  First actual application is tracked per
+    layer from a self-validating durable-history index.  The index is rebuilt
+    from the reconciled CSV only after a crash, truncation, or metadata mismatch,
+    avoiding an O(n^2) history scan during interval-one experiments.
+    """
+    application_counts = _load_projection_application_counts(path)
+    enriched: list[dict[str, Any]] = []
+    for source in rows:
+        row = dict(source)
+        if "is_first_projection_event" in row:
+            raise ValueError(
+                "ambiguous is_first_projection_event is unsupported; use "
+                "is_first_scheduled_projection_event and is_first_applied_projection"
+            )
+        if "projection_event" not in row:
+            raise ValueError("WWPGD projection row is missing projection_event")
+        event = _projection_event_index(row["projection_event"])
+
+        raw_dose = row.get("relative_frobenius_change_applied")
+        if raw_dose is None or raw_dose == "" or isinstance(raw_dose, bool):
+            raise ValueError(
+                "WWPGD projection row is missing relative_frobenius_change_applied"
+            )
+        try:
+            dose = float(raw_dose)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "relative_frobenius_change_applied must be numeric"
+            ) from exc
+        if not math.isfinite(dose) or dose < 0.0:
+            raise ValueError(
+                "relative_frobenius_change_applied must be finite and non-negative"
+            )
+
+        layer_name = str(row.get("layer_name") or "").strip()
+        if not layer_name:
+            raise ValueError("WWPGD projection row is missing layer_name")
+        changed = _projection_bool(row.get("changed", False), field="changed")
+        dose_applied = changed and dose > 0.0
+        application_index = None
+        if dose_applied:
+            application_index = application_counts.get(layer_name, 0) + 1
+            application_counts[layer_name] = application_index
+        row.update(
+            {
+                "dose_definition": WWPGD_PROJECTION_DOSE_DEFINITION,
+                "dose_value": dose,
+                "dose_relative_frobenius": dose,
+                "dose_applied": dose_applied,
+                "layer_application_index": application_index,
+                "is_first_applied_projection": application_index == 1,
+                "projection_event_index_base": WWPGD_PROJECTION_EVENT_INDEX_BASE,
+                "projection_event_number": event + 1,
+                "is_first_scheduled_projection_event": event == 0,
+            }
+        )
+        enriched.append(row)
+    return enriched, application_counts
+
+
 def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
     """Durably append records. A flush boundary is a transaction boundary."""
     import csv
     if not rows:
         return
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    projection_application_counts = None
+    if path.name == "wwpgd_projection.csv":
+        rows, projection_application_counts = _enrich_wwpgd_projection_rows(path, rows)
     # Cached-endpoint fast-relaxation rows already have the dedicated
     # wwpgd_endpoint_relaxation.csv stream. Do not duplicate them into
     # wwpgd_controller.csv, whose stable schema is the slow measurement record.
@@ -117,6 +306,8 @@ def append_csv_records(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writeheader()
         writer.writerows(rows)
         f.flush(); os.fsync(f.fileno())
+    if projection_application_counts is not None:
+        _store_projection_application_counts(path, projection_application_counts)
 
 def csv_commit(path: Path) -> dict[str, Any]:
     """Describe the exact durable prefix referenced by a checkpoint."""

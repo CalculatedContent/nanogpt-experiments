@@ -59,6 +59,19 @@ def _init_state(cfg: ExperimentConfig):
     return state, "tiny-init"
 
 
+def _fake_projection_row(*, event_index, actual_step, actual_tokens_seen=None, layer_name="fake"):
+    row = {
+        "projection_event": event_index,
+        "actual_step": actual_step,
+        "layer_name": layer_name,
+        "relative_frobenius_change_applied": 0.01,
+        "changed": True,
+    }
+    if actual_tokens_seen is not None:
+        row["actual_tokens_seen"] = actual_tokens_seen
+    return row
+
+
 def test_wwpgd_runs_once_per_successful_optimizer_step(monkeypatch, tmp_path: Path):
     steps = 3
     calls = []
@@ -67,8 +80,18 @@ def test_wwpgd_runs_once_per_successful_optimizer_step(monkeypatch, tmp_path: Pa
         assert stock_candidate is not None
         calls.append(actual_step)
         return [
-            {"projection_event": event_index, "layer_name": "blocks.0.attn.key"},
-            {"projection_event": event_index, "layer_name": "blocks.0.attn.value"},
+            _fake_projection_row(
+                event_index=event_index,
+                actual_step=actual_step,
+                actual_tokens_seen=actual_tokens_seen,
+                layer_name="blocks.0.attn.key",
+            ),
+            _fake_projection_row(
+                event_index=event_index,
+                actual_step=actual_step,
+                actual_tokens_seen=actual_tokens_seen,
+                layer_name="blocks.0.attn.value",
+            ),
         ]
 
     monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", fake_apply)
@@ -136,7 +159,16 @@ def test_checkpoint_resume_is_deterministic_and_complete(monkeypatch, tmp_path: 
     )
     init_state, init_hash = _init_state(cfg)
     monkeypatch.setattr("wwgpt.train.spectral_summary", lambda *args, **kwargs: [])
-    monkeypatch.setattr("wwgpt.train.apply_external_wwpgd", lambda *args, **kwargs: [{"projection_event": kwargs["event_index"], "actual_step": kwargs["actual_step"], "actual_tokens_seen": kwargs["actual_tokens_seen"], "layer_name": "fake"}])
+    monkeypatch.setattr(
+        "wwgpt.train.apply_external_wwpgd",
+        lambda *args, **kwargs: [
+            _fake_projection_row(
+                event_index=kwargs["event_index"],
+                actual_step=kwargs["actual_step"],
+                actual_tokens_seen=kwargs["actual_tokens_seen"],
+            )
+        ],
+    )
 
     full = run_scientific_single(tmp_path / "full", "adamw_wwpgd", 7, cfg, _tiny_data(), "pair_tiny", init_state, init_hash, 0, 1, device="cpu")
 
