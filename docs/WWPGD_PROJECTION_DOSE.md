@@ -37,12 +37,14 @@ The scheduled-event flag is intentionally not called `is_first_projection_event`
 
 ## First actual application
 
-Actual applications are counted independently for each `layer_name` from the durable CSV prefix:
+Actual applications are counted independently for each `layer_name`:
 
 - `layer_application_index`: one-based application count for an applied row; empty when no dose was applied
 - `is_first_applied_projection`: true exactly when `layer_application_index == 1`
 
-The count is reconstructed from the durable projection-row history before every append. Checkpoint recovery first reconciles the CSV to its committed prefix, so the count remains correct after resume or process restart without adding process-local counters to the optimizer, controller, model, or checkpoint state.
+The projection CSV remains the source of truth. A small hidden sidecar caches only the current per-layer counts together with the CSV byte size and nanosecond modification time. Normal interval-one runs therefore do not rescan the complete projection history after every optimizer step. If the sidecar is absent, malformed, stale, or disagrees with a reconciled/truncated CSV, it is discarded and rebuilt from the durable CSV before the next append.
+
+Checkpoint recovery first reconciles the CSV to its committed prefix. The first-application annotation therefore remains correct after interruption or process restart without adding counters to the optimizer, controller, model, or checkpoint state.
 
 ## Compatibility
 
