@@ -6,6 +6,7 @@ import math
 
 import pytest
 
+import wwgpt.checkpointing as checkpointing
 from wwgpt.checkpointing import append_csv_records, csv_commit, reconcile_csv_artifacts
 
 
@@ -99,6 +100,30 @@ def test_layer_application_index_survives_sequential_appends(tmp_path):
     assert int(rows[2]["layer_application_index"]) == 2
     assert rows[2]["is_first_applied_projection"] == "False"
     assert int(rows[2]["projection_event_number"]) == 3
+
+
+def test_application_count_index_avoids_full_history_rescan(monkeypatch, tmp_path):
+    path = tmp_path / "wwpgd_projection.csv"
+    append_csv_records(path, [_projection_row(event=0, step=10, dose=0.05, changed=True)])
+    index_path = path.with_name(f".{path.name}.application_counts.json")
+    assert index_path.is_file()
+
+    def fail_scan(_path):
+        raise AssertionError("valid sidecar index should avoid a full CSV rescan")
+
+    monkeypatch.setattr(checkpointing, "_scan_projection_application_counts", fail_scan)
+    append_csv_records(path, [_projection_row(event=1, step=20, dose=0.04, changed=True)])
+    assert int(_read_rows(path)[-1]["layer_application_index"]) == 2
+
+
+def test_invalid_sidecar_metadata_rebuilds_from_csv(tmp_path):
+    path = tmp_path / "wwpgd_projection.csv"
+    append_csv_records(path, [_projection_row(event=0, step=10, dose=0.05, changed=True)])
+    index_path = path.with_name(f".{path.name}.application_counts.json")
+    index_path.write_text('{"schema_version": "broken", "counts": {}}')
+
+    append_csv_records(path, [_projection_row(event=1, step=20, dose=0.04, changed=True)])
+    assert int(_read_rows(path)[-1]["layer_application_index"]) == 2
 
 
 def test_reconciled_uncommitted_suffix_does_not_advance_application_count(tmp_path):
