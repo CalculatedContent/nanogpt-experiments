@@ -76,6 +76,30 @@ def test_target_alpha_rank_exponent_derivation(target_alpha, expected):
     assert target_alpha_to_external_rank_exponent(target_alpha) == expected
 
 
+def test_dual_label_fields_and_projection_rows(monkeypatch):
+    """Projection CSV rows must dual-label density alpha and rank q side-by-side."""
+    from wwgpt.ww import dual_label_fields, apply_external_wwpgd
+
+    fields = dual_label_fields(2.0)
+    assert fields["target_alpha"] == 2.0
+    assert fields["derived_external_rank_exponent"] == 1.0
+    assert fields["external_rank_q"] == 1.0
+    assert "target_alpha - 1" in str(fields["derivation_formula"])
+
+    fields3 = dual_label_fields(3.0)
+    assert fields3["external_rank_q"] == pytest.approx(0.5)
+
+    calls = []
+    install_fake_ww_pgd(monkeypatch, calls)
+    rows = apply_external_wwpgd(tiny_model(), actual_step=1, event_index=1)
+    assert rows, "expected at least one projection row"
+    for row in rows:
+        assert row["target_alpha"] == 2.0
+        assert row["derived_external_rank_exponent"] == 1.0
+        assert row["external_rank_q"] == 1.0
+        assert row["derivation_formula"] == "1 / (target_alpha - 1)"
+
+
 @pytest.mark.parametrize("target_alpha", [1.0, 0.0, -1.0, float("nan"), float("inf")])
 def test_invalid_target_alpha_is_rejected(target_alpha):
     from wwgpt.config import validate_wwpgd_config
