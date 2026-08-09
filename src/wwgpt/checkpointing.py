@@ -151,18 +151,24 @@ def _load_projection_application_counts(path: Path) -> dict[str, int]:
     index_path = _projection_application_index_path(path)
     try:
         index = json.loads(index_path.read_text())
-    except (OSError, TypeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, TypeError, json.JSONDecodeError):
         index = None
     if isinstance(index, dict):
         counts = _valid_projection_application_counts(index.get("counts"))
-        if (
-            int(index.get("schema_version", -1))
-            == WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION
-            and int(index.get("source_size_bytes", -1)) == stat.st_size
-            and int(index.get("source_mtime_ns", -1)) == stat.st_mtime_ns
-            and counts is not None
-        ):
-            return counts
+        try:
+            schema_version = int(index.get("schema_version", -1))
+            source_size_bytes = int(index.get("source_size_bytes", -1))
+            source_mtime_ns = int(index.get("source_mtime_ns", -1))
+        except (TypeError, ValueError, OverflowError):
+            pass
+        else:
+            if (
+                schema_version == WWPGD_PROJECTION_APPLICATION_INDEX_SCHEMA_VERSION
+                and source_size_bytes == stat.st_size
+                and source_mtime_ns == stat.st_mtime_ns
+                and counts is not None
+            ):
+                return counts
     return _scan_projection_application_counts(path)
 
 
