@@ -9,3 +9,7 @@ Earlier strength-scan code generated `wwpgd_projection_spectral.csv` with fabric
 ## Spectral target ownership
 
 `target_alpha` is the only researcher-facing spectral target and must be finite and greater than one. The external WW-PGD dependency's private rank exponent is derived only inside the adapter as `1 / (target_alpha - 1)`; it is not a configurable, scannable, or tunable research parameter. Manifests record the target, derived value, formula, and external parameter name without exposing a second target control.
+
+## Related vocabulary
+
+Density α vs derived rank exponent (μ_rank), and why `q` is reserved for MP aspect ratio: [`SPECTRAL_DUAL_LABEL.md`](SPECTRAL_DUAL_LABEL.md).
