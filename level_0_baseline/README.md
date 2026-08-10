@@ -1,5 +1,7 @@
 # Level Zero nanoGPT optimizer baselines
 
+> **Naming:** This package is **not** the same object as schema/runner `wwgpt --level 0` (1×1×64 pilots under `configs/level0_*.yaml`). See the root [README § Level naming](../README.md#level-naming-read-this-once).
+
 This folder contains the canonical **baseline-only Level Zero experiment** for
 `CalculatedContent/nanogpt-experiments`.
 
