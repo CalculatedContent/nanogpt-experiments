@@ -29,9 +29,10 @@ in the PR body.
 
 ## Naming: Level 0 is overloaded
 
-Schema/runner Levels 0–2 (`wwgpt --level N`) are **not** the same as the
-`level_0_baseline/` / `level_0_wwpgd/` packages. See the root README section
-**Level naming**.
+Schema/runner Levels 0–2 (`wwgpt --level N`, `configs/levelN_*.yaml`) are **not**
+the same as the `level_0_baseline/` / `level_0_wwpgd/` packages. Schema Level 0 is
+typically **1 layer · 1 head · width 64**; the baseline packages use **4 layers ·
+4 heads · width 128**. Prefer the package READMEs when working under those folders.
 
 ## PR expectations
 
