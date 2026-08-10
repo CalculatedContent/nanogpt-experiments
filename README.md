@@ -103,6 +103,9 @@ The nanoGPT adapter targets the public `ww_pgd` API. When the installed package 
 
 ## Public experiment interface
 
+Vocabulary for density α vs derived rank exponent (μ_rank): [`docs/SPECTRAL_DUAL_LABEL.md`](docs/SPECTRAL_DUAL_LABEL.md).
+
+
 `wwgpt prepare-data`, `wwgpt run-multiseed`, and `wwgpt run-canonical-trials` accept `--dry-run` and print the resolved configuration, trial and arm counts, seeds, token budget, estimated optimizer steps, and output location. `run-strength-scan` is retired and is not a CLI command: its nominal strength was not a scientifically defined projector parameter. It has not been replaced by a `q` scan or target-alpha scan.
 
 The only researcher-facing spectral target is `wwpgd.target_alpha` (default `2.0`). It must be finite and greater than one. At the external adapter boundary the dependency's required rank exponent is derived as `1 / (target_alpha - 1)`; it is not independently configurable or scannable. Functional controller-dose controls, including apply/measurement intervals, start step, maximum per-step gain, and relative-Frobenius trust-region caps, can be set on ordinary explicit ablation runs. There is currently no public dose-scan runner.
