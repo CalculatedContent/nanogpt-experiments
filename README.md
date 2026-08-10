@@ -2,6 +2,20 @@
 
 This repository runs append-only, paired nanoGPT experiments comparing base optimizers with and without the repository's WW-PGD extension. It provides experiment infrastructure and descriptive analysis; it does **not** ship a scaling-law fit, acceleration conclusion, statistical-significance test, or alpha-generalization result.
 
+## Level naming (read this once)
+
+Three different “Level 0” objects appear in this repository. They are **not** interchangeable.
+
+| Name | What it is | Typical size / entry |
+|---|---|---|
+| **Schema / runner Levels 0–2** | `wwgpt` pilot ladder (`--level N`, `configs/level{N}_*.yaml`, `run_one_pair.sh` / multiseed) | **Level 0:** 1 layer · 1 head · width 64 (see config). Levels 1–2 scale up. |
+| **`level_0_baseline/`** | Separate **baseline-only** optimizer comparison package (SGD / AdamW / Muon) | **4 layers · 4 heads · width 128** · own scripts/notebooks — see [`level_0_baseline/README.md`](level_0_baseline/README.md) |
+| **`level_0_wwpgd/`** | Sibling of the baseline package: same 4L/128 protocol **plus** stock WW-PGD event projection | See [`level_0_wwpgd/README.md`](level_0_wwpgd/README.md) |
+
+There are also `level_1_baseline/` and `level_1_wwpgd/` packages for the next baseline rung. Those names still mean **package folders**, not `wwgpt --level 1`.
+
+**Rule of thumb:** if the path is a top-level `level_*_baseline` / `level_*_wwpgd` directory, it is the **package** experiment. If the command is `wwgpt … --level N` or `configs/levelN_*.yaml`, it is the **schema** pilot ladder.
+
 ## Quick start on a local MacBook
 
 Run the repository from its checked-out `main` branch and keep the prepared corpus and results under `/tmp`:

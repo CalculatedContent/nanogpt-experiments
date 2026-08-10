@@ -1,5 +1,7 @@
 # Isolated Level 0 nanoGPT + WWPGD
 
+> **Naming:** This package pairs with `level_0_baseline` (4L/128). It is **not** schema/runner `wwgpt --level 0`. See the root [README § Level naming](../README.md#level-naming-read-this-once).
+
 This sibling experiment deliberately reuses the exact FineWeb-Edu GPT-2-BPE model, AdamW optimizer, minibatch stream, learning-rate schedule, evaluation probes, checkpoint policy, and WeightWatcher cadence from `level_0_baseline`. The only scientific intervention is a fresh stock WWPGD event projection immediately after each successful AdamW update.
 
 ## Frozen paired protocol
