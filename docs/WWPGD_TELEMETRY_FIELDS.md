@@ -5,7 +5,8 @@ event fields without inventing missing quantities. It does not change training
 code or defaults.
 
 For density α vs derived rank exponent vocabulary, see
-[`SPECTRAL_DUAL_LABEL.md`](SPECTRAL_DUAL_LABEL.md).
+[`SPECTRAL_DUAL_LABEL.md`](SPECTRAL_DUAL_LABEL.md)
+(μ_rank vs μ_entry vs MP aspect $q$ — never overload bare `q`).
 
 ---
 
@@ -66,7 +67,9 @@ design** as the intended SoT and mark any not-yet-on-main columns as pending.
 3. **Per-layer first apply** is not the same as global event zero.  
 4. **Pin provenance** has three facts: what is installed, what was requested, whether
    runtime verification passed.  
-5. **No efficacy claim** follows from a field being present.
+5. **No efficacy claim** follows from a field being present.  
+6. **Dual-label:** density `target_alpha` and `derived_external_rank_exponent`
+   are different columns; do not rename the rank exponent to bare `q` (MP aspect).
 
 ---
 
