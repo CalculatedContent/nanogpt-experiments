@@ -4,12 +4,39 @@ Thanks for interest in improving this repository. This project prioritizes
 **reproducible experiment infrastructure** and honest reporting over positive
 efficacy narratives.
 
-## Workflow
+This guide is for people sending **pull requests**. How you get a branch onto
+GitHub depends on your access (see below). The **integrity / PR expectations**
+apply to external and write-access contributors alike; maintainers may use a
+shorter internal path for trivial fixes.
 
-1. Fork `CalculatedContent/nanogpt-experiments` (or push to your existing fork).
-2. Branch from current **`main`** (not from stale feature branches).
-3. Open a pull request against `CalculatedContent/nanogpt-experiments` `main`.
-4. Prefer **small, single-theme** PRs (docs, logging, or one behavior change).
+## Who you are (access paths)
+
+| Role | Typical access | How you open a PR |
+|---|---|---|
+| **External contributor** | No push access to this repo | **Fork** the repo under your account, push a branch to *your* fork, open a PR into `CalculatedContent/nanogpt-experiments` `main` |
+| **Collaborator / write access** | Can push branches to this repo | Create a branch on **this** repo from current `main`, push it here, open a PR into `main` (no personal fork required) |
+| **Maintainer** | Admin / merge rights | Same as write access for reviewable changes; direct commits to `main` only for the project’s usual maintainer practice (prefer PRs for non-trivial work) |
+
+**Fork is not a social rank.** It is only the usual GitHub path when you cannot
+push to this repository. If you already have write access, do not fork just to
+satisfy a ritual.
+
+### External contributor (no write access)
+
+1. Fork `CalculatedContent/nanogpt-experiments`.
+2. Branch from current upstream **`main`** (not from stale feature branches).
+3. Push the branch to **your fork**.
+4. Open a PR against `CalculatedContent/nanogpt-experiments` `main`.
+
+### Collaborator with write access
+
+1. Clone this repository (or add it as `origin`).
+2. Branch from current **`main`**.
+3. Push the branch to **this** repo.
+4. Open a PR against `main`.
+
+Prefer **small, single-theme** PRs (docs, logging, or one behavior change) in
+either path.
 
 ## Before you open a PR
 
@@ -35,6 +62,9 @@ typically **1 layer · 1 head · width 64**; the baseline packages use **4 layer
 4 heads · width 128**. Prefer the package READMEs when working under those folders.
 
 ## PR expectations
+
+These expectations apply to **any** PR author (external or write-access), unless
+a maintainer explicitly says otherwise for a given change.
 
 | Do | Don't |
 |---|---|
