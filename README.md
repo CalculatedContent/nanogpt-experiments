@@ -97,6 +97,9 @@ These commands make the repository capable of testing whether WW-PGD improves ge
 
 ## WW-PGD installation policy
 
+How to read projection / dose / event columns: [`docs/WWPGD_TELEMETRY_FIELDS.md`](docs/WWPGD_TELEMETRY_FIELDS.md).
+
+
 `python -m pip install -e .` installs WW-PGD through pip from the current default branch of `CalculatedContent/WW_PGD`. The dependency has no commit, tag, or branch pin. Each run records the package version and, when pip supplies PEP 610 VCS provenance, the commit that happened to be installed. That recorded commit is runtime metadata, not an installation requirement.
 
 The nanoGPT adapter targets the public `ww_pgd` API. When the installed package exposes a native `diagnostic_logs` sink, those internal rows are retained. When it exposes only its established `ww_logs` output, the repository installs a compatibility wrapper that preserves normal WW-PGD execution and records the available pre-projection WeightWatcher fields plus adapter-observed candidate movement. Exact internal midpoint, Cayley-ratio, and TraceLog-retraction fields remain explicitly unsupported in that case; they are never invented and their absence does not prevent the experiment from running.
