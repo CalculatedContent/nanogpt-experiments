@@ -2,6 +2,8 @@
 
 This repository runs append-only, paired nanoGPT experiments comparing base optimizers with and without the repository's WW-PGD extension. It provides experiment infrastructure and descriptive analysis; it does **not** ship a scaling-law fit, acceleration conclusion, statistical-significance test, or alpha-generalization result.
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for fork/PR workflow, smoke expectations, and no-claim norms.
+
 ## Quick start on a local MacBook
 
 Run the repository from its checked-out `main` branch and keep the prepared corpus and results under `/tmp`:
